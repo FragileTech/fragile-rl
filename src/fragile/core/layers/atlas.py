@@ -6,9 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-import numpy as np
-
-from .gauge import exp_map_zero, hyperbolic_distance, log_map_zero, mobius_add
+from .gauge import exp_map_zero, log_map_zero, mobius_add
 from .primitives import IsotropicBlock, NormGatedGELU, SpectralLinear
 from .topology import FactorizedJumpOperator, InvariantChartClassifier
 from .ugn import SoftEquivariantLayer
@@ -27,8 +25,8 @@ def _fibonacci_sphere(n: int) -> torch.Tensor:
     """
     golden = (1 + math.sqrt(5)) / 2
     indices = torch.arange(n, dtype=torch.float32)
-    theta = 2 * math.pi * indices / golden          # azimuth
-    phi = torch.acos(1 - 2 * (indices + 0.5) / n)   # polar
+    theta = 2 * math.pi * indices / golden  # azimuth
+    phi = torch.acos(1 - 2 * (indices + 0.5) / n)  # polar
     x = torch.sin(phi) * torch.cos(theta)
     y = torch.sin(phi) * torch.sin(theta)
     z = torch.cos(phi)
@@ -49,18 +47,19 @@ def _spread_directions(n: int, dim: int) -> torch.Tensor:
     pts = torch.nn.functional.normalize(pts, dim=-1)
     for _ in range(20):
         # Compute pairwise cosine similarity
-        sim = pts @ pts.t()                  # [n, n]
-        sim.fill_diagonal_(-1e9)             # ignore self
+        sim = pts @ pts.t()  # [n, n]
+        sim.fill_diagonal_(-1e9)  # ignore self
         # Push each point away from its nearest neighbor
-        nearest = sim.argmax(dim=1)          # [n]
-        neighbors = pts[nearest]             # [n, dim]
-        pts = pts - 0.3 * neighbors          # repel
+        nearest = sim.argmax(dim=1)  # [n]
+        neighbors = pts[nearest]  # [n, dim]
+        pts = pts - 0.3 * neighbors  # repel
         pts = torch.nn.functional.normalize(pts, dim=-1)
     return pts
 
 
-def _spread_codebook(num_charts: int, codes_per_chart: int, dim: int,
-                     radius: float = 0.3) -> torch.Tensor:
+def _spread_codebook(
+    num_charts: int, codes_per_chart: int, dim: int, radius: float = 0.3
+) -> torch.Tensor:
     """Initialize codebook entries spread around the local origin.
 
     Each chart gets ``codes_per_chart`` codes arranged as quasi-uniform
@@ -388,7 +387,9 @@ class AttentiveAtlasEncoder(nn.Module):
         # Geometric latent = chart center + macro code + nuisance (Möbius sums).
         delta_to_code = log_map_zero(mobius_add(-v_local, z_q_blended))
         z_q_st = mobius_add(v_local, exp_map_zero(delta_to_code.detach()))
-        z_geo = _project_to_ball(mobius_add(c_bar, mobius_add(z_q_st, exp_map_zero(z_n_tan))))  # [B, D]
+        z_geo = _project_to_ball(
+            mobius_add(c_bar, mobius_add(z_q_st, exp_map_zero(z_n_tan)))
+        )  # [B, D]
 
         return (
             K_chart,
@@ -427,8 +428,6 @@ class TopologicalDecoder(nn.Module):
         self.chart_bias = nn.Parameter(torch.zeros(num_charts, hidden_dim))
 
         self.latent_router = nn.Linear(latent_dim, num_charts)
-        self.tex_residual = nn.Linear(latent_dim, output_dim)
-        self.tex_residual_scale = nn.Parameter(torch.tensor(0.1))
         self.renderer = nn.Sequential(
             nn.GELU(),
             nn.Linear(hidden_dim, hidden_dim),
@@ -440,7 +439,6 @@ class TopologicalDecoder(nn.Module):
     def forward(
         self,
         z_geo: torch.Tensor,
-        z_tex: torch.Tensor | None = None,
         chart_index: torch.Tensor | None = None,
         router_weights: torch.Tensor | None = None,
         hard_routing: bool = False,
@@ -450,7 +448,6 @@ class TopologicalDecoder(nn.Module):
 
         Args:
             z_geo: [B, D] geometric latent
-            z_tex: [B, D] optional texture residual (added to output)
             chart_index: [B] optional chart ids
 
         Returns:
@@ -473,13 +470,12 @@ class TopologicalDecoder(nn.Module):
             router_weights = _routing_weights(logits, hard_routing, hard_routing_tau)  # [B, N_c]
 
         # Chart-specific linear maps reconstruct local observations.
-        h_stack = torch.einsum("bl,chl->bch", z_geo, self.chart_weight) + self.chart_bias.unsqueeze(0)  # [B, N_c, H]
+        h_stack = torch.einsum(
+            "bl,chl->bch", z_geo, self.chart_weight
+        ) + self.chart_bias.unsqueeze(0)  # [B, N_c, H]
         h_global = (h_stack * router_weights.unsqueeze(-1)).sum(dim=1)  # [B, H]
 
         x_hat = self.renderer(h_global) + self.render_skip(h_global)  # [B, D_out]
-        # z_tex residual injection disabled: at inference the WM produces
-        # z_geo with no z_tex available, so using it here creates a
-        # train/test mismatch.  Layers kept for checkpoint compatibility.
         return x_hat, router_weights
 
 
@@ -560,7 +556,7 @@ class TopoEncoder(nn.Module):
             K_chart,
             _K_code,
             z_n,
-            z_tex,
+            _z_tex,
             enc_router_weights,
             z_geo,
             vq_loss,
@@ -578,7 +574,6 @@ class TopoEncoder(nn.Module):
         router_override = enc_router_weights if use_hard_routing else None
         x_recon, dec_router_weights = self.decoder(
             z_geo,
-            z_tex,
             chart_index=None,
             router_weights=router_override,
             hard_routing=use_hard_routing,
@@ -926,7 +921,10 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
             from .vision import ConvFeatureExtractor
 
             self.feature_extractor = ConvFeatureExtractor(
-                img_channels, hidden_dim, img_size, conv_channels,
+                img_channels,
+                hidden_dim,
+                img_size,
+                conv_channels,
             )
         else:
             self.feature_extractor = nn.Sequential(
@@ -962,9 +960,7 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
         # Quasi-uniform chart centers: Fibonacci sphere (3-D) or repulsion
         # init so every chart starts with a distinct, well-separated catchment
         # region — prevents softmax winner-take-all collapse at epoch 0.
-        self.chart_centers = nn.Parameter(
-            _spread_directions(num_charts, latent_dim) * 0.5
-        )
+        self.chart_centers = nn.Parameter(_spread_directions(num_charts, latent_dim) * 0.5)
 
         # Spread codebook codes around the local origin of each chart so that
         # VQ does not instantly collapse to a single nearest-neighbor.
@@ -1085,7 +1081,7 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
         if use_soft_equiv:
             dist = self._apply_soft_equiv_metric(diff_tan)  # [B, N_c, K]
         else:
-            dist = (diff_tan ** 2).sum(dim=-1)  # [B, N_c, K]
+            dist = (diff_tan**2).sum(dim=-1)  # [B, N_c, K]
 
         indices = torch.argmin(dist, dim=-1)  # [B, N_c]
 
@@ -1104,9 +1100,9 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
         w = router_weights.unsqueeze(-1).detach()  # [B, N_c, 1]
         v_bc = v_local.unsqueeze(1)  # [B, 1, D]
         delta_commit = log_map_zero(mobius_add(-z_q_all.detach(), v_bc))
-        commitment = (delta_commit ** 2 * w).mean(dim=(0, 2)).sum()
+        commitment = (delta_commit**2 * w).mean(dim=(0, 2)).sum()
         delta_codebook = log_map_zero(mobius_add(-v_bc.detach(), z_q_all))
-        codebook_loss_val = (delta_codebook ** 2 * w).mean(dim=(0, 2)).sum()
+        codebook_loss_val = (delta_codebook**2 * w).mean(dim=(0, 2)).sum()
         vq_loss = codebook_loss_weight * codebook_loss_val + commitment_beta * commitment
 
         K_chart = torch.argmax(router_weights, dim=1)  # [B]
@@ -1128,10 +1124,15 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
             indices_dyn: [B, N_c] nearest dynamics code per chart.
             vq_loss_dyn: scalar VQ loss for dynamics codebook.
         """
-        assert self.codebook_dyn is not None, "dynamics codebook not initialized (dyn_codes_per_chart=0)"
+        assert self.codebook_dyn is not None, (
+            "dynamics codebook not initialized (dyn_codes_per_chart=0)"
+        )
         return self._hyperbolic_vq(
-            v_local, self.codebook_dyn, router_weights,
-            self._dyn_commitment_beta, self._dyn_codebook_loss_weight,
+            v_local,
+            self.codebook_dyn,
+            router_weights,
+            self._dyn_commitment_beta,
+            self._dyn_codebook_loss_weight,
             use_soft_equiv=False,
         )[:4]
 
@@ -1178,9 +1179,7 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
             centroids = _project_to_ball(dirs * target_norms)
         self.chart_centers.copy_(centroids)
 
-        counts = torch.bincount(
-            torch.from_numpy(km.labels_), minlength=self.num_charts
-        )
+        counts = torch.bincount(torch.from_numpy(km.labels_), minlength=self.num_charts)
         print(f"  K-means warm-start: {len(vs)} points → {self.num_charts} charts")
         print(f"  Cluster sizes: {counts.tolist()}")
         if radius_floor > 0:
@@ -1247,8 +1246,11 @@ class PrimitiveAttentiveAtlasEncoder(nn.Module):
 
         # Per-chart codebook lookup via shared VQ helper.
         z_q_blended, K_code, indices_stack, vq_loss, z_q_all = self._hyperbolic_vq(
-            v_local, self.codebook, router_weights,
-            self._commitment_beta, self._codebook_loss_weight,
+            v_local,
+            self.codebook,
+            router_weights,
+            self._commitment_beta,
+            self._codebook_loss_weight,
             use_soft_equiv=True,
         )
 
@@ -1333,10 +1335,6 @@ class PrimitiveTopologicalDecoder(nn.Module):
         conv_channels: int = 0,
         film_conditioning: bool = False,
         conformal_freq_gating: bool = False,
-        texture_flow: bool = False,
-        texture_flow_layers: int = 4,
-        texture_flow_hidden: int = 64,
-        texture_flow_clamp: float = 5.0,
     ) -> None:
         super().__init__()
         self.num_charts = num_charts
@@ -1377,7 +1375,6 @@ class PrimitiveTopologicalDecoder(nn.Module):
             self.latent_router = None
         else:
             self.latent_router = SpectralLinear(latent_dim, num_charts, bias=True)
-        self.tex_residual_scale = nn.Parameter(torch.tensor(0.1))
 
         # Conformal frequency gating (conv mode only)
         self.conformal_freq_gating = conformal_freq_gating and conv_backbone
@@ -1389,12 +1386,13 @@ class PrimitiveTopologicalDecoder(nn.Module):
 
             film_num_charts = num_charts if film_conditioning else 0
             self.renderer = ConvImageDecoder(
-                hidden_dim, img_channels, img_size, conv_channels,
+                hidden_dim,
+                img_channels,
+                img_size,
+                conv_channels,
                 film_num_charts=film_num_charts,
             )
             self.render_skip = None
-            # Texture residual maps to hidden_dim (added before conv decoder)
-            self.tex_residual = SpectralLinear(latent_dim, hidden_dim, bias=True)
         else:
             self.render_fc1 = SpectralLinear(hidden_dim, hidden_dim, bias=True)
             self.render_act1 = NormGatedGELU(bundle_size=bundle_size, n_bundles=n_bundles)
@@ -1403,7 +1401,6 @@ class PrimitiveTopologicalDecoder(nn.Module):
             self.render_out = SpectralLinear(hidden_dim, output_dim, bias=True)
             self.renderer = None  # signals FC-explicit path in forward
             self.render_skip = SpectralLinear(hidden_dim, output_dim, bias=True)
-            self.tex_residual = SpectralLinear(latent_dim, output_dim, bias=True)
             if film_conditioning:
                 self.film1 = _ChartFiLM1d(num_charts, hidden_dim)
                 self.film2 = _ChartFiLM1d(num_charts, hidden_dim)
@@ -1411,24 +1408,9 @@ class PrimitiveTopologicalDecoder(nn.Module):
                 self.film1 = None
                 self.film2 = None
 
-        # Conditional texture flow
-        if texture_flow:
-            from .vision import ConditionalTextureFlow
-
-            self.texture_flow: ConditionalTextureFlow | None = ConditionalTextureFlow(
-                tex_dim=latent_dim,
-                geo_dim=latent_dim,
-                hidden_dim=texture_flow_hidden,
-                n_layers=texture_flow_layers,
-                clamp=texture_flow_clamp,
-            )
-        else:
-            self.texture_flow = None
-
     def forward(
         self,
         z_geo: torch.Tensor,
-        z_tex: torch.Tensor | None = None,
         chart_index: torch.Tensor | None = None,
         router_weights: torch.Tensor | None = None,
         hard_routing: bool = False,
@@ -1439,7 +1421,7 @@ class PrimitiveTopologicalDecoder(nn.Module):
         Returns:
             x_hat: [B, D_out] reconstruction
             router_weights: [B, N_c] routing weights
-            aux_losses: dict of auxiliary losses (e.g. flow_loss)
+            aux_losses: dict of auxiliary losses
         """
         aux_losses: dict[str, torch.Tensor] = {}
 
@@ -1493,9 +1475,6 @@ class PrimitiveTopologicalDecoder(nn.Module):
         if self.renderer is not None:
             # Conv mode
             h = h_global
-            # z_tex residual injection disabled: at inference the WM produces
-            # z_geo with no z_tex available, creating a train/test mismatch.
-            # Layers kept for checkpoint compatibility.
             need_spatial = self.conformal_freq_gating
             x_hat = self.renderer(
                 h,
@@ -1518,11 +1497,6 @@ class PrimitiveTopologicalDecoder(nn.Module):
                 h = self.film2(h, router_weights)
             h = self.render_act2(h)
             x_hat = self.render_out(h) + self.render_skip(h_global)
-            # z_tex residual injection disabled (see conv mode comment above).
-
-        if self.texture_flow is not None and z_tex is not None:
-            _, log_det = self.texture_flow.forward(z_tex, z_geo)
-            aux_losses["flow_loss"] = -log_det.mean()
 
         return x_hat, router_weights, aux_losses
 
@@ -1558,10 +1532,6 @@ class TopoEncoderPrimitives(nn.Module):
         conv_channels: int = 0,
         film_conditioning: bool = False,
         conformal_freq_gating: bool = False,
-        texture_flow: bool = False,
-        texture_flow_layers: int = 4,
-        texture_flow_hidden: int = 64,
-        texture_flow_clamp: float = 5.0,
         commitment_beta: float = 0.25,
         codebook_loss_weight: float = 1.0,
         dyn_codes_per_chart: int = 0,
@@ -1621,10 +1591,6 @@ class TopoEncoderPrimitives(nn.Module):
             conv_channels=conv_channels,
             film_conditioning=film_conditioning,
             conformal_freq_gating=conformal_freq_gating,
-            texture_flow=texture_flow,
-            texture_flow_layers=texture_flow_layers,
-            texture_flow_hidden=texture_flow_hidden,
-            texture_flow_clamp=texture_flow_clamp,
         )
 
     def forward(
@@ -1647,7 +1613,7 @@ class TopoEncoderPrimitives(nn.Module):
             K_chart,
             _K_code,
             z_n,
-            z_tex,
+            _z_tex,
             enc_router_weights,
             z_geo,
             vq_loss,
@@ -1665,14 +1631,23 @@ class TopoEncoderPrimitives(nn.Module):
         router_override = enc_router_weights if use_hard_routing else None
         x_recon, dec_router_weights, aux_losses = self.decoder(
             z_geo,
-            None,  # z_tex not used by decoder (train/test mismatch)
             chart_index=None,
             router_weights=router_override,
             hard_routing=use_hard_routing,
             hard_routing_tau=hard_routing_tau,
         )
 
-        return x_recon, vq_loss, enc_router_weights, dec_router_weights, K_chart, z_geo, z_n, c_bar, aux_losses
+        return (
+            x_recon,
+            vq_loss,
+            enc_router_weights,
+            dec_router_weights,
+            K_chart,
+            z_geo,
+            z_n,
+            c_bar,
+            aux_losses,
+        )
 
     def compute_consistency_loss(
         self, enc_weights: torch.Tensor, dec_weights: torch.Tensor, eps: float = 1e-6
@@ -1687,7 +1662,9 @@ class TopoEncoderPrimitives(nn.Module):
         entropy = -(probs * torch.log(probs)).sum()
         return math.exp(entropy.item())
 
-    def warmstart_chart_centers(self, dataloader, device, max_batches=10, radius_floor: float = 0.0):
+    def warmstart_chart_centers(
+        self, dataloader, device, max_batches=10, radius_floor: float = 0.0
+    ):
         """Delegate to inner encoder's warmstart_chart_centers."""
         self.encoder.warmstart_chart_centers(
             dataloader,
@@ -2197,7 +2174,6 @@ class HierarchicalAtlasStack(nn.Module):
             router_override = enc_router_weights if use_hard_routing else None
             x_recon, dec_router_weights, _aux = self.decoder_levels[idx](
                 z_geo,
-                None,  # z_tex not used by decoder
                 chart_index=None,
                 router_weights=router_override,
                 hard_routing=use_hard_routing,

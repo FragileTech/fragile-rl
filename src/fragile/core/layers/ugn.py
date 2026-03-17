@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from .gauge import CovariantAttention, GeodesicConfig
+from .attention import CovariantAttention, GeodesicConfig
 from .primitives import SpectralLinear
 
 
@@ -652,6 +652,7 @@ def log_sparsity_diagnostics(
 
                 def logger(data):
                     return wandb.log(data, step=step)
+
         except ModuleNotFoundError:
             pass
 

@@ -13,7 +13,12 @@ from torch import nn, Tensor
 import torch.nn.functional as F
 
 from .core.layers import FactorizedJumpOperator
-from .core.layers.gauge import exp_map_zero, hyperbolic_distance, log_map_zero, mobius_add  # noqa: F401
+from .core.layers.gauge import (  # noqa: F401
+    exp_map_zero,
+    hyperbolic_distance,
+    log_map_zero,
+    mobius_add,
+)
 
 
 # =============================================================================
@@ -234,9 +239,7 @@ def compute_hard_routing_nll(router_scores: Tensor) -> Tensor:
     return F.cross_entropy(router_scores, hard_labels)
 
 
-def compute_diversity_loss(
-    router_weights: Tensor, num_charts: int, eps: float = 1e-6
-) -> Tensor:
+def compute_diversity_loss(router_weights: Tensor, num_charts: int, eps: float = 1e-6) -> Tensor:
     """Prevent chart collapse by maximizing entropy of mean usage.
 
     loss_diversity = log(K) - H(K)
@@ -322,10 +325,16 @@ def compute_sinkhorn_balanced_chart_loss(
         }
 
     log_r = torch.full(
-        (batch_size,), -math.log(batch_size), device=router_scores.device, dtype=router_scores.dtype,
+        (batch_size,),
+        -math.log(batch_size),
+        device=router_scores.device,
+        dtype=router_scores.dtype,
     )
     log_c = torch.full(
-        (num_charts,), -math.log(num_charts), device=router_scores.device, dtype=router_scores.dtype,
+        (num_charts,),
+        -math.log(num_charts),
+        device=router_scores.device,
+        dtype=router_scores.dtype,
     )
     log_kernel = router_scores / max(float(epsilon), 1e-6)
 
@@ -478,7 +487,7 @@ def compute_code_usage_band_loss(
     hard/ST encoder router. Code occupancy is formed from a straight-through code
     assignment computed from the same distances used by the VQ path.
     """
-    num_charts, num_codes, _dim = codebook.shape
+    _num_charts, num_codes, _dim = codebook.shape
     if num_codes < 2:
         zero = torch.tensor(0.0, device=v_local.device)
         return zero, {
@@ -495,7 +504,9 @@ def compute_code_usage_band_loss(
     dist_sq = hyperbolic_distance(v_exp, cb_exp) ** 2  # [B, N_c, K]
 
     soft_assign = F.softmax(-dist_sq / max(temperature, 1e-6), dim=-1)
-    hard_idx = hard_code_indices if hard_code_indices is not None else torch.argmax(soft_assign, dim=-1)
+    hard_idx = (
+        hard_code_indices if hard_code_indices is not None else torch.argmax(soft_assign, dim=-1)
+    )
     hard_assign = F.one_hot(hard_idx, num_classes=num_codes).to(soft_assign.dtype)
     assign_st = hard_assign + soft_assign - soft_assign.detach()
 
@@ -794,22 +805,22 @@ def get_loss_schedule(
 
 
 def compute_vq_geodesic_loss(
-    z_q_all: Tensor,       # [B, N_c, D] quantized codes
-    v_local: Tensor,        # [B, D] encoder output
+    z_q_all: Tensor,  # [B, N_c, D] quantized codes
+    v_local: Tensor,  # [B, D] encoder output
     router_weights: Tensor,  # [B, N_c] soft routing
     commitment_cost: float = 0.25,
 ) -> Tensor:
     """VQ loss using geodesic distance d_H instead of tangent-space approx."""
-    z_q_proj = _project_to_ball(z_q_all)
+    _project_to_ball(z_q_all)
     v_proj = _project_to_ball(v_local.unsqueeze(1).expand_as(z_q_all))
 
     # Codebook loss: codes -> encoder output
     d_codebook = hyperbolic_distance(z_q_all, v_proj.detach())  # [B, N_c]
-    codebook_loss = (d_codebook ** 2 * router_weights.detach()).mean(0).sum()
+    codebook_loss = (d_codebook**2 * router_weights.detach()).mean(0).sum()
 
     # Commitment loss: encoder -> codes (STE)
-    d_commit = hyperbolic_distance(z_q_all.detach(), v_proj)    # [B, N_c]
-    commitment = (d_commit ** 2 * router_weights.detach()).mean(0).sum()
+    d_commit = hyperbolic_distance(z_q_all.detach(), v_proj)  # [B, N_c]
+    commitment = (d_commit**2 * router_weights.detach()).mean(0).sum()
 
     return codebook_loss + commitment_cost * commitment
 
@@ -834,16 +845,16 @@ def compute_hyperbolic_uniformity_loss(z_geo: Tensor, eps: float = 1e-6) -> Tens
         return torch.tensor(0.0, device=z.device)
 
     # Conformal temperature per point
-    r2 = (z ** 2).sum(dim=-1)  # [B]
+    r2 = (z**2).sum(dim=-1)  # [B]
     tau = math.sqrt(D) * (1.0 - r2) / 2.0  # [B]
     tau = tau.clamp(min=eps)
 
     # Pairwise geodesic distances
     z_i = z.unsqueeze(1).expand(B, B, D)  # [B, B, D]
     z_j = z.unsqueeze(0).expand(B, B, D)  # [B, B, D]
-    d_ij = hyperbolic_distance(
-        z_i.reshape(B * B, D), z_j.reshape(B * B, D)
-    ).reshape(B, B)  # [B, B]
+    d_ij = hyperbolic_distance(z_i.reshape(B * B, D), z_j.reshape(B * B, D)).reshape(
+        B, B
+    )  # [B, B]
 
     # Mask diagonal
     mask = ~torch.eye(B, dtype=torch.bool, device=z.device)
@@ -854,11 +865,9 @@ def compute_hyperbolic_uniformity_loss(z_geo: Tensor, eps: float = 1e-6) -> Tens
 
     # Log-mean-exp for numerical stability
     max_exp = exponents.max(dim=1, keepdim=True).values
-    loss = (max_exp.squeeze(1) + torch.log(
-        torch.exp(exponents - max_exp).mean(dim=1) + eps
-    )).mean()
-
-    return loss
+    return (
+        max_exp.squeeze(1) + torch.log(torch.exp(exponents - max_exp).mean(dim=1) + eps)
+    ).mean()
 
 
 # =============================================================================
@@ -1272,7 +1281,7 @@ def compute_code_collapse_penalty(
     Unlike per_chart_code_entropy (which uses bincount -> zero gradients),
     this stays differentiable through both the encoder outputs and the codebook.
     """
-    N_c, K, _D = codebook.shape
+    _N_c, K, _D = codebook.shape
     if K < 2:
         return torch.tensor(0.0, device=v_local.device)
 
@@ -1306,48 +1315,48 @@ def compute_code_collapse_penalty(
 # =============================================================================
 
 __all__ = [
-    # Helpers
-    "_project_to_ball",
-    "_as_tangent",
     # KEEP losses
     "SupervisedTopologyLoss",
-    "compute_routing_entropy",
-    "compute_router_information_metrics",
-    "compute_router_sharpness_metrics",
-    "compute_router_score_metrics",
-    "compute_router_margin_loss",
-    "compute_hard_routing_nll",
-    "compute_diversity_loss",
-    "compute_chart_usage_band_loss",
-    "compute_sinkhorn_balanced_chart_loss",
-    "compute_codebook_centering_loss",
+    "_as_tangent",
+    # Helpers
+    "_project_to_ball",
     "compute_chart_center_mean_loss",
     "compute_chart_center_radius_loss",
     "compute_chart_center_separation_loss",
-    "compute_residual_scale_loss",
-    "compute_window_loss",
-    "compute_code_usage_band_loss",
+    # Anti-collapse penalties
+    "compute_chart_collapse_penalty",
+    "compute_chart_usage_band_loss",
+    "compute_code_collapse_penalty",
     "compute_code_entropy_loss",
-    "compute_per_chart_code_entropy_loss",
-    "compute_orthogonality_loss",
+    "compute_code_usage_band_loss",
+    "compute_codebook_centering_loss",
+    "compute_codebook_spread_loss",
+    "compute_confidence_calibration_loss",
+    "compute_diversity_loss",
+    "compute_error_quality_targets",
+    "compute_hard_routing_nll",
+    "compute_hyperbolic_contrastive_loss",
+    # NEW losses
+    "compute_hyperbolic_uniformity_loss",
     "compute_jump_consistency_loss",
+    "compute_orthogonality_loss",
+    "compute_per_chart_code_entropy_loss",
+    "compute_radial_calibration_loss",
+    "compute_residual_scale_loss",
+    "compute_router_information_metrics",
+    "compute_router_margin_loss",
+    "compute_router_score_metrics",
+    "compute_router_sharpness_metrics",
+    "compute_routing_confidence",
+    "compute_routing_entropy",
+    "compute_sinkhorn_balanced_chart_loss",
+    "compute_symbol_calibration_loss",
+    "compute_symbol_purity_loss",
+    "compute_v_tangent_barrier_loss",
+    # Modified VQ
+    "compute_vq_geodesic_loss",
+    "compute_window_loss",
     "get_jump_weight_schedule",
     # Schedule
     "get_loss_schedule",
-    # Modified VQ
-    "compute_vq_geodesic_loss",
-    # NEW losses
-    "compute_hyperbolic_uniformity_loss",
-    "compute_hyperbolic_contrastive_loss",
-    "compute_routing_confidence",
-    "compute_error_quality_targets",
-    "compute_radial_calibration_loss",
-    "compute_confidence_calibration_loss",
-    "compute_v_tangent_barrier_loss",
-    "compute_codebook_spread_loss",
-    "compute_symbol_purity_loss",
-    "compute_symbol_calibration_loss",
-    # Anti-collapse penalties
-    "compute_chart_collapse_penalty",
-    "compute_code_collapse_penalty",
 ]

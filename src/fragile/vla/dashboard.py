@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import os
+import pathlib
 import re
 import traceback
 
@@ -26,15 +27,14 @@ import torch
 import torch.nn.functional as F
 
 from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
+from fragile.vla.extract_features import load_feature_cache_metadata
 from fragile.vla.plots import (
     _to_numpy,
     build_latent_scatter,
-    chart_to_label_map,
     plot_chart_usage,
-    plot_latent_2d_slices,
     plot_latent_3d,
 )
-from fragile.vla.extract_features import load_feature_cache_metadata
+
 
 logger = logging.getLogger(__name__)
 
@@ -48,16 +48,22 @@ __all__ = ["create_app"]
 # ---------------------------------------------------------------------------
 
 # p{phase}_epoch_{epoch}.pt  OR  epoch_{epoch}.pt  OR  checkpoint_final.pt
-_CKPT_RE = re.compile(
-    r"(?:p(\d+)_)?(?:epoch_(\d+)|checkpoint_final)\.pt$"
-)
+_CKPT_RE = re.compile(r"(?:p(\d+)_)?(?:epoch_(\d+)|checkpoint_final)\.pt$")
 
 # Keys forwarded to TopoEncoderPrimitives.__init__ from checkpoint args dict
 _ENCODER_INIT_KEYS = {
-    "input_dim", "hidden_dim", "latent_dim", "num_charts", "codes_per_chart",
-    "covariant_attn", "covariant_attn_tensorization", "covariant_attn_rank",
-    "covariant_attn_tau_min", "covariant_attn_denom_min",
-    "covariant_attn_use_transport", "covariant_attn_transport_eps",
+    "input_dim",
+    "hidden_dim",
+    "latent_dim",
+    "num_charts",
+    "codes_per_chart",
+    "covariant_attn",
+    "covariant_attn_tensorization",
+    "covariant_attn_rank",
+    "covariant_attn_tau_min",
+    "covariant_attn_denom_min",
+    "covariant_attn_use_transport",
+    "covariant_attn_transport_eps",
     "conv_backbone",
 }
 
@@ -123,7 +129,8 @@ def load_vla_checkpoint(ckpt_path: str) -> VLALoaded:
     # Encoder state: key may be "model" (unsup / joint) or "encoder" (3-phase train.py)
     enc_state = ckpt.get("model") or ckpt.get("encoder")
     if enc_state is None:
-        raise RuntimeError("Checkpoint has no 'model' or 'encoder' state_dict")
+        msg = "Checkpoint has no 'model' or 'encoder' state_dict"
+        raise RuntimeError(msg)
 
     # Build encoder kwargs from args
     enc_kwargs: dict = {}
@@ -330,8 +337,7 @@ class VLAImageProvider:
             ds = LeRobotDataset(self._dataset_name)
             self._video_root = str(ds.root / "videos")
             self._cameras = [
-                k.replace("observation.images.", "")
-                for k in (ds.meta.camera_keys or [])
+                k.replace("observation.images.", "") for k in (ds.meta.camera_keys or [])
             ]
 
             # Build episode-start-offset table from the parquet metadata
@@ -346,16 +352,15 @@ class VLAImageProvider:
             self._ready = True
             logger.info(
                 "Image provider ready: %d episodes, cameras=%s",
-                len(self._ep_offsets), self._cameras,
+                len(self._ep_offsets),
+                self._cameras,
             )
             return True
         except Exception:
             logger.warning("Could not init image provider: %s", traceback.format_exc())
             return False
 
-    def get_image(
-        self, ep_id: int, timestep: int, camera: str = "top"
-    ) -> np.ndarray | None:
+    def get_image(self, ep_id: int, timestep: int, camera: str = "top") -> np.ndarray | None:
         """Return [H, W, 3] uint8 image or None."""
         if not self._ensure_loaded():
             return None
@@ -372,7 +377,7 @@ class VLAImageProvider:
             video_dir = os.path.join(self._video_root, cam_key, "chunk-000")
             if not os.path.isdir(video_dir):
                 # Fallback: try first available camera
-                for c in (self._cameras or []):
+                for c in self._cameras or []:
                     alt_key = f"observation.images.{c}"
                     alt_dir = os.path.join(self._video_root, alt_key, "chunk-000")
                     if os.path.isdir(alt_dir):
@@ -385,13 +390,13 @@ class VLAImageProvider:
             video_files = [f for f in os.listdir(video_dir) if f.endswith(".mp4")]
             if not video_files:
                 return None
-            video_path = os.path.join(video_dir, sorted(video_files)[0])
+            video_path = os.path.join(video_dir, min(video_files))
 
-            frame = iio.imread(video_path, index=global_idx, plugin="pyav")
-            return frame  # [H, W, 3] uint8
+            return iio.imread(video_path, index=global_idx, plugin="pyav")
         except Exception:
-            logger.debug("Image read failed ep=%d t=%d: %s", ep_id, timestep,
-                         traceback.format_exc())
+            logger.debug(
+                "Image read failed ep=%d t=%d: %s", ep_id, timestep, traceback.format_exc()
+            )
             return None
 
 
@@ -405,9 +410,7 @@ def _tensor_to_png_pane(img_tensor_or_array, width: int = 150):
     from PIL import Image
 
     if isinstance(img_tensor_or_array, torch.Tensor):
-        arr = (
-            img_tensor_or_array.permute(1, 2, 0).numpy() * 255
-        ).clip(0, 255).astype(np.uint8)
+        arr = (img_tensor_or_array.permute(1, 2, 0).numpy() * 255).clip(0, 255).astype(np.uint8)
     else:
         arr = img_tensor_or_array
     pil_img = Image.fromarray(arr)
@@ -526,27 +529,32 @@ def _latent_bar_chart(z_vec: np.ndarray, width: int = 300, height: int = 100):
         "value": z.astype(float),
         "sign": sign,
     }
-    bars = hv.Bars(data, "dim", ["value", "sign"]).opts(
-        color="sign", cmap={"pos": "#4c78a8", "neg": "#e45756"},
-        width=width, height=height, xrotation=90,
+    return hv.Bars(data, "dim", ["value", "sign"]).opts(
+        color="sign",
+        cmap={"pos": "#4c78a8", "neg": "#e45756"},
+        width=width,
+        height=height,
+        xrotation=90,
         xaxis="bare",
         title="Latent vector",
     )
-    return bars
 
 
-def _feature_recon_bar(orig: np.ndarray, recon: np.ndarray, top_k: int = 20,
-                       width: int = 300, height: int = 100):
+def _feature_recon_bar(
+    orig: np.ndarray, recon: np.ndarray, top_k: int = 20, width: int = 300, height: int = 100
+):
     """Bar chart of top-K largest reconstruction error dimensions."""
     diff = np.abs(orig - recon)
     top_idx = np.argsort(diff)[-top_k:][::-1]
     data = [(f"d{i}", float(diff[i])) for i in top_idx]
-    bars = hv.Bars(data, "dim", "|error|").opts(
-        color="#f58518", width=width, height=height, xrotation=90,
+    return hv.Bars(data, "dim", "|error|").opts(
+        color="#f58518",
+        width=width,
+        height=height,
+        xrotation=90,
         xaxis="bare",
         title=f"Top-{top_k} recon error dims",
     )
-    return bars
 
 
 # ---------------------------------------------------------------------------
@@ -572,10 +580,20 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
     ckpt_selector = pn.widgets.Select(name="Checkpoint", options=[], width=300)
     load_btn = pn.widgets.Button(name="Load checkpoint", button_type="success", width=300)
     n_samples = pn.widgets.IntSlider(
-        name="Recon samples", start=4, end=24, value=8, step=4, width=300,
+        name="Recon samples",
+        start=4,
+        end=24,
+        value=8,
+        step=4,
+        width=300,
     )
     latent_samples = pn.widgets.IntSlider(
-        name="Latent samples", start=100, end=50000, value=2000, step=100, width=300,
+        name="Latent samples",
+        start=100,
+        end=50000,
+        value=2000,
+        step=100,
+        width=300,
     )
     seed_input = pn.widgets.IntInput(name="Random seed", value=42, step=1, width=300)
     color_by = pn.widgets.RadioButtonGroup(
@@ -596,13 +614,24 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
     show_code_centers = pn.widgets.Checkbox(name="Show code centers", value=False, width=300)
     show_tree_lines = pn.widgets.Checkbox(name="Show tree lines", value=False, width=300)
     tree_line_color = pn.widgets.Select(
-        name="Line color", options=["black", "chart", "symbol"], value="black", width=300,
+        name="Line color",
+        options=["black", "chart", "symbol"],
+        value="black",
+        width=300,
     )
     tree_line_width = pn.widgets.EditableFloatSlider(
-        name="Line width", start=0.1, end=5.0, value=0.5, step=0.1, width=300,
+        name="Line width",
+        start=0.1,
+        end=5.0,
+        value=0.5,
+        step=0.1,
+        width=300,
     )
     camera_selector = pn.widgets.Select(
-        name="Camera", options=["top", "wrist"], value="top", width=300,
+        name="Camera",
+        options=["top", "wrist"],
+        value="top",
+        width=300,
     )
     alignment_mode = pn.widgets.RadioButtonGroup(
         name="Alignment mode",
@@ -617,7 +646,10 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         button_type="default",
     )
     trajectory_episode = pn.widgets.Select(
-        name="Trajectory episode", options={"None": -1}, value=-1, width=300,
+        name="Trajectory episode",
+        options={"None": -1},
+        value=-1,
+        width=300,
     )
     trajectory_color = pn.widgets.RadioButtonGroup(
         name="Trajectory color",
@@ -692,7 +724,9 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
     code_time_pane = pn.pane.HoloViews(hv.Div(""), sizing_mode="stretch_width")
     inspect_label = pn.pane.Markdown("*Click a point in z0 vs z1 to inspect*")
     inspect_image = pn.Column(
-        pn.pane.Markdown("*(click a point)*"), width=200, height=200,
+        pn.pane.Markdown("*(click a point)*"),
+        width=200,
+        height=200,
     )
     inspect_latent_bar = pn.pane.HoloViews(hv.Div(""), width=350, height=150)
     inspect_meta = pn.pane.Markdown("")
@@ -799,9 +833,9 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         dataset_name = loaded.args.get("dataset_name", loaded.args.get("dataset", ""))
         if not dataset_name and feature_dir:
             meta_path = os.path.join(feature_dir, "meta.json")
-            if os.path.isfile(meta_path):
+            if pathlib.Path(meta_path).is_file():
                 try:
-                    meta = json.loads(open(meta_path).read())
+                    meta = json.loads(open(meta_path, encoding="utf-8").read())
                     dataset_name = meta.get("dataset", "")
                 except Exception:
                     pass
@@ -813,7 +847,9 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         _refresh_all()
         wm_str = "with world model" if loaded.world_model is not None else "encoder only"
         n_feat = app_state["cache"]["features"].shape[0] if app_state["cache"] else 0
-        split_labels = app_state["cache"]["split_labels"] if app_state["cache"] else np.zeros(0, dtype=str)
+        split_labels = (
+            app_state["cache"]["split_labels"] if app_state["cache"] else np.zeros(0, dtype=str)
+        )
         n_train = int(np.sum(split_labels == "train"))
         n_test = int(np.sum(split_labels == "test"))
         status.object = (
@@ -821,9 +857,7 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             f"{n_feat} feature frames ({n_train} train / {n_test} test)."
         )
 
-    def _find_feature_dir(
-        ckpt_path: str, outputs_dir: str, args: dict
-    ) -> str | None:
+    def _find_feature_dir(ckpt_path: str, outputs_dir: str, args: dict) -> str | None:
         """Try to locate the feature cache directory."""
         # 1. From args
         for key in ("feature_cache_dir", "feature-cache-dir"):
@@ -897,8 +931,15 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             enc_out = loaded.encoder.encoder(x_sub)
             K_code = enc_out[1]  # index 1 is K_code from PrimitiveAttentiveAtlasEncoder
             (
-                x_recon, vq_loss, enc_rw, dec_rw,
-                K_chart, z_geo, z_n, c_bar, aux,
+                x_recon,
+                _vq_loss,
+                _enc_rw,
+                _dec_rw,
+                K_chart,
+                z_geo,
+                _z_n,
+                _c_bar,
+                _aux,
             ) = loaded.encoder(x_sub)
 
         K_code_np = _to_numpy(K_code).astype(int)
@@ -965,8 +1006,12 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         # 3D scatter
         try:
             fig3d = plot_latent_3d(
-                z_np, labels_for_color, K_chart=K_np, correct=dummy_correct,
-                color_by=scatter_color, point_size=point_size.value,
+                z_np,
+                labels_for_color,
+                K_chart=K_np,
+                correct=dummy_correct,
+                color_by=scatter_color,
+                point_size=point_size.value,
                 show_points=show_latents.value,
                 show_chart_centers=show_chart_centers.value,
                 show_code_centers=show_code_centers.value,
@@ -999,8 +1044,15 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             scatter_panels = []
             for di, dj in pairs:
                 scatter = build_latent_scatter(
-                    z_np, labels_for_color, K_np, dummy_correct,
-                    scatter_color, point_size.value, di, dj, indices=idx,
+                    z_np,
+                    labels_for_color,
+                    K_np,
+                    dummy_correct,
+                    scatter_color,
+                    point_size.value,
+                    di,
+                    dj,
+                    indices=idx,
                     K_code=K_code_np,
                     show_code_centers=show_code_centers.value,
                     show_points=show_latents.value,
@@ -1017,9 +1069,14 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             if scatter_panels:
                 # Wire tap stream to the first scatter (z0 vs z1)
                 tap_stream.source = scatter_panels[0]
-                layout_2d = hv.Layout(scatter_panels).opts(
-                    shared_axes=False,
-                ).cols(min(3, len(scatter_panels)))
+                layout_2d = (
+                    hv
+                    .Layout(scatter_panels)
+                    .opts(
+                        shared_axes=False,
+                    )
+                    .cols(min(3, len(scatter_panels)))
+                )
                 latent_2d_pane.object = layout_2d
         except Exception:
             logger.warning("2D scatter error: %s", traceback.format_exc())
@@ -1040,15 +1097,15 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             timesteps = cache["timesteps"]
             ts_sub_all = timesteps[idx]
             # Build (code_label, timestep) pairs for each point
-            code_labels = [
-                f"c{K_np[i]}:{K_code_np[i]}" for i in range(len(K_np))
-            ]
+            code_labels = [f"c{K_np[i]}:{K_code_np[i]}" for i in range(len(K_np))]
             box_data = {
                 "code": code_labels,
                 "timestep": ts_sub_all.astype(float),
             }
             boxwhisker = hv.BoxWhisker(
-                box_data, kdims=["code"], vdims=["timestep"],
+                box_data,
+                kdims=["code"],
+                vdims=["timestep"],
             ).opts(
                 width=max(400, 30 * len(set(code_labels))),
                 height=300,
@@ -1064,10 +1121,16 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
 
         # Store sub-arrays for click inspect
         app_state["latent_sub"] = {
-            "z_np": z_np, "K_np": K_np, "K_code_np": K_code_np,
+            "z_np": z_np,
+            "K_np": K_np,
+            "K_code_np": K_code_np,
             "task_sub": task_sub,
-            "ep_sub": ep_sub, "split_sub": split_sub, "idx": idx, "x_sub": x_sub,
-            "x_recon": _to_numpy(x_recon), "radii": radii,
+            "ep_sub": ep_sub,
+            "split_sub": split_sub,
+            "idx": idx,
+            "x_sub": x_sub,
+            "x_recon": _to_numpy(x_recon),
+            "radii": radii,
         }
 
     def _on_tap(x, y):
@@ -1148,11 +1211,18 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             enc_out = loaded.encoder.encoder(x_sub)
             K_code = enc_out[1]  # index 1 is K_code from PrimitiveAttentiveAtlasEncoder
             (
-                x_recon, vq_loss, enc_rw, dec_rw,
-                K_chart, z_geo, z_n, c_bar, aux,
+                x_recon,
+                _vq_loss,
+                _enc_rw,
+                _dec_rw,
+                K_chart,
+                z_geo,
+                _z_n,
+                _c_bar,
+                _aux,
             ) = loaded.encoder(x_sub)
 
-        K_code_np = _to_numpy(K_code).astype(int)
+        _to_numpy(K_code).astype(int)
         x_np = _to_numpy(x_sub)
         xr_np = _to_numpy(x_recon)
         z_np = _to_numpy(z_geo)
@@ -1184,13 +1254,15 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             # Latent bar
             latent_bar = pn.pane.HoloViews(
                 _latent_bar_chart(z_np[i], width=250, height=80),
-                width=270, height=100,
+                width=270,
+                height=100,
             )
 
             # Recon error bar
             recon_bar = pn.pane.HoloViews(
                 _feature_recon_bar(x_np[i], xr_np[i], top_k=15, width=250, height=80),
-                width=270, height=100,
+                width=270,
+                height=100,
             )
 
             # Metadata
@@ -1246,8 +1318,15 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
             enc_out = loaded.encoder.encoder(features[idx])
             K_code = enc_out[1]
             (
-                x_recon, vq_loss, enc_rw, dec_rw,
-                K_chart, z_geo, z_n, c_bar, aux,
+                _x_recon,
+                _vq_loss,
+                _enc_rw,
+                _dec_rw,
+                K_chart,
+                z_geo,
+                _z_n,
+                _c_bar,
+                _aux,
             ) = loaded.encoder(features[idx])
 
         z_np = _to_numpy(z_geo)
@@ -1267,7 +1346,8 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         # Chart/symbol transitions
         try:
             dyn_transition_pane.object = hv_chart_transitions(
-                dyn_labels, ep_sub,
+                dyn_labels,
+                ep_sub,
                 title=f"{label_name} Transition Matrix",
                 label_name=label_name,
             )
@@ -1286,7 +1366,8 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
                 group_labels = np.digitize(ts_sub, bins) - 1
                 group_name = "Timestep bin"
             dyn_alignment_pane.object = hv_chart_alignment(
-                dyn_labels, group_labels,
+                dyn_labels,
+                group_labels,
                 title=f"{label_name}-{group_name} Alignment",
                 label_name=label_name,
                 group_name=group_name,
@@ -1318,7 +1399,9 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
                 z_target = z_ep[1:]
 
                 dyn_trajectory_pane.object = hv_dynamics_trajectory(
-                    z_pred, z_target, title=f"Dynamics Trajectory: Episode {ep_id}",
+                    z_pred,
+                    z_target,
+                    title=f"Dynamics Trajectory: Episode {ep_id}",
                 )
                 break
             else:
@@ -1433,10 +1516,21 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
     load_btn.on_click(_on_load)
 
     # Refresh on widget changes
-    for w in (color_by, split_overlay_mode, point_size, latent_samples, seed_input,
-              show_latents, show_chart_centers, show_code_centers,
-              show_tree_lines, tree_line_color, tree_line_width,
-              trajectory_episode, trajectory_color):
+    for w in (
+        color_by,
+        split_overlay_mode,
+        point_size,
+        latent_samples,
+        seed_input,
+        show_latents,
+        show_chart_centers,
+        show_code_centers,
+        show_tree_lines,
+        tree_line_color,
+        tree_line_width,
+        trajectory_episode,
+        trajectory_color,
+    ):
         w.param.watch(lambda _: _refresh_latent(), "value")
 
     n_samples.param.watch(lambda _: _refresh_recon(), "value")
@@ -1446,9 +1540,8 @@ def create_app(outputs_dir: str = "outputs/vla") -> pn.template.FastListTemplate
         w.param.watch(lambda _: _refresh_symbol_examples(), "value")
 
     # ---- Template ----
-    template = pn.template.FastListTemplate(
+    return pn.template.FastListTemplate(
         title="VLA World Model Dashboard",
         sidebar=[sidebar],
         main=[tabs],
     )
-    return template

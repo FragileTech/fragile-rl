@@ -905,16 +905,18 @@ class ChartFiLM(nn.Module):
 
 
 def conformal_frequency_gate(
-    x_hat: torch.Tensor, z_geo: torch.Tensor, latent_dim: int,
+    x_hat: torch.Tensor,
+    z_geo: torch.Tensor,
+    latent_dim: int,
 ) -> torch.Tensor:
     """Gate spatial frequency by conformal factor tau(z_geo).
 
     Center of Poincare disk -> blurred. Boundary -> sharp.
     """
-    r_sq = (z_geo ** 2).sum(dim=-1).clamp(max=0.99)
+    r_sq = (z_geo**2).sum(dim=-1).clamp(max=0.99)
     tau = torch.sqrt(torch.tensor(float(latent_dim), device=z_geo.device) * (1.0 - r_sq) / 2.0)
     tau_norm = (tau / tau.max().clamp(min=0.1)).detach()[:, None, None, None]
-    x_blur = F.avg_pool2d(F.pad(x_hat, (2, 2, 2, 2), mode='reflect'), 5, stride=1)
+    x_blur = F.avg_pool2d(F.pad(x_hat, (2, 2, 2, 2), mode="reflect"), 5, stride=1)
     return (1.0 - tau_norm) * x_hat + tau_norm * x_blur
 
 
@@ -948,32 +950,36 @@ class ConditionalTextureFlow(nn.Module):
             else:
                 in_dim = self.split_b + geo_dim
                 out_dim = self.split_a * 2
-            self.nets.append(nn.Sequential(
-                nn.Linear(in_dim, hidden_dim),
-                nn.GELU(),
-                nn.Linear(hidden_dim, out_dim),
-            ))
+            self.nets.append(
+                nn.Sequential(
+                    nn.Linear(in_dim, hidden_dim),
+                    nn.GELU(),
+                    nn.Linear(hidden_dim, out_dim),
+                )
+            )
 
     def forward(
-        self, z_tex: torch.Tensor, z_geo: torch.Tensor,
+        self,
+        z_tex: torch.Tensor,
+        z_geo: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Forward pass: z_tex -> u, returns (u, log_det_J)."""
         log_det = torch.zeros(z_tex.shape[0], device=z_tex.device)
         x = z_tex
         for i, net in enumerate(self.nets):
             if i % 2 == 0:
-                x_a, x_b = x[:, :self.split_a], x[:, self.split_a:]
+                x_a, x_b = x[:, : self.split_a], x[:, self.split_a :]
                 params = net(torch.cat([x_a, z_geo], dim=-1))
-                log_s = params[:, :self.split_b].clamp(-self.clamp, self.clamp)
-                t = params[:, self.split_b:]
+                log_s = params[:, : self.split_b].clamp(-self.clamp, self.clamp)
+                t = params[:, self.split_b :]
                 x_b = x_b * torch.exp(log_s) + t
                 log_det = log_det + log_s.sum(dim=-1)
                 x = torch.cat([x_a, x_b], dim=-1)
             else:
-                x_a, x_b = x[:, :self.split_a], x[:, self.split_a:]
+                x_a, x_b = x[:, : self.split_a], x[:, self.split_a :]
                 params = net(torch.cat([x_b, z_geo], dim=-1))
-                log_s = params[:, :self.split_a].clamp(-self.clamp, self.clamp)
-                t = params[:, self.split_a:]
+                log_s = params[:, : self.split_a].clamp(-self.clamp, self.clamp)
+                t = params[:, self.split_a :]
                 x_a = x_a * torch.exp(log_s) + t
                 log_det = log_det + log_s.sum(dim=-1)
                 x = torch.cat([x_a, x_b], dim=-1)
@@ -985,17 +991,17 @@ class ConditionalTextureFlow(nn.Module):
         for i in range(self.n_layers - 1, -1, -1):
             net = self.nets[i]
             if i % 2 == 0:
-                x_a, x_b = x[:, :self.split_a], x[:, self.split_a:]
+                x_a, x_b = x[:, : self.split_a], x[:, self.split_a :]
                 params = net(torch.cat([x_a, z_geo], dim=-1))
-                log_s = params[:, :self.split_b].clamp(-self.clamp, self.clamp)
-                t = params[:, self.split_b:]
+                log_s = params[:, : self.split_b].clamp(-self.clamp, self.clamp)
+                t = params[:, self.split_b :]
                 x_b = (x_b - t) * torch.exp(-log_s)
                 x = torch.cat([x_a, x_b], dim=-1)
             else:
-                x_a, x_b = x[:, :self.split_a], x[:, self.split_a:]
+                x_a, x_b = x[:, : self.split_a], x[:, self.split_a :]
                 params = net(torch.cat([x_b, z_geo], dim=-1))
-                log_s = params[:, :self.split_a].clamp(-self.clamp, self.clamp)
-                t = params[:, self.split_a:]
+                log_s = params[:, : self.split_a].clamp(-self.clamp, self.clamp)
+                t = params[:, self.split_a :]
                 x_a = (x_a - t) * torch.exp(-log_s)
                 x = torch.cat([x_a, x_b], dim=-1)
         return x
@@ -1003,7 +1009,7 @@ class ConditionalTextureFlow(nn.Module):
     def flow_loss(self, z_tex: torch.Tensor, z_geo: torch.Tensor) -> torch.Tensor:
         """Negative log-likelihood under standard normal base distribution."""
         u, log_det_J = self.forward(z_tex, z_geo)
-        return (0.5 * (u ** 2).sum(-1) - log_det_J).mean()
+        return (0.5 * (u**2).sum(-1) - log_det_J).mean()
 
 
 class ConvImageDecoder(nn.Module):

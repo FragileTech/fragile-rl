@@ -53,8 +53,7 @@ def test_primitive_topological_decoder_shapes() -> None:
         output_dim=3,
     )
     z_geo = torch.randn(4, 2)
-    z_tex = torch.randn(4, 2)
-    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+    x_hat, router_weights, aux_losses = decoder(z_geo)
 
     assert x_hat.shape == (4, 3)
     assert router_weights.shape == (4, 3)
@@ -104,8 +103,7 @@ def test_decoder_film_conditioning() -> None:
         film_conditioning=True,
     )
     z_geo = torch.randn(4, 2)
-    z_tex = torch.randn(4, 2)
-    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+    x_hat, router_weights, aux_losses = decoder(z_geo)
 
     assert x_hat.shape == (4, 784)
     assert router_weights.shape == (4, 5)
@@ -141,45 +139,16 @@ def test_decoder_conformal_freq_gating() -> None:
     decoder_gated.load_state_dict(decoder_plain.state_dict())
 
     z_geo = torch.randn(4, 2)
-    z_tex = torch.randn(4, 2)
-    x_plain, _, _ = decoder_plain(z_geo, z_tex)
-    x_gated, _, _ = decoder_gated(z_geo, z_tex)
+    x_plain, _, _ = decoder_plain(z_geo)
+    x_gated, _, _ = decoder_gated(z_geo)
 
     assert x_gated.shape == (4, 784)
     # Gating should modify the output
     assert not torch.allclose(x_plain, x_gated, atol=1e-6)
 
 
-def test_decoder_texture_flow() -> None:
-    """Texture flow produces flow_loss and is invertible."""
-    torch.manual_seed(5)
-    decoder = PrimitiveTopologicalDecoder(
-        latent_dim=2,
-        hidden_dim=32,
-        num_charts=3,
-        output_dim=3,
-        texture_flow=True,
-        texture_flow_layers=4,
-        texture_flow_hidden=32,
-    )
-    z_geo = torch.randn(4, 2)
-    z_tex = torch.randn(4, 2)
-    x_hat, _, aux_losses = decoder(z_geo, z_tex)
-
-    assert x_hat.shape == (4, 3)
-    assert "flow_loss" in aux_losses
-    assert aux_losses["flow_loss"].ndim == 0
-
-    # Test invertibility
-    flow = decoder.texture_flow
-    assert flow is not None
-    u, log_det = flow.forward(z_tex, z_geo)
-    z_tex_recovered = flow.inverse(u, z_geo)
-    assert torch.allclose(z_tex, z_tex_recovered, atol=1e-5)
-
-
 def test_decoder_all_features_combined() -> None:
-    """All three features together produce correct shapes."""
+    """All features together produce correct shapes."""
     torch.manual_seed(6)
     decoder = PrimitiveTopologicalDecoder(
         latent_dim=2,
@@ -192,18 +161,13 @@ def test_decoder_all_features_combined() -> None:
         conv_channels=32,
         film_conditioning=True,
         conformal_freq_gating=True,
-        texture_flow=True,
-        texture_flow_layers=4,
-        texture_flow_hidden=32,
     )
     z_geo = torch.randn(4, 2)
-    z_tex = torch.randn(4, 2)
-    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+    x_hat, router_weights, aux_losses = decoder(z_geo)
 
     assert x_hat.shape == (4, 784)
     assert router_weights.shape == (4, 5)
-    assert "flow_loss" in aux_losses
-    assert aux_losses["flow_loss"].ndim == 0
+    assert isinstance(aux_losses, dict)
 
 
 def test_hard_routing_produces_onehot() -> None:
@@ -217,8 +181,10 @@ def test_hard_routing_produces_onehot() -> None:
         codes_per_chart=5,
     )
     x = torch.randn(8, 3)
-    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, z_n, c_bar, aux_losses = model(
-        x, use_hard_routing=True, hard_routing_tau=0.5,
+    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, _z_n, _c_bar, _aux_losses = model(
+        x,
+        use_hard_routing=True,
+        hard_routing_tau=0.5,
     )
 
     # Shapes unchanged
@@ -248,8 +214,12 @@ def test_hard_routing_gradients_flow() -> None:
         codes_per_chart=5,
     )
     x = torch.randn(8, 3)
-    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, z_n, c_bar, aux_losses = model(
-        x, use_hard_routing=True, hard_routing_tau=0.5,
+    x_recon, vq_loss, _enc_weights, _dec_weights, _K_chart, _z_geo, _z_n, _c_bar, _aux_losses = (
+        model(
+            x,
+            use_hard_routing=True,
+            hard_routing_tau=0.5,
+        )
     )
 
     loss = torch.nn.functional.mse_loss(x_recon, x) + vq_loss

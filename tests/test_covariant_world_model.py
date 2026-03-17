@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 import torch
 
+
 # Use small dims for fast tests
 B, D, A, K, H = 4, 3, 6, 8, 5
 D_MODEL = 32  # small for speed
@@ -127,9 +128,7 @@ class TestCovariantValueCurl:
 
         net = CovariantValueCurl(D, A, D_MODEL)
         F_mat = net(z, action)
-        assert torch.allclose(
-            F_mat + F_mat.transpose(-2, -1), torch.zeros_like(F_mat), atol=1e-6
-        )
+        assert torch.allclose(F_mat + F_mat.transpose(-2, -1), torch.zeros_like(F_mat), atol=1e-6)
 
 
 class TestCovariantChartTarget:
@@ -244,7 +243,7 @@ class TestGeometricWorldModel:
         loss = out["z_trajectory"].sum() + out["chart_logits"].sum()
         loss.backward()
         grad_count = sum(1 for p in m.parameters() if p.grad is not None)
-        total_count = sum(1 for _ in m.parameters())
+        sum(1 for _ in m.parameters())
         assert grad_count > 0, "No gradients computed"
 
     def test_no_boris(self, device):
@@ -325,9 +324,7 @@ class TestChartCenterProjection:
         net = CovariantChartTarget(D, A, K, D_MODEL)
         # Force centers outside the ball
         with torch.no_grad():
-            net.chart_tok.chart_centers.copy_(
-                torch.ones_like(net.chart_tok.chart_centers) * 5.0
-            )
+            net.chart_tok.chart_centers.copy_(torch.ones_like(net.chart_tok.chart_centers) * 5.0)
         logits = net(z, action, rw)
         assert logits.shape == (B, K)
         assert torch.isfinite(logits).all(), "Non-finite logits from out-of-ball centers"
@@ -344,7 +341,7 @@ class TestGeometricInvariants:
         z = torch.randn(2, D) * 0.3
         eps = 1e-4
 
-        U_base, dU_dz = net._analytic_U_and_grad(z)
+        _U_base, dU_dz = net._analytic_U_and_grad(z)
 
         # Numerical gradient via central differences
         numerical_grad = torch.zeros_like(z)
@@ -388,14 +385,19 @@ class TestGeometricInvariants:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             use_boris=True,
         )
         p_in = torch.randn(B, D) * 0.1
         p_out, _ = m._boris_rotation(p_in, z, action)
         # Boris rotation is an exact norm-preserving rotation
         assert torch.allclose(
-            p_in.norm(dim=-1), p_out.norm(dim=-1), atol=1e-5,
+            p_in.norm(dim=-1),
+            p_out.norm(dim=-1),
+            atol=1e-5,
         ), "Boris rotation changed momentum norm"
 
     def test_momentum_init_cotangent_scaling(self):
@@ -452,6 +454,7 @@ class TestRiskAdaptiveConformalMetric:
 
     def test_import(self):
         from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+
         assert RiskAdaptiveConformalMetric is not None
 
     def test_no_risk_matches_base(self):
@@ -460,6 +463,7 @@ class TestRiskAdaptiveConformalMetric:
             ConformalMetric,
             RiskAdaptiveConformalMetric,
         )
+
         z = torch.randn(B, D) * 0.3
         base = ConformalMetric()
         adaptive = RiskAdaptiveConformalMetric(risk_coupling_alpha=0.1)
@@ -578,7 +582,10 @@ class TestRiskMetricIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.1,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -596,7 +603,10 @@ class TestRiskMetricIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.1,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -614,7 +624,10 @@ class TestRiskMetricIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.0,
         )
         assert type(m.metric) is ConformalMetric
@@ -633,7 +646,7 @@ class TestHyperbolicLaplacian:
         from fragile.vla.losses import hyperbolic_laplacian
 
         def V_func(z):
-            return (z ** 2).sum(dim=-1, keepdim=True)
+            return (z**2).sum(dim=-1, keepdim=True)
 
         z = torch.randn(B, D) * 0.3
         lap, V_center = hyperbolic_laplacian(V_func, z)
@@ -645,7 +658,7 @@ class TestHyperbolicLaplacian:
         from fragile.vla.losses import hyperbolic_laplacian
 
         def V_func(z):
-            return (z ** 2).sum(dim=-1, keepdim=True)
+            return (z**2).sum(dim=-1, keepdim=True)
 
         z = torch.randn(B, D) * 0.3
         lap, _ = hyperbolic_laplacian(V_func, z)
@@ -673,7 +686,7 @@ class TestHyperbolicLaplacian:
         from fragile.vla.losses import hyperbolic_laplacian
 
         def V_quadratic(z):
-            return (z ** 2).sum(dim=-1, keepdim=True)
+            return (z**2).sum(dim=-1, keepdim=True)
 
         z = torch.randn(B, D) * 0.2  # well inside ball
         lap, _ = hyperbolic_laplacian(V_quadratic, z)
@@ -726,7 +739,12 @@ class TestScreenedPoissonLoss:
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
         loss = compute_screened_poisson_loss(
-            net, z_traj, z_tgt, rw, kappa=1.0, max_samples=4,
+            net,
+            z_traj,
+            z_tgt,
+            rw,
+            kappa=1.0,
+            max_samples=4,
         )
         assert loss.shape == ()
         assert torch.isfinite(loss)
@@ -742,12 +760,15 @@ class TestScreenedPoissonLoss:
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
         loss = compute_screened_poisson_loss(
-            net, z_traj, z_tgt, rw, kappa=1.0, max_samples=8,
+            net,
+            z_traj,
+            z_tgt,
+            rw,
+            kappa=1.0,
+            max_samples=8,
         )
         loss.backward()
-        grad_count = sum(
-            1 for p in net.v_critic_attn.parameters() if p.grad is not None
-        )
+        grad_count = sum(1 for p in net.v_critic_attn.parameters() if p.grad is not None)
         assert grad_count > 0, "No gradients to critic attention from screened Poisson"
 
 
@@ -800,10 +821,14 @@ class TestHodgeDecomposer:
         result = hd(f_total, f_cons, f_sol)
 
         assert torch.allclose(
-            result["harmonic"], torch.zeros_like(result["harmonic"]), atol=1e-6,
+            result["harmonic"],
+            torch.zeros_like(result["harmonic"]),
+            atol=1e-6,
         )
         assert torch.allclose(
-            result["harmonic_ratio"], torch.zeros(B), atol=1e-5,
+            result["harmonic_ratio"],
+            torch.zeros(B),
+            atol=1e-5,
         )
 
     def test_no_learnable_parameters(self):
@@ -867,7 +892,10 @@ class TestHodgeIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
         actions = torch.randn(B, H, A, device=device)
@@ -889,7 +917,10 @@ class TestHodgeIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
         actions = torch.randn(B, H, A, device=device)
@@ -915,7 +946,10 @@ class TestAllFeaturesIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.1,
             use_boris=True,
         )
@@ -946,7 +980,10 @@ class TestAllFeaturesIntegration:
         )
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.1,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -969,30 +1006,31 @@ class TestAllFeaturesIntegration:
             max_samples=8,
         )
 
-        total_loss = (
-            out["z_trajectory"].sum()
-            + hodge_loss
-            + sp_loss
-        )
+        total_loss = out["z_trajectory"].sum() + hodge_loss + sp_loss
         total_loss.backward()
         grad_count = sum(1 for p in m.parameters() if p.grad is not None)
         assert grad_count > 0, "No gradients with all features enabled"
 
     def test_phase2_loss_with_new_features(self, device):
         """compute_phase2_loss should handle all new loss terms."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.config import VLAConfig
+        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
-            latent_dim=D, action_dim=A, num_charts=K,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
             w_screened_poisson=0.01,
             wm_screening_kappa=1.0,
             w_hodge=0.01,
         )
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
         actions = torch.randn(B, H, A, device=device)
@@ -1013,7 +1051,10 @@ class TestAllFeaturesIntegration:
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             risk_metric_alpha=0.0,  # disabled
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -1091,14 +1132,13 @@ class TestPoincareLogMap:
 
         v = poincare_log_map(z, y)
         # Tangent norm at z: ||v||_z = lambda(z) * ||v||_E
-        z_sq = (z ** 2).sum(dim=-1, keepdim=True)
+        z_sq = (z**2).sum(dim=-1, keepdim=True)
         lam = 2.0 / (1.0 - z_sq).clamp(min=1e-6)
         tangent_norm = lam.squeeze(-1) * v.norm(dim=-1)
 
         d = hyperbolic_distance(z, y)
         assert torch.allclose(tangent_norm, d, atol=1e-3), (
-            f"Tangent norm vs distance mismatch: max err "
-            f"{(tangent_norm - d).abs().max()}"
+            f"Tangent norm vs distance mismatch: max err {(tangent_norm - d).abs().max()}"
         )
 
 
@@ -1108,10 +1148,15 @@ class TestBoltzmannChartLogits:
     def _make_model(self, **kwargs):
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
-        defaults = dict(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
-            use_jump=True, n_refine_steps=1, jump_beta=1.0,
-        )
+        defaults = {
+            "latent_dim": D,
+            "action_dim": A,
+            "num_charts": K,
+            "d_model": D_MODEL,
+            "use_jump": True,
+            "n_refine_steps": 1,
+            "jump_beta": 1.0,
+        }
         defaults.update(kwargs)
         return GeometricWorldModel(**defaults)
 
@@ -1189,10 +1234,15 @@ class TestConditionalJump:
     def _make_model(self, **kwargs):
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
-        defaults = dict(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
-            use_jump=True, n_refine_steps=1, jump_beta=1.0,
-        )
+        defaults = {
+            "latent_dim": D,
+            "action_dim": A,
+            "num_charts": K,
+            "d_model": D_MODEL,
+            "use_jump": True,
+            "n_refine_steps": 1,
+            "jump_beta": 1.0,
+        }
         defaults.update(kwargs)
         return GeometricWorldModel(**defaults)
 
@@ -1231,12 +1281,8 @@ class TestConditionalJump:
         # For samples that didn't jump, z and p should be identical
         no_jump = ~jumped
         if no_jump.any():
-            assert torch.allclose(
-                z_out[no_jump], z[no_jump], atol=1e-6
-            ), "Non-jumped z changed"
-            assert torch.allclose(
-                p_out[no_jump], p[no_jump], atol=1e-6
-            ), "Non-jumped p changed"
+            assert torch.allclose(z_out[no_jump], z[no_jump], atol=1e-6), "Non-jumped z changed"
+            assert torch.allclose(p_out[no_jump], p[no_jump], atol=1e-6), "Non-jumped p changed"
 
     def test_jumped_samples_at_chart_center(self):
         """When a sample jumps, z should be near some chart center.
@@ -1251,7 +1297,7 @@ class TestConditionalJump:
         action = torch.randn(B, A)
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
-        z_out, p_out, _, rw_out, jumped = m._conditional_jump(z, p, action, rw)
+        z_out, _p_out, _, _rw_out, jumped = m._conditional_jump(z, p, action, rw)
 
         if jumped.any():
             centers = m.chart_predictor.chart_tok.chart_centers.detach()
@@ -1283,9 +1329,9 @@ class TestConditionalJump:
 
         _, _, _, rw_out, _ = m._conditional_jump(z, p, action, rw)
         assert (rw_out >= 0).all(), "Negative router weights"
-        assert torch.allclose(
-            rw_out.sum(dim=-1), torch.ones(B), atol=1e-5
-        ), "Router weights don't sum to 1"
+        assert torch.allclose(rw_out.sum(dim=-1), torch.ones(B), atol=1e-5), (
+            "Router weights don't sum to 1"
+        )
 
     def test_gradients_flow_through_jump(self):
         """Gradients should flow through conditional jump to model params."""
@@ -1295,7 +1341,7 @@ class TestConditionalJump:
         action = torch.randn(B, A)
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
-        z_out, p_out, cl, rw_out, _ = m._conditional_jump(z, p, action, rw)
+        z_out, _p_out, cl, rw_out, _ = m._conditional_jump(z, p, action, rw)
         loss = z_out.sum() + cl.sum() + rw_out.sum()
         loss.backward()
         grad_count = sum(1 for p in m.parameters() if p.grad is not None)
@@ -1308,10 +1354,15 @@ class TestWFRForwardLoop:
     def _make_model(self, **kwargs):
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
-        defaults = dict(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
-            use_jump=True, n_refine_steps=3, jump_beta=1.0,
-        )
+        defaults = {
+            "latent_dim": D,
+            "action_dim": A,
+            "num_charts": K,
+            "d_model": D_MODEL,
+            "use_jump": True,
+            "n_refine_steps": 3,
+            "jump_beta": 1.0,
+        }
         defaults.update(kwargs)
         return GeometricWorldModel(**defaults)
 
@@ -1350,9 +1401,9 @@ class TestWFRForwardLoop:
         out3 = m3(z_0, actions, rw_0)
 
         # Trajectories should differ due to different integration resolution
-        assert not torch.allclose(
-            out1["z_trajectory"], out3["z_trajectory"], atol=1e-4
-        ), "1-step and 3-step trajectories should differ"
+        assert not torch.allclose(out1["z_trajectory"], out3["z_trajectory"], atol=1e-4), (
+            "1-step and 3-step trajectories should differ"
+        )
 
     def test_energy_var_key_present(self, device):
         """energy_var should be a scalar in the output."""
@@ -1397,11 +1448,7 @@ class TestWFRForwardLoop:
         rw_0 = torch.softmax(torch.randn(B, K, device=device), dim=-1)
         out = m(z_0, actions, rw_0)
 
-        loss = (
-            out["z_trajectory"].sum()
-            + out["chart_logits"].sum()
-            + out["energy_var"]
-        )
+        loss = out["z_trajectory"].sum() + out["chart_logits"].sum() + out["energy_var"]
         loss.backward()
         grad_count = sum(1 for p in m.parameters() if p.grad is not None)
         assert grad_count > 0, "No gradients through WFR forward loop"
@@ -1438,9 +1485,16 @@ class TestWFRForwardLoop:
         rw_0 = torch.softmax(torch.randn(B, K, device=device), dim=-1)
         out = m(z_0, actions, rw_0)
 
-        for key in ["z_trajectory", "chart_logits", "momenta", "phi_eff",
-                     "hodge_conservative_ratio", "hodge_solenoidal_ratio",
-                     "hodge_harmonic_ratio", "hodge_harmonic_forces"]:
+        for key in [
+            "z_trajectory",
+            "chart_logits",
+            "momenta",
+            "phi_eff",
+            "hodge_conservative_ratio",
+            "hodge_solenoidal_ratio",
+            "hodge_harmonic_ratio",
+            "hodge_harmonic_forces",
+        ]:
             assert torch.isfinite(out[key]).all(), f"Non-finite output: {key}"
         assert torch.isfinite(out["energy_var"]), "Non-finite energy_var"
 
@@ -1450,17 +1504,22 @@ class TestWFRPhase2Loss:
 
     def test_loss_with_energy_var(self, device):
         """compute_phase2_loss should use energy_var when present."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.config import VLAConfig
+        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
-            latent_dim=D, action_dim=A, num_charts=K,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
             w_energy_conservation=0.01,
         )
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             n_refine_steps=3,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -1478,14 +1537,17 @@ class TestWFRPhase2Loss:
 
     def test_no_jump_dynamics_key(self, device):
         """jump_dynamics should NOT be in metrics (removed loss)."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.config import VLAConfig
+        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(latent_dim=D, action_dim=A, num_charts=K)
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
         actions = torch.randn(B, H, A, device=device)
@@ -1496,25 +1558,28 @@ class TestWFRPhase2Loss:
         chart_targets = torch.randint(0, K, (B, H), device=device)
 
         _, metrics = compute_phase2_loss(out, z_targets, chart_targets, config)
-        assert "jump_dynamics" not in metrics, (
-            "jump_dynamics should be removed from phase 2 loss"
-        )
+        assert "jump_dynamics" not in metrics, "jump_dynamics should be removed from phase 2 loss"
 
     def test_backward_through_phase2_loss(self, device):
         """Full backward through compute_phase2_loss with all features."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.config import VLAConfig
+        from fragile.vla.covariant_world_model import GeometricWorldModel
         from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
-            latent_dim=D, action_dim=A, num_charts=K,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
             w_energy_conservation=0.01,
             w_screened_poisson=0.01,
             w_hodge=0.01,
         )
 
         m = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=D_MODEL,
             n_refine_steps=2,
         )
         z_0 = torch.randn(B, D, device=device) * 0.3
@@ -1525,7 +1590,7 @@ class TestWFRPhase2Loss:
         z_targets = torch.randn(B, H, D, device=device) * 0.3
         chart_targets = torch.randint(0, K, (B, H), device=device)
 
-        total, metrics = compute_phase2_loss(out, z_targets, chart_targets, config)
+        total, _metrics = compute_phase2_loss(out, z_targets, chart_targets, config)
         total.backward()
         grad_count = sum(1 for p in m.parameters() if p.grad is not None)
         assert grad_count > 0, "No gradients through phase 2 loss"
@@ -1537,10 +1602,15 @@ class TestWFRGeometricInvariants:
     def _make_model(self, **kwargs):
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
-        defaults = dict(
-            latent_dim=D, action_dim=A, num_charts=K, d_model=D_MODEL,
-            use_jump=True, n_refine_steps=3, jump_beta=1.0,
-        )
+        defaults = {
+            "latent_dim": D,
+            "action_dim": A,
+            "num_charts": K,
+            "d_model": D_MODEL,
+            "use_jump": True,
+            "n_refine_steps": 3,
+            "jump_beta": 1.0,
+        }
         defaults.update(kwargs)
         return GeometricWorldModel(**defaults)
 
@@ -1553,7 +1623,9 @@ class TestWFRGeometricInvariants:
 
         p_out, _ = m._boris_rotation(p_in, z, action)
         assert torch.allclose(
-            p_in.norm(dim=-1), p_out.norm(dim=-1), atol=1e-5,
+            p_in.norm(dim=-1),
+            p_out.norm(dim=-1),
+            atol=1e-5,
         ), "Boris rotation changed momentum norm"
 
     def test_energy_variance_small_for_many_steps(self, device):
@@ -1582,9 +1654,5 @@ class TestWFRGeometricInvariants:
 
         # Chart logits should have gradients to chart_predictor params
         out["chart_logits"].sum().backward()
-        grad_count = sum(
-            1 for p in m.chart_predictor.parameters() if p.grad is not None
-        )
-        assert grad_count > 0, (
-            "chart_logits should provide gradients to chart_predictor"
-        )
+        grad_count = sum(1 for p in m.chart_predictor.parameters() if p.grad is not None)
+        assert grad_count > 0, "chart_logits should provide gradients to chart_predictor"

@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-import math
 import importlib
+import math
 from types import SimpleNamespace
 
 import torch
@@ -15,6 +15,7 @@ from fragile.core.layers.topology import FactorizedJumpOperator
 from fragile.vla.config import VLAConfig
 from fragile.vla.losses import compute_phase1_loss
 from fragile.vla.train_joint import _compute_encoder_losses, _eval_pass, _get_hard_routing_tau
+
 
 train_joint_module = importlib.import_module("fragile.vla.train_joint")
 
@@ -44,7 +45,10 @@ def test_eval_pass_reports_router_and_geometry_diagnostics() -> None:
     loader = DataLoader(_FeatureDataset(torch.randn(12, 3)), batch_size=4, shuffle=False)
 
     usage, hard_perp, hard_active, soft_usage, soft_perp, soft_active, mean_r, extra = _eval_pass(
-        model, loader, 4, torch.device("cpu"),
+        model,
+        loader,
+        4,
+        torch.device("cpu"),
     )
 
     assert usage.shape == (4,)
@@ -105,7 +109,10 @@ def test_eval_pass_uses_deterministic_hard_routing_for_phase1_diagnostics(
     original_forward = model.encoder.forward
 
     def _wrapped_forward(*args, **kwargs):
-        calls.append((bool(kwargs.get("hard_routing", False)), float(kwargs.get("hard_routing_tau", 0.0))))
+        calls.append((
+            bool(kwargs.get("hard_routing")),
+            float(kwargs.get("hard_routing_tau", 0.0)),
+        ))
         return original_forward(*args, **kwargs)
 
     monkeypatch.setattr(model.encoder, "forward", _wrapped_forward)
@@ -269,7 +276,8 @@ def test_phase1_loss_skips_jump_consistency_when_weight_is_zero(monkeypatch) -> 
     )
 
     def _should_not_run(*_args, **_kwargs):
-        raise AssertionError("jump consistency should be skipped when its weight is zero")
+        msg = "jump consistency should be skipped when its weight is zero"
+        raise AssertionError(msg)
 
     monkeypatch.setattr(train_joint_module, "compute_jump_consistency_loss", _should_not_run)
 

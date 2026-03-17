@@ -112,9 +112,9 @@ def compute_momentum_regularization(
     Returns:
         Scalar regularization loss.
     """
-    r_sq = (z_trajectory ** 2).sum(dim=-1, keepdim=True)  # [B, H, 1]
+    r_sq = (z_trajectory**2).sum(dim=-1, keepdim=True)  # [B, H, 1]
     g_inv_factor = ((1.0 - r_sq).clamp(min=1e-6) / 2.0) ** 2  # [B, H, 1]
-    p_sq = (momenta ** 2).sum(dim=-1, keepdim=True)  # [B, H, 1]
+    p_sq = (momenta**2).sum(dim=-1, keepdim=True)  # [B, H, 1]
     kinetic = 0.5 * g_inv_factor * p_sq
     return kinetic.mean()
 
@@ -139,9 +139,9 @@ def compute_energy_conservation_loss(
         Scalar loss (variance of H across horizon).
     """
     # Kinetic energy: ½ |p|^2 * ((1 - |z|^2) / 2)^2  (diagonal inverse metric)
-    r_sq = (z_trajectory ** 2).sum(dim=-1, keepdim=True)  # [B, H, 1]
+    r_sq = (z_trajectory**2).sum(dim=-1, keepdim=True)  # [B, H, 1]
     g_inv_factor = ((1.0 - r_sq).clamp(min=1e-6) / 2.0) ** 2  # [B, H, 1]
-    p_sq = (momenta ** 2).sum(dim=-1, keepdim=True)  # [B, H, 1]
+    p_sq = (momenta**2).sum(dim=-1, keepdim=True)  # [B, H, 1]
     kinetic = 0.5 * g_inv_factor * p_sq  # [B, H, 1]
 
     H_total = phi_eff + kinetic  # [B, H, 1]
@@ -164,7 +164,7 @@ def compute_hodge_consistency_loss(
     Returns:
         Scalar L2 loss on harmonic forces.
     """
-    return (hodge_harmonic_forces ** 2).mean()
+    return (hodge_harmonic_forces**2).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -252,18 +252,18 @@ def hyperbolic_laplacian(
     V_center = V_split[0]  # [N, 1]
 
     # --- Hutchinson trace estimate (vectorised over probes) ---
-    V_plus = V_split[1:1 + 2 * n_probes:2]   # [k, N, 1]
-    V_minus = V_split[2:2 + 2 * n_probes:2]  # [k, N, 1]
+    V_plus = V_split[1 : 1 + 2 * n_probes : 2]  # [k, N, 1]
+    V_minus = V_split[2 : 2 + 2 * n_probes : 2]  # [k, N, 1]
     trace_terms = V_plus - 2 * V_center.unsqueeze(0) + V_minus  # [k, N, 1]
-    laplacian_E = trace_terms.sum(dim=0) / (n_probes * eps ** 2)  # [N, 1]
+    laplacian_E = trace_terms.sum(dim=0) / (n_probes * eps**2)  # [N, 1]
 
     # --- Directional derivative: z · ∇V ≈ ||z|| * (V(z+εẑ) - V(z-εẑ)) / (2ε) ---
-    V_zhat_plus = V_split[-2]   # [N, 1]
+    V_zhat_plus = V_split[-2]  # [N, 1]
     V_zhat_minus = V_split[-1]  # [N, 1]
     z_dot_grad = z_norm * (V_zhat_plus - V_zhat_minus) / (2 * eps)  # [N, 1]
 
     # --- Poincare ball correction ---
-    r_sq = (z_det ** 2).sum(dim=-1, keepdim=True)  # [N, 1]
+    r_sq = (z_det**2).sum(dim=-1, keepdim=True)  # [N, 1]
     one_minus_r_sq = (1.0 - r_sq).clamp(min=1e-6)
     lambda_z = 2.0 / one_minus_r_sq  # [N, 1]
     inv_lambda_sq = (one_minus_r_sq / 2.0) ** 2  # [N, 1]
@@ -367,9 +367,9 @@ def compute_screened_poisson_loss(
     lap_V, V_center = hyperbolic_laplacian(V_func, z_flat)  # [N, 1], [N, 1]
 
     # PDE residual: (-Delta_G + kappa^2) V - rho_r
-    residual = -lap_V + kappa ** 2 * V_center - rho_r
+    residual = -lap_V + kappa**2 * V_center - rho_r
 
-    return (residual ** 2).mean()
+    return (residual**2).mean()
 
 
 # ---------------------------------------------------------------------------
@@ -408,7 +408,7 @@ def orthogonality_loss(zn: torch.Tensor, ztex: torch.Tensor) -> torch.Tensor:
     zn_c = F.normalize(zn_c, dim=0)
     ztex_c = F.normalize(ztex_c, dim=0)
     C = zn_c.T @ ztex_c  # [D1, D2], entries in [-1, 1]
-    return (C ** 2).mean()
+    return (C**2).mean()
 
 
 class GradientReversalFunction(torch.autograd.Function):
@@ -654,7 +654,9 @@ def compute_enclosure_loss(
 
     # -- Probe loss: train probe on detached inputs --
     logits_full_det, logits_base_det = probe(
-        chart_embed_t.detach(), action_t.detach(), ztex_t.detach(),
+        chart_embed_t.detach(),
+        action_t.detach(),
+        ztex_t.detach(),
         K_code_t.detach(),
     )
     ce_full_det = F.cross_entropy(logits_full_det, target)
@@ -809,8 +811,10 @@ def compute_dynamics_markov_loss(
     metrics["dyn_trans_acc"] = float((trans_logits.argmax(dim=-1) == trans_target).float().mean())
 
     code_flips = (
-        K_code_dyn_all[:, 1 : n_transitions + 1] != K_code_dyn_all[:, :n_transitions]
-    ).float().mean()
+        (K_code_dyn_all[:, 1 : n_transitions + 1] != K_code_dyn_all[:, :n_transitions])
+        .float()
+        .mean()
+    )
     metrics["dyn_code_flip_rate"] = code_flips.item()
 
     if n_transitions > 1:
@@ -840,7 +844,9 @@ def compute_dynamics_markov_loss(
 
 
 def geodesic_interpolation(
-    z_start: torch.Tensor, z_end: torch.Tensor, N: int,
+    z_start: torch.Tensor,
+    z_end: torch.Tensor,
+    N: int,
 ) -> torch.Tensor:
     """Create N+1 waypoints along the Poincare geodesic from z_start to z_end.
 
@@ -864,7 +870,8 @@ def geodesic_interpolation(
 
 
 def compute_momentum_targets(
-    z_waypoints: torch.Tensor, dt: float,
+    z_waypoints: torch.Tensor,
+    dt: float,
 ) -> torch.Tensor:
     """Finite-difference momentum targets from geodesic waypoints.
 
@@ -886,7 +893,8 @@ def compute_momentum_targets(
 
 
 def position_loss(
-    z_pred_traj: torch.Tensor, z_target_traj: torch.Tensor,
+    z_pred_traj: torch.Tensor,
+    z_target_traj: torch.Tensor,
 ) -> torch.Tensor:
     """Mean hyperbolic distance between predicted and target waypoints.
 
@@ -906,7 +914,8 @@ def position_loss(
 
 
 def endpoint_loss(
-    z_pred_N: torch.Tensor, z_target_end: torch.Tensor,
+    z_pred_N: torch.Tensor,
+    z_target_end: torch.Tensor,
 ) -> torch.Tensor:
     """Hyperbolic distance at the final step.
 
@@ -923,7 +932,9 @@ def endpoint_loss(
 
 
 def momentum_loss(
-    p_pred: torch.Tensor, p_target: torch.Tensor, z_traj: torch.Tensor,
+    p_pred: torch.Tensor,
+    p_target: torch.Tensor,
+    z_traj: torch.Tensor,
 ) -> torch.Tensor:
     """Metric-aware momentum error.
 
@@ -940,7 +951,7 @@ def momentum_loss(
     Returns:
         Scalar loss.
     """
-    r_sq = (z_traj ** 2).sum(dim=-1, keepdim=True)  # [B, N, 1]
+    r_sq = (z_traj**2).sum(dim=-1, keepdim=True)  # [B, N, 1]
     g_inv_factor = ((1.0 - r_sq).clamp(min=1e-6) / 2.0) ** 2  # [B, N, 1]
     diff_sq = ((p_pred - p_target) ** 2).sum(dim=-1, keepdim=True)  # [B, N, 1]
     return (g_inv_factor * diff_sq).mean()
@@ -990,10 +1001,15 @@ def compute_supervised_wm_loss(
 
     # 4. Supervised integration
     integ = wm.supervised_integration(
-        z_start, p_init, action, rw, n_steps=N, deterministic=True,
+        z_start,
+        p_init,
+        action,
+        rw,
+        n_steps=N,
+        deterministic=True,
     )
-    z_pred = integ["z_traj"]   # [B, N+1, D]
-    p_pred = integ["p_traj"]   # [B, N+1, D]
+    z_pred = integ["z_traj"]  # [B, N+1, D]
+    p_pred = integ["p_traj"]  # [B, N+1, D]
 
     # 5. Position loss (all waypoints)
     L_pos = position_loss(z_pred, z_targets)
@@ -1004,15 +1020,13 @@ def compute_supervised_wm_loss(
     metrics["endpoint"] = L_end.item()
 
     # 7. Momentum loss (predicted vs target, excluding initial)
-    p_pred_steps = p_pred[:, 1:, :]   # [B, N, D] momenta after each step
-    z_traj_steps = z_pred[:, 1:, :]   # [B, N, D] positions after each step
+    p_pred_steps = p_pred[:, 1:, :]  # [B, N, D] momenta after each step
+    z_traj_steps = z_pred[:, 1:, :]  # [B, N, D] positions after each step
     L_mom = momentum_loss(p_pred_steps, p_targets, z_traj_steps)
     metrics["momentum_target"] = L_mom.item()
 
     total = (
-        config.w_position * L_pos
-        + config.w_endpoint * L_end
-        + config.w_momentum_target * L_mom
+        config.w_position * L_pos + config.w_endpoint * L_end + config.w_momentum_target * L_mom
     )
 
     # 8. Hodge consistency (harmonic force penalty)
@@ -1045,9 +1059,14 @@ def compute_supervised_wm_loss(
             metrics["hodge_sol"] = hodge_info["solenoidal_ratio"].mean().item()
             metrics["hodge_harm"] = hodge_info["harmonic_ratio"].mean().item()
         # Geodesic miss distance (how far predicted endpoint is from target)
-        metrics["geo_miss"] = hyperbolic_distance(
-            z_pred[:, -1], z_end,
-        ).mean().item()
+        metrics["geo_miss"] = (
+            hyperbolic_distance(
+                z_pred[:, -1],
+                z_end,
+            )
+            .mean()
+            .item()
+        )
 
     metrics["total"] = total.item()
     return total, metrics
@@ -1095,12 +1114,12 @@ def compute_phase2_geodesic_diffusion_loss(
     metric_accum: dict[str, float] = {}
 
     for t in range(H - 1):
-        z_t = z_all[:, t]          # [B, D]
-        z_tp1 = z_all[:, t + 1]    # [B, D]
-        rw_t = rw_all[:, t]        # [B, K]
-        action_t = actions[:, t]   # [B, A]
-        K_t = K_all[:, t]          # [B]
-        K_tp1 = K_all[:, t + 1]    # [B]
+        z_t = z_all[:, t]  # [B, D]
+        z_tp1 = z_all[:, t + 1]  # [B, D]
+        rw_t = rw_all[:, t]  # [B, K]
+        action_t = actions[:, t]  # [B, A]
+        K_t = K_all[:, t]  # [B]
+        K_tp1 = K_all[:, t + 1]  # [B]
 
         # Chart transition CE (always computed)
         chart_logits = wm.chart_predictor(z_t, action_t, rw_t)  # [B, K]
@@ -1114,7 +1133,7 @@ def compute_phase2_geodesic_diffusion_loss(
             chart_total_samples += B
 
         # Same-chart mask: only do supervised integration for same-chart pairs
-        same_chart = (K_t == K_tp1)  # [B]
+        same_chart = K_t == K_tp1  # [B]
         same_chart_samples += same_chart.sum().item()
         total_samples += B
         if same_chart.any():
@@ -1126,7 +1145,14 @@ def compute_phase2_geodesic_diffusion_loss(
             rw_s = rw_t[idx]
 
             pair_loss, pair_metrics = compute_supervised_wm_loss(
-                wm, z_s, z_e, a_s, rw_s, N, dt, config,
+                wm,
+                z_s,
+                z_e,
+                a_s,
+                rw_s,
+                N,
+                dt,
+                config,
             )
             total_loss = total_loss + pair_loss
             pair_count += 1
@@ -1188,7 +1214,9 @@ def compute_phase1_loss(
     atlas_encoder = getattr(encoder, "encoder", encoder)
     if router_reg_weights is None:
         router_reg_weights = getattr(
-            atlas_encoder, "_last_soft_router_weights_live", enc_router_weights,
+            atlas_encoder,
+            "_last_soft_router_weights_live",
+            enc_router_weights,
         )
     if usage_router_weights is None:
         usage_router_weights = enc_router_weights
@@ -1206,9 +1234,16 @@ def compute_phase1_loss(
     loss_recon = F.mse_loss(x_recon, x)
     base_loss = config.w_feature_recon * loss_recon
     metrics["recon"] = loss_recon.item()
-    per_sample_recon_error = F.mse_loss(
-        x_recon, x, reduction="none",
-    ).reshape(x.shape[0], -1).mean(dim=1)
+    per_sample_recon_error = (
+        F
+        .mse_loss(
+            x_recon,
+            x,
+            reduction="none",
+        )
+        .reshape(x.shape[0], -1)
+        .mean(dim=1)
+    )
     recon_quality_abs = compute_error_quality_targets(
         per_sample_recon_error,
         alpha=config.radial_quality_alpha,
@@ -1252,16 +1287,17 @@ def compute_phase1_loss(
     else:
         quality_target = recon_quality
     quality_mix = min(max(float(config.radial_quality_mix), 0.0), 1.0)
-    quality_base_weight = min(max(float(getattr(config, "radial_quality_base_weight", 0.0)), 0.0), 1.0)
+    quality_base_weight = min(
+        max(float(getattr(config, "radial_quality_base_weight", 0.0)), 0.0), 1.0
+    )
     routing_confidence = compute_routing_confidence(
         router_reg_weights.detach(),
         config.num_charts,
     )
     gated_radial_target = routing_confidence * ((1.0 - quality_mix) + quality_mix * quality_target)
     radial_target = (
-        (1.0 - quality_base_weight) * gated_radial_target
-        + quality_base_weight * quality_target
-    )
+        1.0 - quality_base_weight
+    ) * gated_radial_target + quality_base_weight * quality_target
     metrics["recon_quality_mean"] = recon_quality.mean().item()
     metrics["vq_quality_mean"] = vq_quality.mean().item()
     metrics["combined_quality_mean"] = quality_target.mean().item()
@@ -1338,15 +1374,24 @@ def compute_phase1_loss(
         if radial_center is None and v_local is not None:
             radial_latent = v_local
         if radial_center is not None:
-            metrics["local_radius_mean"] = hyperbolic_distance(
-                _project_to_ball(z_geo),
-                _project_to_ball(radial_center),
-            ).mean().item()
+            metrics["local_radius_mean"] = (
+                hyperbolic_distance(
+                    _project_to_ball(z_geo),
+                    _project_to_ball(radial_center),
+                )
+                .mean()
+                .item()
+            )
         elif v_local is not None:
             origin = torch.zeros_like(v_local)
-            metrics["local_radius_mean"] = hyperbolic_distance(
-                _project_to_ball(v_local), origin,
-            ).mean().item()
+            metrics["local_radius_mean"] = (
+                hyperbolic_distance(
+                    _project_to_ball(v_local),
+                    origin,
+                )
+                .mean()
+                .item()
+            )
         else:
             metrics["local_radius_mean"] = 0.0
         loss_radcal = compute_radial_calibration_loss(
@@ -1387,7 +1432,8 @@ def compute_phase1_loss(
     if config.w_codebook_spread > 0 and hasattr(atlas_encoder, "codebook"):
         codebook = atlas_encoder.codebook
         loss_spread = compute_codebook_spread_loss(
-            codebook, margin=config.w_codebook_spread_margin,
+            codebook,
+            margin=config.w_codebook_spread_margin,
         )
         base_loss = base_loss + config.w_codebook_spread * loss_spread
         metrics["codebook_spread"] = loss_spread.item()
@@ -1427,7 +1473,9 @@ def compute_phase1_loss(
             raise RuntimeError(msg)
         codebook = atlas_encoder.codebook
         loss_code_usage, code_usage_metrics = compute_code_usage_band_loss(
-            v_local, codebook, usage_router_weights,
+            v_local,
+            codebook,
+            usage_router_weights,
             hard_code_indices=indices_stack,
             h_low=config.code_usage_entropy_low,
             h_high=config.code_usage_entropy_high,
@@ -1440,7 +1488,8 @@ def compute_phase1_loss(
     # Window loss
     if config.w_window > 0:
         loss_window, _ = compute_window_loss(
-            router_reg_weights, config.num_charts,
+            router_reg_weights,
+            config.num_charts,
             eps_ground=config.w_window_eps_ground,
         )
         base_loss = base_loss + config.w_window * loss_window
@@ -1451,9 +1500,14 @@ def compute_phase1_loss(
     # Encoder-decoder routing consistency
     if config.w_consistency > 0:
         eps = 1e-6
-        kl = (enc_router_weights * torch.log(
-            (enc_router_weights + eps) / (dec_router_weights + eps)
-        )).sum(dim=-1).mean()
+        kl = (
+            (
+                enc_router_weights
+                * torch.log((enc_router_weights + eps) / (dec_router_weights + eps))
+            )
+            .sum(dim=-1)
+            .mean()
+        )
         base_loss = base_loss + config.w_consistency * kl
         metrics["consistency"] = kl.item()
     else:
@@ -1529,7 +1583,9 @@ def compute_phase2_loss(
         elif "phi_eff" in wm_output:
             # Fallback: variance across horizon steps
             loss_energy = compute_energy_conservation_loss(
-                wm_output["phi_eff"], wm_output["momenta"], wm_output["z_trajectory"],
+                wm_output["phi_eff"],
+                wm_output["momenta"],
+                wm_output["z_trajectory"],
             )
         else:
             loss_energy = z_targets.new_tensor(0.0)
@@ -1587,11 +1643,20 @@ def compute_phase3_loss(
         metrics: Dict of individual loss components for logging.
     """
     base_enc, zn_reg, enc_metrics = compute_phase1_loss(
-        x, x_recon, vq_loss, enc_router_weights, dec_router_weights,
-        z_geo, encoder, config,
+        x,
+        x_recon,
+        vq_loss,
+        enc_router_weights,
+        dec_router_weights,
+        z_geo,
+        encoder,
+        config,
     )
     loss_dyn, dyn_metrics = compute_phase2_loss(
-        wm_output, z_targets, chart_targets, config,
+        wm_output,
+        z_targets,
+        chart_targets,
+        config,
     )
 
     total = (

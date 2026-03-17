@@ -433,7 +433,9 @@ class TestGeometricActor:
         from fragile.rl.train_dreamer import _sync_rl_atlas
 
         _sync_rl_atlas(obs_model, action_model, world_model, critic, actor, reward_head)
-        obs_info = symbolize_latent_with_atlas(obs_model, z, hard_routing=False, hard_routing_tau=1.0)
+        obs_info = symbolize_latent_with_atlas(
+            obs_model, z, hard_routing=False, hard_routing_tau=1.0
+        )
         out = actor(
             obs_info["chart_idx"],
             obs_info["code_idx"],
@@ -462,7 +464,9 @@ class TestGeometricActor:
 
         _sync_rl_atlas(obs_model, action_model, world_model, critic, actor, reward_head)
         actor.eval()
-        obs_info = symbolize_latent_with_atlas(obs_model, z, hard_routing=False, hard_routing_tau=1.0)
+        obs_info = symbolize_latent_with_atlas(
+            obs_model, z, hard_routing=False, hard_routing_tau=1.0
+        )
         sample = actor.sample_latent(
             obs_info["chart_idx"],
             obs_info["code_idx"],
@@ -478,7 +482,9 @@ class TestGeometricActor:
         torch.testing.assert_close(sample["action_z_geo"], mode["action_z_geo"], atol=1e-6, rtol=0)
         torch.testing.assert_close(
             mode["action_z_geo"],
-            actor.mode_latent(obs_info["chart_idx"], obs_info["code_idx"], obs_info["z_n"])["action_z_geo"],
+            actor.mode_latent(obs_info["chart_idx"], obs_info["code_idx"], obs_info["z_n"])[
+                "action_z_geo"
+            ],
             atol=1e-6,
             rtol=0,
         )
@@ -497,7 +503,9 @@ class TestGeometricActor:
         from fragile.rl.train_dreamer import _sync_rl_atlas
 
         _sync_rl_atlas(obs_model, action_model, world_model, critic, actor, reward_head)
-        obs_info = symbolize_latent_with_atlas(obs_model, z, hard_routing=False, hard_routing_tau=1.0)
+        obs_info = symbolize_latent_with_atlas(
+            obs_model, z, hard_routing=False, hard_routing_tau=1.0
+        )
         action_out = actor(
             obs_info["chart_idx"],
             obs_info["code_idx"],
@@ -506,7 +514,9 @@ class TestGeometricActor:
             hard_routing_tau=1.0,
         )
         action_out["action_z_geo"].mean().backward()
-        grad_norms = [param.grad.norm().item() for param in actor.parameters() if param.grad is not None]
+        grad_norms = [
+            param.grad.norm().item() for param in actor.parameters() if param.grad is not None
+        ]
         assert grad_norms
         assert any(norm > 0.0 for norm in grad_norms)
 
@@ -540,7 +550,9 @@ class TestBoundaryGeometry:
         assert control_cov.shape == (B, D)
         assert control_tan.shape == (B, D)
         assert value.shape == (B, 1)
-        torch.testing.assert_close(lower_control(z, control_tan), control_cov, atol=1e-5, rtol=1e-5)
+        torch.testing.assert_close(
+            lower_control(z, control_tan), control_cov, atol=1e-5, rtol=1e-5
+        )
 
 
 class TestRewardHead:
@@ -650,7 +662,9 @@ class TestPolicyAction:
         )
         torch.testing.assert_close(out["action_canonical"], actor_out["action_z_geo"])
         torch.testing.assert_close(out["action_latent"], actor_out["action_z_geo"])
-        torch.testing.assert_close(out["action_router_weights"], actor_out["action_router_weights"])
+        torch.testing.assert_close(
+            out["action_router_weights"], actor_out["action_router_weights"]
+        )
         torch.testing.assert_close(out["action_code_latent"], actor_out["action_z_q"])
         torch.testing.assert_close(out["action_chart_idx"], actor_out["action_chart_idx"])
         torch.testing.assert_close(out["action_code_idx"], actor_out["action_code_idx"])
@@ -777,7 +791,9 @@ class TestConfigAndParseArgs:
     def test_config_canonicalizes_action_atlas_sizes(self):
         from fragile.rl.config import DreamerConfig
 
-        cfg = DreamerConfig(num_charts=5, num_action_charts=0, action_codes_per_chart=0, codes_per_chart=7)
+        cfg = DreamerConfig(
+            num_charts=5, num_action_charts=0, action_codes_per_chart=0, codes_per_chart=7
+        )
         assert cfg.num_action_charts == 5
         assert cfg.num_action_macros == 5
         assert cfg.action_codes_per_chart == 7
@@ -1044,29 +1060,31 @@ class TestActorStateMetric:
         cfg_zero.actor_metric_fisher_scale = 0.0
         _, _, scale_cert_zero, _scale_trust_zero, _scale_barrier_zero, metrics_zero = (
             train_dreamer._actor_state_metric(
-            cfg_zero,
-            metric=world_model.metric,
-            state_z_geo=state_z_geo,
-            actor_out=actor_out,
-            obs_z_n=obs_z_n,
-            target_chart_idx=target_chart_idx,
-            target_code_idx=target_code_idx,
-            exact_covector=exact_covector,
-        ))
+                cfg_zero,
+                metric=world_model.metric,
+                state_z_geo=state_z_geo,
+                actor_out=actor_out,
+                obs_z_n=obs_z_n,
+                target_chart_idx=target_chart_idx,
+                target_code_idx=target_code_idx,
+                exact_covector=exact_covector,
+            )
+        )
 
         cfg_full = copy.deepcopy(config)
         cfg_full.actor_metric_fisher_scale = 1.0
         _, _, scale_cert_full, _scale_trust_full, _scale_barrier_full, metrics_full = (
             train_dreamer._actor_state_metric(
-            cfg_full,
-            metric=world_model.metric,
-            state_z_geo=state_z_geo,
-            actor_out=actor_out,
-            obs_z_n=obs_z_n,
-            target_chart_idx=target_chart_idx,
-            target_code_idx=target_code_idx,
-            exact_covector=exact_covector,
-        ))
+                cfg_full,
+                metric=world_model.metric,
+                state_z_geo=state_z_geo,
+                actor_out=actor_out,
+                obs_z_n=obs_z_n,
+                target_chart_idx=target_chart_idx,
+                target_code_idx=target_code_idx,
+                exact_covector=exact_covector,
+            )
+        )
 
         assert scale_cert_zero
         assert metrics_zero["actor/state_beta_pi"] == pytest.approx(0.0)
@@ -1204,7 +1222,10 @@ class TestActorBootstrapAndTrustRegion:
         )
 
         assert float(gate_good) > float(gate_bad)
-        assert metrics_good["macro/transition_sharpen_gate"] > metrics_bad["macro/transition_sharpen_gate"]
+        assert (
+            metrics_good["macro/transition_sharpen_gate"]
+            > metrics_bad["macro/transition_sharpen_gate"]
+        )
 
     def test_critic_stage_scales_delay_shaping_terms(self, config):
         from fragile.rl import train_dreamer
@@ -1586,7 +1607,9 @@ class TestCriticStiffness:
         assert float(loss) == pytest.approx(0.0, abs=1e-7)
         assert metrics["critic/exact_increment_horizon_used"] == pytest.approx(2.0)
 
-    def test_multistep_covector_alignment_loss_matches_two_step_transition(self, config, world_model):
+    def test_multistep_covector_alignment_loss_matches_two_step_transition(
+        self, config, world_model
+    ):
         from fragile.rl import train_dreamer
 
         cfg = copy.deepcopy(config)
@@ -1636,7 +1659,9 @@ class TestAtlasSync:
         from fragile.rl.train_dreamer import _sync_rl_atlas
 
         with torch.no_grad():
-            obs_model.encoder.chart_centers.copy_(torch.randn_like(obs_model.encoder.chart_centers) * 0.4)
+            obs_model.encoder.chart_centers.copy_(
+                torch.randn_like(obs_model.encoder.chart_centers) * 0.4
+            )
             action_model.encoder.chart_centers.copy_(
                 torch.randn_like(action_model.encoder.chart_centers) * 0.4
             )
@@ -1811,8 +1836,6 @@ class TestRolloutCollection:
         assert metrics["eval/reward_mean"] == pytest.approx(1.0)
 
 
-
-
 class TestImagination:
     def test_outputs_current_shapes_and_exact_split(
         self,
@@ -1884,7 +1907,9 @@ class TestImagination:
         monkeypatch.setattr(
             world_model.chart_predictor,
             "forward",
-            bad_chart_logits.__get__(world_model.chart_predictor, type(world_model.chart_predictor)),
+            bad_chart_logits.__get__(
+                world_model.chart_predictor, type(world_model.chart_predictor)
+            ),
         )
         _sync_rl_atlas(obs_model, action_model, world_model, critic, actor, reward_head)
         out = _imagine(
@@ -1975,7 +2000,9 @@ class TestImagination:
                 code_logits[:, :, 0] = 1.0
                 return {
                     "action_chart_logits": chart_logits,
-                    "action_chart_idx": torch.zeros(batch, dtype=torch.long, device=obs_z_n.device),
+                    "action_chart_idx": torch.zeros(
+                        batch, dtype=torch.long, device=obs_z_n.device
+                    ),
                     "action_code_logits": code_logits,
                     "action_code_idx": torch.zeros(batch, dtype=torch.long, device=obs_z_n.device),
                     "action_z_n": torch.full_like(obs_z_n, 0.2),
@@ -1991,7 +2018,6 @@ class TestImagination:
             def decoder(
                 self,
                 z_geo,
-                _unused,
                 *,
                 router_weights,
                 hard_routing,
@@ -2064,7 +2090,9 @@ class TestImagination:
                 "z_n": torch.zeros_like(z_in),
             }
 
-        monkeypatch.setattr(train_dreamer, "symbolize_latent_with_atlas", fake_symbolize_latent_with_atlas)
+        monkeypatch.setattr(
+            train_dreamer, "symbolize_latent_with_atlas", fake_symbolize_latent_with_atlas
+        )
 
         def zero_covector(_critic, z_in, _rw, **_kwargs):
             return torch.zeros_like(z_in)
@@ -2072,7 +2100,9 @@ class TestImagination:
         monkeypatch.setattr(train_dreamer, "_value_covector_from_critic", zero_covector)
 
         def constant_conservative_reward(_critic, z_curr, _rw_curr, _z_next, _rw_next, _gamma):
-            reward = torch.full((z_curr.shape[0], 1), 2.0, device=z_curr.device, dtype=z_curr.dtype)
+            reward = torch.full(
+                (z_curr.shape[0], 1), 2.0, device=z_curr.device, dtype=z_curr.dtype
+            )
             return reward, reward, reward
 
         monkeypatch.setattr(
@@ -2131,7 +2161,9 @@ class TestImagination:
                 code_logits[:, :, 0] = 1.0
                 return {
                     "action_chart_logits": chart_logits,
-                    "action_chart_idx": torch.zeros(batch, dtype=torch.long, device=obs_z_n.device),
+                    "action_chart_idx": torch.zeros(
+                        batch, dtype=torch.long, device=obs_z_n.device
+                    ),
                     "action_code_logits": code_logits,
                     "action_code_idx": torch.zeros(batch, dtype=torch.long, device=obs_z_n.device),
                     "action_z_n": torch.full_like(obs_z_n, 0.2),
@@ -2147,7 +2179,6 @@ class TestImagination:
             def decoder(
                 self,
                 z_geo,
-                _unused,
                 *,
                 router_weights,
                 hard_routing,
@@ -2224,7 +2255,9 @@ class TestImagination:
                 "z_n": torch.zeros_like(z_in),
             }
 
-        monkeypatch.setattr(train_dreamer, "symbolize_latent_with_atlas", fake_symbolize_latent_with_atlas)
+        monkeypatch.setattr(
+            train_dreamer, "symbolize_latent_with_atlas", fake_symbolize_latent_with_atlas
+        )
         monkeypatch.setattr(
             train_dreamer,
             "_value_covector_from_critic",

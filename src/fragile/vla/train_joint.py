@@ -13,7 +13,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -28,106 +27,172 @@ from fragile.checkpoints import (
     count_parameters,
 )
 from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
+from fragile.core.layers.gauge import hyperbolic_distance
 from fragile.core.layers.topology import compute_jump_consistency_loss
 from fragile.hyperbolic_losses import (
     compute_router_information_metrics,
-    compute_router_sharpness_metrics,
     compute_router_score_metrics,
+    compute_router_sharpness_metrics,
     get_jump_weight_schedule,
 )
-from fragile.core.layers.gauge import hyperbolic_distance
-from fragile.vla.extract_features import VLAFeatureDataset
 from fragile.vla.config import VLAConfig
-from fragile.vla.phase1_control import (
-    Phase1AdaptiveState,
-    init_phase1_adaptive_state,
-    phase1_effective_weight_scales,
-    update_phase1_adaptive_state,
+from fragile.vla.covariant_world_model import GeometricWorldModel
+from fragile.vla.extract_features import VLAFeatureDataset
+from fragile.vla.losses import (
+    _deterministic_st_router_weights,
+    compute_dyn_transition_loss,
+    compute_dynamics_markov_loss,
+    compute_enclosure_loss,
+    compute_phase1_loss,
+    compute_phase2_geodesic_diffusion_loss,
+    compute_phase2_loss,
+    DynamicsTransitionModel,
+    EnclosureProbe,
+    grl_alpha_schedule,
+    orthogonality_loss,
+    zeno_loss,
 )
 from fragile.vla.optim import (
     build_encoder_param_groups,
     get_codebook_like_params,
 )
-from fragile.vla.losses import (
-    _deterministic_st_router_weights,
-    compute_phase1_loss,
-    compute_phase2_loss,
-    compute_phase2_geodesic_diffusion_loss,
-    compute_dynamics_markov_loss,
-    orthogonality_loss,
-    EnclosureProbe,
-    compute_enclosure_loss,
-    grl_alpha_schedule,
-    zeno_loss,
-    DynamicsTransitionModel,
-    compute_dyn_transition_loss,
+from fragile.vla.phase1_control import (
+    init_phase1_adaptive_state,
+    phase1_effective_weight_scales,
+    Phase1AdaptiveState,
+    update_phase1_adaptive_state,
 )
-from fragile.vla.covariant_world_model import GeometricWorldModel
+
 
 # ── Tracked loss terms ────────────────────────────────────────────
 ENCODER_LOSS_KEYS = [
-    "recon", "vq", "entropy", "consistency",
-    "chart_usage", "chart_ot", "uniformity", "radial_cal",
-    "confidence_calibration", "hard_routing_nll", "router_margin",
+    "recon",
+    "vq",
+    "entropy",
+    "consistency",
+    "chart_usage",
+    "chart_ot",
+    "uniformity",
+    "radial_cal",
+    "confidence_calibration",
+    "hard_routing_nll",
+    "router_margin",
     "v_tangent_barrier",
-    "codebook_spread", "codebook_center",
-    "chart_center_mean", "chart_center_radius", "chart_center_sep",
+    "codebook_spread",
+    "codebook_center",
+    "chart_center_mean",
+    "chart_center_radius",
+    "chart_center_sep",
     "code_usage",
-    "window", "jump", "ortho",
+    "window",
+    "jump",
+    "ortho",
 ]
 
 ENCLOSURE_DIAG_KEYS = [
-    "encl/acc_full", "encl/acc_base", "encl/defect_acc",
-    "encl/defect_ce", "encl/ce_full", "encl/ce_base",
+    "encl/acc_full",
+    "encl/acc_base",
+    "encl/defect_acc",
+    "encl/defect_ce",
+    "encl/ce_full",
+    "encl/ce_base",
 ]
 
 ZENO_DIAG_KEYS = [
-    "zeno/flip_rate", "zeno/routing_entropy", "zeno/max_weight",
+    "zeno/flip_rate",
+    "zeno/routing_entropy",
+    "zeno/max_weight",
     "zeno/mean_segment_length",
 ]
 
 DYNAMICS_LOSS_KEYS = [
-    "geodesic", "chart_transition", "momentum_reg",
-    "energy_conservation", "screened_poisson", "hodge",
+    "geodesic",
+    "chart_transition",
+    "momentum_reg",
+    "energy_conservation",
+    "screened_poisson",
+    "hodge",
     # Geodesic diffusion keys (only populated when use_geodesic_diffusion=True)
-    "position", "endpoint", "momentum_target", "hodge_perp",
+    "position",
+    "endpoint",
+    "momentum_target",
+    "hodge_perp",
     "geo_miss",
 ]
 
 GEODIFF_DIAG_KEYS = [
-    "mean_momentum", "mean_phi_eff",
-    "hodge_cons", "hodge_sol", "hodge_harm",
-    "same_chart_frac", "chart_accuracy", "n_same_chart_pairs",
+    "mean_momentum",
+    "mean_phi_eff",
+    "hodge_cons",
+    "hodge_sol",
+    "hodge_harm",
+    "same_chart_frac",
+    "chart_accuracy",
+    "n_same_chart_pairs",
 ]
 
 DYN_SYMBOL_KEYS = [
-    "dyn_vq", "dyn_trans_ce", "dyn_trans_acc", "dyn_zeno",
-    "dyn_state_flip_rate", "dyn_state_entropy", "dyn_state_max_prob",
+    "dyn_vq",
+    "dyn_trans_ce",
+    "dyn_trans_acc",
+    "dyn_zeno",
+    "dyn_state_flip_rate",
+    "dyn_state_entropy",
+    "dyn_state_max_prob",
     "dyn_code_flip_rate",
 ]
 
 INFO_KEYS = [
-    "I_XK", "H_K", "H_K_given_X",
-    "ot_target_top1_mean", "ot_plan_col_l1", "ot_plan_row_l1",
-    "H_usage", "usage_perplexity", "usage_active",
-    "H_code_usage", "code_usage_perplexity", "active_code_charts",
-    "top1_prob_mean", "top1_prob_p10", "top1_prob_p90",
-    "top2_prob_mean", "top1_gap_mean",
-    "score_gap_mean", "score_gap_p50", "score_gap_p90", "score_gap_p99",
-    "score_std", "score_mean_abs",
+    "I_XK",
+    "H_K",
+    "H_K_given_X",
+    "ot_target_top1_mean",
+    "ot_plan_col_l1",
+    "ot_plan_row_l1",
+    "H_usage",
+    "usage_perplexity",
+    "usage_active",
+    "H_code_usage",
+    "code_usage_perplexity",
+    "active_code_charts",
+    "top1_prob_mean",
+    "top1_prob_p10",
+    "top1_prob_p90",
+    "top2_prob_mean",
+    "top1_gap_mean",
+    "score_gap_mean",
+    "score_gap_p50",
+    "score_gap_p90",
+    "score_gap_p99",
+    "score_std",
+    "score_mean_abs",
     "soft_equiv_log_ratio",
-    "recon_quality_mean", "vq_quality_mean", "combined_quality_mean",
-    "routing_confidence_mean", "radial_target_mean", "local_radius_mean",
-    "v_boundary_frac", "v_local_clip_frac", "z_geo_clip_frac",
-    "v_raw_r_p99", "v_local_raw_r_p99", "z_geo_raw_r_p99",
-    "router_grad_norm", "codebook_grad_norm", "centers_grad_norm",
-    "val_proj_grad_norm", "soft_equiv_grad_norm",
-    "grad_norm", "param_norm", "update_ratio", "lr",
+    "recon_quality_mean",
+    "vq_quality_mean",
+    "combined_quality_mean",
+    "routing_confidence_mean",
+    "radial_target_mean",
+    "local_radius_mean",
+    "v_boundary_frac",
+    "v_local_clip_frac",
+    "z_geo_clip_frac",
+    "v_raw_r_p99",
+    "v_local_raw_r_p99",
+    "z_geo_raw_r_p99",
+    "router_grad_norm",
+    "codebook_grad_norm",
+    "centers_grad_norm",
+    "val_proj_grad_norm",
+    "soft_equiv_grad_norm",
+    "grad_norm",
+    "param_norm",
+    "update_ratio",
+    "lr",
 ]
 
 
 def _init_encoder_accumulators() -> dict[str, float]:
-    return {k: 0.0 for k in ENCODER_LOSS_KEYS + INFO_KEYS + ["total"]}
+    return dict.fromkeys(ENCODER_LOSS_KEYS + INFO_KEYS + ["total"], 0.0)
 
 
 BALL_MAX_NORM = 0.99
@@ -172,7 +237,7 @@ def _safe_grad_norm(params: list[torch.nn.Parameter]) -> float:
         return 0.0
     total = torch.zeros((), device=grads[0].device)
     for grad in grads:
-        total = total + (grad ** 2).sum()
+        total = total + (grad**2).sum()
     return float(torch.sqrt(total).item())
 
 
@@ -244,15 +309,25 @@ def _phase1_debug_metrics(model: TopoEncoderPrimitives) -> dict[str, float]:
 
 
 WM_DIAG_KEYS = [
-    "mean_momentum", "energy_var", "jump_frac", "mean_phi_eff",
-    "hodge_cons", "hodge_sol", "hodge_harm",
+    "mean_momentum",
+    "energy_var",
+    "jump_frac",
+    "mean_phi_eff",
+    "hodge_cons",
+    "hodge_sol",
+    "hodge_harm",
 ]
 
 
 def _init_dynamics_accumulators() -> dict[str, float]:
-    return {k: 0.0 for k in
-            DYNAMICS_LOSS_KEYS + DYN_SYMBOL_KEYS + WM_DIAG_KEYS + GEODIFF_DIAG_KEYS
-            + ["grad_norm", "param_norm", "update_ratio", "lr", "total"]}
+    return dict.fromkeys(
+        DYNAMICS_LOSS_KEYS
+        + DYN_SYMBOL_KEYS
+        + WM_DIAG_KEYS
+        + GEODIFF_DIAG_KEYS
+        + ["grad_norm", "param_norm", "update_ratio", "lr", "total"],
+        0.0,
+    )
 
 
 def _init_joint_accumulators() -> dict[str, float]:
@@ -268,7 +343,7 @@ def _init_joint_accumulators() -> dict[str, float]:
         + ZENO_DIAG_KEYS
         + ["zeno"]
     )
-    return {k: 0.0 for k in keys}
+    return dict.fromkeys(keys, 0.0)
 
 
 def _wm_diagnostics(wm_output: dict[str, torch.Tensor]) -> dict[str, float]:
@@ -303,7 +378,8 @@ def _bind_world_model_to_encoder_atlas(
 
 
 def _chart_stats_from_tensor(
-    K_all: torch.Tensor, num_charts: int,
+    K_all: torch.Tensor,
+    num_charts: int,
 ) -> tuple[np.ndarray, float, int]:
     """Compute usage, perplexity, active count from hard chart assignments."""
     K_np = K_all.detach().cpu().reshape(-1).numpy()
@@ -317,7 +393,8 @@ def _chart_stats_from_tensor(
 
 
 def _chart_stats_from_probs(
-    router_weights: torch.Tensor, num_charts: int,
+    router_weights: torch.Tensor,
+    num_charts: int,
 ) -> tuple[np.ndarray, float, int]:
     """Compute usage, perplexity, active count from soft routing probabilities."""
     rw = router_weights.detach().cpu().reshape(-1, num_charts)
@@ -429,9 +506,20 @@ def _compute_encoder_losses(
     hard_routing: bool = False,
     hard_routing_tau: float = 1.0,
     phase1_config: VLAConfig | None = None,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float], torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor,
-           torch.Tensor, torch.Tensor]:
+) -> tuple[
+    torch.Tensor,
+    torch.Tensor,
+    dict[str, float],
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+    torch.Tensor,
+]:
     """Compute all Phase 1 encoder losses with split encoder/decoder calls.
 
     Returns (base_loss, zn_reg_loss, metrics, z_geo, enc_w, K_chart,
@@ -439,8 +527,18 @@ def _compute_encoder_losses(
     can reuse encoder outputs without re-encoding.
     """
     (
-        K_chart, K_code, z_n, z_tex, enc_w, z_geo,
-        vq_loss, indices, z_n_all, c_bar, v_local, z_q_blended,
+        K_chart,
+        K_code,
+        z_n,
+        z_tex,
+        enc_w,
+        z_geo,
+        vq_loss,
+        indices,
+        z_n_all,
+        c_bar,
+        v_local,
+        z_q_blended,
     ) = model.encoder(x, hard_routing=hard_routing, hard_routing_tau=hard_routing_tau)
 
     # When hard routing is on, pass encoder weights to decoder so both use the
@@ -448,10 +546,12 @@ def _compute_encoder_losses(
     # this the decoder draws an independent Gumbel sample, consistency loss
     # explodes, and training diverges.
     router_override = enc_w if hard_routing else None
-    x_recon, dec_w, aux_losses = model.decoder(
-        z_geo, None, chart_index=None,  # z_tex not used by decoder
+    x_recon, dec_w, _aux_losses = model.decoder(
+        z_geo,
+        chart_index=None,
         router_weights=router_override,
-        hard_routing=hard_routing, hard_routing_tau=hard_routing_tau,
+        hard_routing=hard_routing,
+        hard_routing_tau=hard_routing_tau,
     )
     usage_router_weights = enc_w
     if hard_routing:
@@ -493,7 +593,7 @@ def _compute_encoder_losses(
 
     # Orthogonality loss
     ortho_loss = orthogonality_loss(z_n, z_tex)
-    base_loss = base_loss + getattr(args, 'w_perp', 0.01) * ortho_loss
+    base_loss = base_loss + getattr(args, "w_perp", 0.01) * ortho_loss
 
     total = base_loss + zn_reg_loss
 
@@ -501,7 +601,20 @@ def _compute_encoder_losses(
     metrics["ortho"] = ortho_loss.item()
     metrics["jump_weight"] = current_jump_weight
     metrics["total"] = total.item()
-    return base_loss, zn_reg_loss, metrics, z_geo, enc_w, K_chart, z_n, z_tex, c_bar, K_code, z_q_blended, v_local
+    return (
+        base_loss,
+        zn_reg_loss,
+        metrics,
+        z_geo,
+        enc_w,
+        K_chart,
+        z_n,
+        z_tex,
+        c_bar,
+        K_code,
+        z_q_blended,
+        v_local,
+    )
 
 
 # ── Eval pass (chart usage, perplexity, mean_r) ──────────────────
@@ -518,6 +631,7 @@ def _eval_pass(
 ) -> tuple[np.ndarray, float, int, np.ndarray, float, int, float, dict]:
     """Compute hard/soft chart stats, mean radius, and extra diagnostics."""
     from fragile.core.layers.atlas import _project_to_ball
+
     model.eval()
     all_charts: list[torch.Tensor] = []
     all_soft_router_weights: list[torch.Tensor] = []
@@ -534,7 +648,20 @@ def _eval_pass(
         for batch in loader:
             x = batch["feature"].to(device)
             eval_tau = -1.0 if hard_routing else hard_routing_tau
-            K_ch, K_code, z_n, z_tex, enc_w, z_g, vq_loss, indices, z_n_all, c_bar, v_local, _ = model.encoder(
+            (
+                K_ch,
+                _K_code,
+                _z_n,
+                _z_tex,
+                enc_w,
+                z_g,
+                _vq_loss,
+                indices,
+                _z_n_all,
+                _c_bar,
+                v_local,
+                _,
+            ) = model.encoder(
                 x,
                 hard_routing=hard_routing,
                 hard_routing_tau=eval_tau,
@@ -561,13 +688,15 @@ def _eval_pass(
             if z_geo_raw_norms is not None:
                 all_z_geo_raw_norms.append(z_geo_raw_norms.cpu())
             if hasattr(model.encoder, "soft_equiv_log_ratio_loss"):
-                all_soft_equiv.append(float(model.encoder.soft_equiv_log_ratio_loss().detach().cpu().item()))
+                all_soft_equiv.append(
+                    float(model.encoder.soft_equiv_log_ratio_loss().detach().cpu().item())
+                )
             # Compute per-sample VQ distance (nearest code distance)
             codebook = _project_to_ball(model.encoder.codebook)  # [N_c, K_codes, D]
             v_exp = v_local.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
             cb_exp = codebook.unsqueeze(0)  # [1, N_c, K_codes, D]
             diff = v_exp - cb_exp  # Euclidean approx for diagnostics
-            dists_sq = (diff ** 2).sum(-1)  # [B, N_c, K_codes]
+            dists_sq = (diff**2).sum(-1)  # [B, N_c, K_codes]
             min_dist = dists_sq.min(dim=-1).values  # [B, N_c]
             # Weight by router for per-sample nearest distance
             weighted_dist = (min_dist * soft_router_weights).sum(dim=-1)  # [B]
@@ -595,7 +724,8 @@ def _eval_pass(
     perplexity = float(np.exp(-np.sum(usage * np.log(usage + 1e-8))))
     active = int((usage > 0.01).sum())
     soft_usage, soft_perplexity, soft_active = _chart_stats_from_probs(
-        router_weights_t, K,
+        router_weights_t,
+        K,
     )
     soft_info = compute_router_information_metrics(router_weights_t)
     soft_sharpness = compute_router_sharpness_metrics(router_weights_t)
@@ -631,7 +761,7 @@ def _eval_pass(
     code_entropy_per_chart = []
     code_perplexity_per_chart = []
     for c in range(K):
-        mask = (charts_t == c)
+        mask = charts_t == c
         if mask.sum() > 0:
             codes_for_chart = code_indices[mask, c]
             codes_used = codes_for_chart.unique().numel()
@@ -648,8 +778,12 @@ def _eval_pass(
 
     active_chart_mask = usage > 0.01
     if np.any(active_chart_mask):
-        code_entropy_mean_active = float(np.mean(np.array(code_entropy_per_chart)[active_chart_mask]))
-        code_perplexity_mean_active = float(np.mean(np.array(code_perplexity_per_chart)[active_chart_mask]))
+        code_entropy_mean_active = float(
+            np.mean(np.array(code_entropy_per_chart)[active_chart_mask])
+        )
+        code_perplexity_mean_active = float(
+            np.mean(np.array(code_perplexity_per_chart)[active_chart_mask])
+        )
     else:
         code_entropy_mean_active = 0.0
         code_perplexity_mean_active = 1.0
@@ -739,8 +873,10 @@ def _measure_min_length(
     all_dists = torch.cat(dists)
     median_dist = float(all_dists.median().item())
     mean_dist = float(all_dists.mean().item())
-    print(f"  ℓ_min measurement: median={median_dist:.4f}  mean={mean_dist:.4f}  "
-          f"(from {all_dists.numel()} pairs)")
+    print(
+        f"  ℓ_min measurement: median={median_dist:.4f}  mean={mean_dist:.4f}  "
+        f"(from {all_dists.numel()} pairs)"
+    )
     return median_dist
 
 
@@ -809,7 +945,9 @@ def _run_phase1(
     scheduler = None
     if args.use_scheduler or args.phase1_cosine_lr:
         scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.phase1_epochs, eta_min=args.phase1_eta_min,
+            optimizer,
+            T_max=args.phase1_epochs,
+            eta_min=args.phase1_eta_min,
         )
 
     # Enclosure probe (if enabled)
@@ -844,9 +982,9 @@ def _run_phase1(
     # Build accumulator keys — always include enclosure/zeno slots
     def _init_p1_accumulators() -> dict[str, float]:
         keys = list(ENCODER_LOSS_KEYS) + list(INFO_KEYS) + ["total"]
-        keys += list(ENCLOSURE_DIAG_KEYS) + ["encl_encoder", "encl_probe"]
-        keys += list(ZENO_DIAG_KEYS) + ["zeno"]
-        return {k: 0.0 for k in keys}
+        keys += [*list(ENCLOSURE_DIAG_KEYS), "encl_encoder", "encl_probe"]
+        keys += [*list(ZENO_DIAG_KEYS), "zeno"]
+        return dict.fromkeys(keys, 0.0)
 
     phase1_state = init_phase1_adaptive_state(args)
 
@@ -857,7 +995,9 @@ def _run_phase1(
         n_batches = 0
         current_hard_routing = _use_hard_routing(args, global_epoch_offset + epoch)
         current_tau = _get_hard_routing_tau(
-            args, global_epoch_offset + epoch, total_epochs_all_phases,
+            args,
+            global_epoch_offset + epoch,
+            total_epochs_all_phases,
         )
         phase1_config = _phase1_config_from_args(args, phase1_state)
 
@@ -865,27 +1005,56 @@ def _run_phase1(
             if use_sequences:
                 # --- Sequence-based training ---
                 features = batch["features"].to(device)  # [B, H, D_feat]
-                actions = batch["actions"].to(device)     # [B, H, A]
+                actions = batch["actions"].to(device)  # [B, H, A]
                 B, H, D_feat = features.shape
 
                 # Frame 0: full encoder losses (recon, VQ, etc.)
-                base_loss, zn_reg_loss, metrics, z_geo_0, enc_w_0, K_ch_0, zn_0, ztex_0, c_bar_0, K_code_0, _, _ = \
-                    _compute_encoder_losses(
-                        features[:, 0, :], model, jump_op, args, epoch,
-                        hard_routing=current_hard_routing,
-                        hard_routing_tau=current_tau,
-                        phase1_config=phase1_config,
-                    )
+                (
+                    base_loss,
+                    zn_reg_loss,
+                    metrics,
+                    _z_geo_0,
+                    enc_w_0,
+                    K_ch_0,
+                    zn_0,
+                    ztex_0,
+                    c_bar_0,
+                    K_code_0,
+                    _,
+                    _,
+                ) = _compute_encoder_losses(
+                    features[:, 0, :],
+                    model,
+                    jump_op,
+                    args,
+                    epoch,
+                    hard_routing=current_hard_routing,
+                    hard_routing_tau=current_tau,
+                    phase1_config=phase1_config,
+                )
 
                 # Encode remaining frames
                 if H > 1:
                     rest = features[:, 1:, :].reshape(B * (H - 1), D_feat)
-                    K_rest, Kcode_rest, zn_rest, ztex_rest, rw_rest, z_rest, _, _, _, c_bar_rest, _, _ = model.encoder(
+                    (
+                        K_rest,
+                        Kcode_rest,
+                        zn_rest,
+                        ztex_rest,
+                        rw_rest,
+                        z_rest,
+                        _,
+                        _,
+                        _,
+                        c_bar_rest,
+                        _,
+                        _,
+                    ) = model.encoder(
                         rest,
                         hard_routing=current_hard_routing,
                         hard_routing_tau=current_tau,
                     )
-                    z_geo_rest = z_rest.reshape(B, H - 1, -1)
+                    z_rest.reshape(B, H - 1, -1)
                     K_rest = K_rest.reshape(B, H - 1)
                     Kcode_rest = Kcode_rest.reshape(B, H - 1)
                     zn_rest = zn_rest.reshape(B, H - 1, -1)
@@ -894,14 +1063,14 @@ def _run_phase1(
                     rw_rest_reshaped = rw_rest.reshape(B, H - 1, -1)
                     K_all = torch.cat([K_ch_0.unsqueeze(1), K_rest], dim=1)
                     Kcode_all = torch.cat([K_code_0.unsqueeze(1), Kcode_rest], dim=1)
-                    zn_all = torch.cat([zn_0.unsqueeze(1), zn_rest], dim=1)
+                    torch.cat([zn_0.unsqueeze(1), zn_rest], dim=1)
                     ztex_all = torch.cat([ztex_0.unsqueeze(1), ztex_rest], dim=1)
                     c_bar_all = torch.cat([c_bar_0.unsqueeze(1), c_bar_rest], dim=1)
                     rw_all = torch.cat([enc_w_0.unsqueeze(1), rw_rest_reshaped], dim=1)
                 else:
                     K_all = K_ch_0.unsqueeze(1)
                     Kcode_all = K_code_0.unsqueeze(1)
-                    zn_all = zn_0.unsqueeze(1)
+                    zn_0.unsqueeze(1)
                     ztex_all = ztex_0.unsqueeze(1)
                     c_bar_all = c_bar_0.unsqueeze(1)
                     rw_all = enc_w_0.unsqueeze(1)
@@ -912,11 +1081,13 @@ def _run_phase1(
                 encl_diag_avg = {}
                 if probe is not None and H > 1:
                     global_step = epoch * len(train_loader) + n_batches
-                    probe.grl.alpha.fill_(grl_alpha_schedule(
-                        global_step,
-                        warmup_steps=getattr(args, "enclosure_grl_warmup_steps", 5000),
-                        max_alpha=getattr(args, "enclosure_grl_max_alpha", 1.0),
-                    ))
+                    probe.grl.alpha.fill_(
+                        grl_alpha_schedule(
+                            global_step,
+                            warmup_steps=getattr(args, "enclosure_grl_warmup_steps", 5000),
+                            max_alpha=getattr(args, "enclosure_grl_max_alpha", 1.0),
+                        )
+                    )
 
                     encl_enc_losses = []
                     encl_probe_losses = []
@@ -939,7 +1110,9 @@ def _run_phase1(
                     L_encl_encoder = torch.stack(encl_enc_losses).mean()
                     L_encl_probe = torch.stack(encl_probe_losses).mean()
                     for key in all_encl_diag[0]:
-                        encl_diag_avg[f"encl/{key}"] = sum(d[key] for d in all_encl_diag) / len(all_encl_diag)
+                        encl_diag_avg[f"encl/{key}"] = sum(d[key] for d in all_encl_diag) / len(
+                            all_encl_diag
+                        )
 
                 # Zeno loss
                 L_zeno = None
@@ -1011,11 +1184,17 @@ def _run_phase1(
                 # --- Single-frame training (original path) ---
                 x = batch["feature"].to(device)
 
-                base_loss, zn_reg_loss, metrics, _, _, _, _, _, _, _, _, _ = _compute_encoder_losses(
-                    x, model, jump_op, args, epoch,
-                    hard_routing=current_hard_routing,
-                    hard_routing_tau=current_tau,
-                    phase1_config=phase1_config,
+                base_loss, zn_reg_loss, metrics, _, _, _, _, _, _, _, _, _ = (
+                    _compute_encoder_losses(
+                        x,
+                        model,
+                        jump_op,
+                        args,
+                        epoch,
+                        hard_routing=current_hard_routing,
+                        hard_routing_tau=current_tau,
+                        phase1_config=phase1_config,
+                    )
                 )
                 total = base_loss + zn_reg_loss
 
@@ -1029,10 +1208,7 @@ def _run_phase1(
                 optimizer.step()
 
             current_lr = optimizer.param_groups[0]["lr"]
-            update_ratio = (
-                current_lr * grad_norm / (param_norm + 1e-12)
-                if param_norm > 0 else 0.0
-            )
+            update_ratio = current_lr * grad_norm / (param_norm + 1e-12) if param_norm > 0 else 0.0
 
             acc["total"] += metrics["total"]
             for k in ENCODER_LOSS_KEYS:
@@ -1137,9 +1313,7 @@ def _run_phase1(
                 f"raw_p99=({acc['v_raw_r_p99']:.3f}, {acc['v_local_raw_r_p99']:.3f}, "
                 f"{acc['z_geo_raw_r_p99']:.3f})"
             )
-            print(
-                f"  Usage: code={acc['code_usage']:.4f}"
-            )
+            print(f"  Usage: code={acc['code_usage']:.4f}")
             print(
                 f"  Train usage: H_hard={acc['H_usage']:.3f} "
                 f"perp={acc['usage_perplexity']:.2f}/{K} "
@@ -1148,18 +1322,15 @@ def _run_phase1(
                 f"code_perp={acc['code_usage_perplexity']:.2f}/{args.codes_per_chart} "
                 f"active_code_charts={acc['active_code_charts']:.2f}"
             )
-            print(
-                f"  Ortho: {acc['ortho']:.4f} "
-                f"(w={getattr(args, 'w_perp', 0.01):.3f})"
-            )
+            print(f"  Ortho: {acc['ortho']:.4f} (w={getattr(args, 'w_perp', 0.01):.3f})")
             if use_sequences:
-                _grl_alpha = probe.grl.alpha.item() if probe is not None else 0.0
+                grl_alpha = probe.grl.alpha.item() if probe is not None else 0.0
                 print(
                     f"  Enclosure: enc={acc.get('encl_encoder', 0):.4f} "
                     f"probe={acc.get('encl_probe', 0):.4f} "
                     f"defect_acc={acc.get('encl/defect_acc', 0):.4f} "
                     f"defect_ce={acc.get('encl/defect_ce', 0):.4f} "
-                    f"grl_alpha={_grl_alpha:.3f} "
+                    f"grl_alpha={grl_alpha:.3f} "
                     f"(w={w_enclosure:.3f})"
                 )
                 print(
@@ -1170,14 +1341,8 @@ def _run_phase1(
                     f"max_w={acc.get('zeno/max_weight', 0):.4f} "
                     f"(w={w_zeno:.3f})"
                 )
-            print(
-                f"  Window: {acc['window']:.3f} "
-                f"(w={args.w_window:.3f})"
-            )
-            print(
-                f"  Jump: {acc['jump']:.3f} "
-                f"(lambda={metrics.get('jump_weight', 0.0):.3f})"
-            )
+            print(f"  Window: {acc['window']:.3f} (w={args.w_window:.3f})")
+            print(f"  Jump: {acc['jump']:.3f} (lambda={metrics.get('jump_weight', 0.0):.3f})")
             print(
                 f"  Train: grad={acc['grad_norm']:.2e} "
                 f"upd_ratio={acc['update_ratio']:.2e} lr={acc['lr']:.2e}"
@@ -1255,11 +1420,9 @@ def _run_phase1(
                 f"  Code stats: H={extra['code_entropy_mean_active']:.3f} "
                 f"perp={extra['code_perplexity_mean_active']:.2f}/{args.codes_per_chart}"
             )
-            cpc = extra['codes_per_chart']
-            total_codes = extra['codes_per_chart_total']
-            print(
-                f"  Code util: {cpc} / {total_codes} per chart"
-            )
+            cpc = extra["codes_per_chart"]
+            total_codes = extra["codes_per_chart_total"]
+            print(f"  Code util: {cpc} / {total_codes} per chart")
             print("-" * 60)
 
         if phase1_state is not None:
@@ -1272,13 +1435,21 @@ def _run_phase1(
             )
 
         should_save = (
-            (epoch > 0 and epoch % args.save_every == 0)
-            or epoch == args.phase1_epochs - 1
-        )
+            epoch > 0 and epoch % args.save_every == 0
+        ) or epoch == args.phase1_epochs - 1
         if should_save:
             _save_checkpoint(
-                args, model, jump_op, None, optimizer, scheduler, epoch, 1, acc,
-                probe=probe, probe_optimizer=probe_optimizer,
+                args,
+                model,
+                jump_op,
+                None,
+                optimizer,
+                scheduler,
+                epoch,
+                1,
+                acc,
+                probe=probe,
+                probe_optimizer=probe_optimizer,
             )
 
         last_metrics = acc
@@ -1319,7 +1490,7 @@ def _run_phase2(
         p.requires_grad_(False)
 
     # Dynamics codebook: unfreeze if present
-    dyn_codes = getattr(args, 'dyn_codes_per_chart', 0)
+    dyn_codes = getattr(args, "dyn_codes_per_chart", 0)
     dyn_trans_model = None
     if dyn_codes > 0 and model.encoder.codebook_dyn is not None:
         model.encoder.codebook_dyn.requires_grad_(True)
@@ -1328,9 +1499,9 @@ def _run_phase2(
             action_dim=args.action_dim,
             num_charts=args.num_charts,
             dyn_codes_per_chart=dyn_codes,
-            hidden_dim=getattr(args, 'dyn_transition_hidden_dim', 128),
+            hidden_dim=getattr(args, "dyn_transition_hidden_dim", 128),
         ).to(device)
-        lr_dyn = getattr(args, 'lr_dyn_codebook', 1e-3)
+        lr_dyn = getattr(args, "lr_dyn_codebook", 1e-3)
         optimizer = torch.optim.Adam([
             {"params": world_model.parameters(), "lr": args.lr_wm},
             {"params": [model.encoder.codebook_dyn], "lr": lr_dyn},
@@ -1342,7 +1513,9 @@ def _run_phase2(
     scheduler = None
     if args.use_scheduler or args.phase2_cosine_lr:
         scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.phase2_epochs, eta_min=args.phase2_eta_min,
+            optimizer,
+            T_max=args.phase2_epochs,
+            eta_min=args.phase2_eta_min,
         )
 
     # Build config namespace for compute_phase2_loss / geodesic diffusion
@@ -1376,24 +1549,29 @@ def _run_phase2(
             epoch_soft_rw_all: list[torch.Tensor] = []
             epoch_radii: list[torch.Tensor] = []
             current_hard_routing = _use_hard_routing(
-                args, global_epoch_offset + epoch,
+                args,
+                global_epoch_offset + epoch,
             )
             current_tau = _get_hard_routing_tau(
-                args, global_epoch_offset + epoch, total_epochs_all_phases,
+                args,
+                global_epoch_offset + epoch,
+                total_epochs_all_phases,
             )
 
             for batch in seq_loader:
                 features = batch["features"].to(device)  # [B, H, D_feat]
-                actions = batch["actions"].to(device)     # [B, H, A]
+                actions = batch["actions"].to(device)  # [B, H, A]
                 B, H, D_feat = features.shape
 
                 # Encode all frames in one batched pass (frozen encoder/atlas)
                 with torch.no_grad():
                     flat = features.reshape(B * H, D_feat)
-                    K_flat, _, _, _, rw_flat, z_flat, _, _, _, c_bar_flat, v_local_flat, _ = model.encoder(
-                        flat,
-                        hard_routing=current_hard_routing,
-                        hard_routing_tau=current_tau,
+                    K_flat, _, _, _, rw_flat, z_flat, _, _, _, c_bar_flat, v_local_flat, _ = (
+                        model.encoder(
+                            flat,
+                            hard_routing=current_hard_routing,
+                            hard_routing_tau=current_tau,
+                        )
                     )
                     z_all = z_flat.reshape(B, H, -1)
                     K_all = K_flat.reshape(B, H)
@@ -1401,7 +1579,9 @@ def _run_phase2(
                     v_local_all_p2 = v_local_flat.reshape(B, H, -1)
                     rw_all_p2_full = rw_flat.reshape(B, H, -1)
                     soft_rw_all_p2 = getattr(
-                        model.encoder, "_last_soft_router_weights", rw_flat.detach(),
+                        model.encoder,
+                        "_last_soft_router_weights",
+                        rw_flat.detach(),
                     ).reshape(B, H, -1)
                     c_bar_all_p2 = c_bar_flat.reshape(B, H, -1)
                     epoch_K_all.append(K_all.detach().cpu())
@@ -1413,7 +1593,12 @@ def _run_phase2(
                 wm_output = None
                 if getattr(config_ns, "use_geodesic_diffusion", False):
                     loss, metrics = compute_phase2_geodesic_diffusion_loss(
-                        world_model, z_all, rw_all_p2_full, K_all, actions, config_ns,
+                        world_model,
+                        z_all,
+                        rw_all_p2_full,
+                        K_all,
+                        actions,
+                        config_ns,
                     )
                 else:
                     pred_actions = actions[:, :-1, :]
@@ -1421,12 +1606,15 @@ def _run_phase2(
                     chart_targets = K_all[:, 1:]
                     wm_output = world_model(z_0, pred_actions, rw_0)
                     loss, metrics = compute_phase2_loss(
-                        wm_output, z_targets, chart_targets, config_ns,
+                        wm_output,
+                        z_targets,
+                        chart_targets,
+                        config_ns,
                     )
                 wm_diag = (
                     _wm_diagnostics(wm_output)
                     if wm_output is not None
-                    else {k: 0.0 for k in WM_DIAG_KEYS}
+                    else dict.fromkeys(WM_DIAG_KEYS, 0.0)
                 )
 
                 dyn_symbol_loss = z_all.new_tensor(0.0)
@@ -1457,7 +1645,10 @@ def _run_phase2(
                 loss.backward()
                 all_opt_params = list(world_model.parameters())
                 if dyn_trans_model is not None:
-                    all_opt_params += [model.encoder.codebook_dyn] + list(dyn_trans_model.parameters())
+                    all_opt_params += [
+                        model.encoder.codebook_dyn,
+                        *list(dyn_trans_model.parameters()),
+                    ]
                 grad_norm = compute_grad_norm(all_opt_params)
                 param_norm = compute_param_norm(all_opt_params)
                 if args.grad_clip > 0:
@@ -1466,8 +1657,7 @@ def _run_phase2(
 
                 current_lr = optimizer.param_groups[0]["lr"]
                 update_ratio = (
-                    current_lr * grad_norm / (param_norm + 1e-12)
-                    if param_norm > 0 else 0.0
+                    current_lr * grad_norm / (param_norm + 1e-12) if param_norm > 0 else 0.0
                 )
 
                 acc["total"] += metrics["total"]
@@ -1496,23 +1686,22 @@ def _run_phase2(
 
             # Chart usage from all batches in epoch
             hard_usage, hard_perplexity, hard_active = _chart_stats_from_tensor(
-                torch.cat(epoch_K_all), K,
+                torch.cat(epoch_K_all),
+                K,
             )
             soft_usage, soft_perplexity, soft_active = _chart_stats_from_probs(
-                torch.cat(epoch_soft_rw_all), K,
+                torch.cat(epoch_soft_rw_all),
+                K,
             )
             mean_r = torch.cat(epoch_radii).mean().item()
 
-            _use_geodiff = getattr(args, "use_geodesic_diffusion", False)
+            use_geodiff = getattr(args, "use_geodesic_diffusion", False)
             should_log = (epoch % args.log_every == 0) or (epoch == args.phase2_epochs - 1)
             if should_log:
-                print(
-                    f"P2 E{epoch:5d} | Loss: {acc['total']:.4f} "
-                    f"| LR: {acc['lr']:.2e}"
-                )
+                print(f"P2 E{epoch:5d} | Loss: {acc['total']:.4f} | LR: {acc['lr']:.2e}")
                 print(f"  Hard usage: {np.array2string(hard_usage, precision=2, separator=', ')}")
                 print(f"  Soft usage: {np.array2string(soft_usage, precision=2, separator=', ')}")
-                if _use_geodiff:
+                if use_geodiff:
                     print(
                         f"  GeoDiff: pos={acc.get('position', 0):.4f} "
                         f"endpoint={acc.get('endpoint', 0):.4f} "
@@ -1584,12 +1773,19 @@ def _run_phase2(
                 print("-" * 60)
 
             should_save = (
-                (epoch > 0 and epoch % args.save_every == 0)
-                or epoch == args.phase2_epochs - 1
-            )
+                epoch > 0 and epoch % args.save_every == 0
+            ) or epoch == args.phase2_epochs - 1
             if should_save:
                 _save_checkpoint(
-                    args, model, jump_op, world_model, optimizer, scheduler, epoch, 2, acc,
+                    args,
+                    model,
+                    jump_op,
+                    world_model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    2,
+                    acc,
                     dyn_trans_model=dyn_trans_model,
                 )
 
@@ -1640,9 +1836,9 @@ def _run_phase3(
     optimizer_wm = torch.optim.Adam(world_model.parameters(), lr=args.lr_joint_wm)
 
     # Codebook dynamics optimizer (Option D): only codebook params
-    w_codebook_dynamics = getattr(args, 'w_codebook_dynamics', 0.0)
+    w_codebook_dynamics = getattr(args, "w_codebook_dynamics", 0.0)
     optimizer_cb = None
-    if w_codebook_dynamics > 0 and hasattr(model.encoder, 'codebook'):
+    if w_codebook_dynamics > 0 and hasattr(model.encoder, "codebook"):
         cb_params = get_codebook_like_params(model)
         optimizer_cb = torch.optim.Adam(
             cb_params,
@@ -1652,10 +1848,14 @@ def _run_phase3(
     scheduler_wm = None
     if args.use_scheduler or args.phase3_cosine_lr:
         scheduler_enc = CosineAnnealingLR(
-            optimizer_enc, T_max=args.phase3_epochs, eta_min=args.phase3_eta_min,
+            optimizer_enc,
+            T_max=args.phase3_epochs,
+            eta_min=args.phase3_eta_min,
         )
         scheduler_wm = CosineAnnealingLR(
-            optimizer_wm, T_max=args.phase3_epochs, eta_min=args.phase3_eta_min,
+            optimizer_wm,
+            T_max=args.phase3_epochs,
+            eta_min=args.phase3_eta_min,
         )
 
     # Config namespace for dynamics losses
@@ -1683,19 +1883,19 @@ def _run_phase3(
     # Enclosure probe (if enabled)
     probe = None
     probe_optimizer = None
-    if getattr(args, 'w_enclosure', 0.0) > 0:
+    if getattr(args, "w_enclosure", 0.0) > 0:
         probe = EnclosureProbe(
             chart_dim=args.latent_dim,
             ztex_dim=args.latent_dim,
             action_dim=args.action_dim,
             num_charts=args.num_charts,
             codes_per_chart=args.codes_per_chart,
-            hidden_dim=getattr(args, 'enclosure_probe_hidden_dim', 128),
+            hidden_dim=getattr(args, "enclosure_probe_hidden_dim", 128),
             alpha=0.0,  # starts at 0, warmed up
         ).to(device)
         probe_optimizer = torch.optim.Adam(
             probe.parameters(),
-            lr=getattr(args, 'enclosure_probe_lr', 3e-3),
+            lr=getattr(args, "enclosure_probe_lr", 3e-3),
         )
         if resume_probe_state is not None:
             if resume_probe_state.get("probe") is not None:
@@ -1715,35 +1915,69 @@ def _run_phase3(
         epoch_soft_rw_all: list[torch.Tensor] = []
         epoch_radii: list[torch.Tensor] = []
         current_hard_routing = _use_hard_routing(
-            args, global_epoch_offset + epoch,
+            args,
+            global_epoch_offset + epoch,
         )
         current_tau = _get_hard_routing_tau(
-            args, global_epoch_offset + epoch, total_epochs_all_phases,
+            args,
+            global_epoch_offset + epoch,
+            total_epochs_all_phases,
         )
 
         for batch in seq_loader:
             features = batch["features"].to(device)  # [B, H, D_feat]
-            actions = batch["actions"].to(device)     # [B, H, A]
+            actions = batch["actions"].to(device)  # [B, H, A]
             B, H, D_feat = features.shape
 
             # Frame 0: full encoder losses + reuse outputs (1 encoder call)
-            base_loss, zn_reg_loss, enc_metrics_0, z_geo_0, enc_w_0, K_ch_0, zn_0, ztex_0, c_bar_0, K_code_0, zq_blended_0, v_local_0 = \
-                _compute_encoder_losses(
-                    features[:, 0, :], model, jump_op, args, epoch,
-                    hard_routing=current_hard_routing,
-                    hard_routing_tau=current_tau,
-                )
+            (
+                base_loss,
+                zn_reg_loss,
+                enc_metrics_0,
+                z_geo_0,
+                enc_w_0,
+                K_ch_0,
+                zn_0,
+                ztex_0,
+                c_bar_0,
+                K_code_0,
+                zq_blended_0,
+                v_local_0,
+            ) = _compute_encoder_losses(
+                features[:, 0, :],
+                model,
+                jump_op,
+                args,
+                epoch,
+                hard_routing=current_hard_routing,
+                hard_routing_tau=current_tau,
+            )
             soft_rw_0 = getattr(model.encoder, "_last_soft_router_weights", enc_w_0.detach())
 
             # Frames 1..H-1: batched encoding (1 encoder call)
             if H > 1:
                 rest = features[:, 1:, :].reshape(B * (H - 1), D_feat)
-                K_rest, Kcode_rest, zn_rest, ztex_rest, rw_rest, z_rest, _, _, _, c_bar_rest, v_local_rest, zq_blended_rest = model.encoder(
+                (
+                    K_rest,
+                    Kcode_rest,
+                    zn_rest,
+                    ztex_rest,
+                    rw_rest,
+                    z_rest,
+                    _,
+                    _,
+                    _,
+                    c_bar_rest,
+                    v_local_rest,
+                    zq_blended_rest,
+                ) = model.encoder(
                     rest,
                     hard_routing=current_hard_routing,
                     hard_routing_tau=current_tau,
                 )
-                soft_rw_rest = getattr(model.encoder, "_last_soft_router_weights", rw_rest.detach())
+                soft_rw_rest = getattr(
+                    model.encoder, "_last_soft_router_weights", rw_rest.detach()
+                )
                 z_geo_rest = z_rest.reshape(B, H - 1, -1)
                 K_rest = K_rest.reshape(B, H - 1)
                 Kcode_rest = Kcode_rest.reshape(B, H - 1)
@@ -1757,7 +1991,7 @@ def _run_phase3(
                 z_all = torch.cat([z_geo_0.unsqueeze(1), z_geo_rest], dim=1)
                 K_all = torch.cat([K_ch_0.unsqueeze(1), K_rest], dim=1)
                 Kcode_all = torch.cat([K_code_0.unsqueeze(1), Kcode_rest], dim=1)
-                zn_all = torch.cat([zn_0.unsqueeze(1), zn_rest], dim=1)
+                torch.cat([zn_0.unsqueeze(1), zn_rest], dim=1)
                 ztex_all = torch.cat([ztex_0.unsqueeze(1), ztex_rest], dim=1)
                 c_bar_all = torch.cat([c_bar_0.unsqueeze(1), c_bar_rest], dim=1)
                 rw_all = torch.cat([enc_w_0.unsqueeze(1), rw_rest_reshaped], dim=1)
@@ -1768,7 +2002,7 @@ def _run_phase3(
                 z_all = z_geo_0.unsqueeze(1)
                 K_all = K_ch_0.unsqueeze(1)
                 Kcode_all = K_code_0.unsqueeze(1)
-                zn_all = zn_0.unsqueeze(1)
+                zn_0.unsqueeze(1)
                 ztex_all = ztex_0.unsqueeze(1)
                 c_bar_all = c_bar_0.unsqueeze(1)
                 rw_all = enc_w_0.unsqueeze(1)
@@ -1782,11 +2016,13 @@ def _run_phase3(
             encl_diag_avg = {}
             if probe is not None:
                 global_step = epoch * len(seq_loader) + n_batches
-                probe.grl.alpha.fill_(grl_alpha_schedule(
-                    global_step,
-                    warmup_steps=getattr(args, 'enclosure_grl_warmup_steps', 5000),
-                    max_alpha=getattr(args, 'enclosure_grl_max_alpha', 1.0),
-                ))
+                probe.grl.alpha.fill_(
+                    grl_alpha_schedule(
+                        global_step,
+                        warmup_steps=getattr(args, "enclosure_grl_warmup_steps", 5000),
+                        max_alpha=getattr(args, "enclosure_grl_max_alpha", 1.0),
+                    )
+                )
 
                 encl_enc_losses = []
                 encl_probe_losses = []
@@ -1812,18 +2048,19 @@ def _run_phase3(
 
                 # Average diagnostics
                 for key in all_encl_diag[0]:
-                    encl_diag_avg[f"encl/{key}"] = sum(d[key] for d in all_encl_diag) / len(all_encl_diag)
+                    encl_diag_avg[f"encl/{key}"] = sum(d[key] for d in all_encl_diag) / len(
+                        all_encl_diag
+                    )
 
             # Zeno loss (routing distribution smoothness)
             L_zeno = None
             zeno_diag = {}
-            w_zeno = getattr(args, 'w_zeno', 0.0)
+            w_zeno = getattr(args, "w_zeno", 0.0)
             if w_zeno > 0 and H > 1:
-                zeno_mode = getattr(args, 'zeno_mode', 'jsd')
+                zeno_mode = getattr(args, "zeno_mode", "jsd")
                 zeno_losses = []
                 for t in range(1, H):
-                    zeno_t = zeno_loss(rw_all[:, t], rw_all[:, t - 1],
-                                       mode=zeno_mode)
+                    zeno_t = zeno_loss(rw_all[:, t], rw_all[:, t - 1], mode=zeno_mode)
                     zeno_losses.append(zeno_t)
                 L_zeno = torch.stack(zeno_losses).mean()
 
@@ -1851,12 +2088,9 @@ def _run_phase3(
 
             # --- Encoder step (WM frozen) ---
             optimizer_enc.zero_grad()
-            L_enc = (
-                args.phase3_encoder_scale * base_loss
-                + args.phase3_zn_reg_scale * zn_reg_loss
-            )
+            L_enc = args.phase3_encoder_scale * base_loss + args.phase3_zn_reg_scale * zn_reg_loss
             if L_encl_encoder is not None:
-                L_enc = L_enc + getattr(args, 'w_enclosure', 0.0) * L_encl_encoder
+                L_enc = L_enc + getattr(args, "w_enclosure", 0.0) * L_encl_encoder
             if L_zeno is not None:
                 L_enc = L_enc + w_zeno * L_zeno
             L_enc.backward()
@@ -1874,9 +2108,14 @@ def _run_phase3(
 
             if getattr(config_ns, "use_geodesic_diffusion", False):
                 dyn_loss, dyn_metrics = compute_phase2_geodesic_diffusion_loss(
-                    world_model, z_all_det, rw_all_det, K_all_det, actions, config_ns,
+                    world_model,
+                    z_all_det,
+                    rw_all_det,
+                    K_all_det,
+                    actions,
+                    config_ns,
                 )
-                wm_diag = {k: 0.0 for k in WM_DIAG_KEYS}
+                wm_diag = dict.fromkeys(WM_DIAG_KEYS, 0.0)
             else:
                 rw_0 = enc_w_0.detach()
                 pred_actions = actions[:, :-1, :]
@@ -1884,7 +2123,10 @@ def _run_phase3(
                 chart_targets = K_all_det[:, 1:]
                 wm_output = world_model(z_all_det[:, 0], pred_actions, rw_0)
                 dyn_loss, dyn_metrics = compute_phase2_loss(
-                    wm_output, z_targets, chart_targets, config_ns,
+                    wm_output,
+                    z_targets,
+                    chart_targets,
+                    config_ns,
                 )
                 wm_diag = _wm_diagnostics(wm_output)
 
@@ -1907,9 +2149,12 @@ def _run_phase3(
             L_cb_dyn = torch.tensor(0.0, device=device)
             if optimizer_cb is not None and H > 1:
                 from fragile.core.layers.atlas import _project_to_ball, mobius_add
+
                 optimizer_cb.zero_grad()
                 # Build coarse latent from detached c_bar + live codebook codes
-                z_coarse_0 = _project_to_ball(mobius_add(c_bar_all[:, 0].detach(), zq_blended_all[:, 0]))
+                z_coarse_0 = _project_to_ball(
+                    mobius_add(c_bar_all[:, 0].detach(), zq_blended_all[:, 0])
+                )
                 rw_0_cb = rw_all[:, 0].detach()
                 # Forward WM with frozen weights but live codebook
                 with torch.no_grad():
@@ -1932,7 +2177,8 @@ def _run_phase3(
                     K_code_dyn_list_p3 = []
                     for t in range(H):
                         _, K_code_dyn_t, _, vq_dyn_t = model.encoder.dynamics_vq(
-                            v_local_det_p3[:, t], rw_det_p3[:, t],
+                            v_local_det_p3[:, t],
+                            rw_det_p3[:, t],
                         )
                         vq_dyn_losses_p3.append(vq_dyn_t)
                         K_code_dyn_list_p3.append(K_code_dyn_t)
@@ -1951,7 +2197,7 @@ def _run_phase3(
                         )
                         trans_losses_p3.append(t_loss)
                     trans_loss_p3 = torch.stack(trans_losses_p3).mean()
-                    w_dyn_transition = getattr(args, 'w_dyn_transition', 0.5)
+                    w_dyn_transition = getattr(args, "w_dyn_transition", 0.5)
                     L_dyn_cb_extra = vq_dyn_loss_p3 + w_dyn_transition * trans_loss_p3
                     L_dyn_cb_extra.backward()
 
@@ -1966,10 +2212,7 @@ def _run_phase3(
             grad_norm = enc_grad_norm + wm_grad_norm
             param_norm = enc_param_norm + compute_param_norm(wm_params)
             current_lr = optimizer_enc.param_groups[0]["lr"]
-            update_ratio = (
-                current_lr * grad_norm / (param_norm + 1e-12)
-                if param_norm > 0 else 0.0
-            )
+            update_ratio = current_lr * grad_norm / (param_norm + 1e-12) if param_norm > 0 else 0.0
 
             total = L_enc.item() + args.phase3_dynamics_scale * dyn_loss.item()
             acc["total"] += total
@@ -2017,16 +2260,18 @@ def _run_phase3(
 
         # Chart stats from all batches in epoch
         hard_usage, hard_perplexity, hard_active = _chart_stats_from_tensor(
-            torch.cat(epoch_K_all), K,
+            torch.cat(epoch_K_all),
+            K,
         )
         soft_usage, soft_perplexity, soft_active = _chart_stats_from_probs(
-            torch.cat(epoch_soft_rw_all), K,
+            torch.cat(epoch_soft_rw_all),
+            K,
         )
         mean_r = torch.cat(epoch_radii).mean().item()
 
         should_log = (epoch % args.log_every == 0) or (epoch == args.phase3_epochs - 1)
         if should_log:
-            _grl_alpha = probe.grl.alpha.item() if probe is not None else 0.0
+            grl_alpha = probe.grl.alpha.item() if probe is not None else 0.0
             print(
                 f"P3 E{epoch:5d} | Loss: {acc['total']:.4f} "
                 f"(enc={acc['enc_total']:.4f} dyn={acc['dyn_total']:.4f}) "
@@ -2062,9 +2307,7 @@ def _run_phase3(
                 f"cc_rad={acc['enc/chart_center_radius']:.3f} "
                 f"cc_sep={acc['enc/chart_center_sep']:.3f}"
             )
-            print(
-                f"  Usage: code={acc['enc/code_usage']:.4f}"
-            )
+            print(f"  Usage: code={acc['enc/code_usage']:.4f}")
             print(
                 f"  Train usage: H_hard={acc['H_usage']:.3f} "
                 f"perp={acc['usage_perplexity']:.2f}/{K} "
@@ -2074,15 +2317,14 @@ def _run_phase3(
                 f"active_code_charts={acc['active_code_charts']:.2f}"
             )
             print(
-                f"  Ortho: {acc.get('enc/ortho', 0):.4f} "
-                f"(w={getattr(args, 'w_perp', 0.01):.3f})"
+                f"  Ortho: {acc.get('enc/ortho', 0):.4f} (w={getattr(args, 'w_perp', 0.01):.3f})"
             )
             print(
                 f"  Enclosure: enc={acc.get('encl_encoder', 0):.4f} "
                 f"probe={acc.get('encl_probe', 0):.4f} "
                 f"defect_acc={acc.get('encl/defect_acc', 0):.4f} "
                 f"defect_ce={acc.get('encl/defect_ce', 0):.4f} "
-                f"grl_alpha={_grl_alpha:.3f} "
+                f"grl_alpha={grl_alpha:.3f} "
                 f"(w={getattr(args, 'w_enclosure', 0.0):.3f})"
             )
             print(
@@ -2093,17 +2335,14 @@ def _run_phase3(
                 f"max_w={acc.get('zeno/max_weight', 0):.4f} "
                 f"(w={getattr(args, 'w_zeno', 0.0):.3f})"
             )
-            print(
-                f"  Window: {acc['enc/window']:.3f} "
-                f"(w={args.w_window:.3f})"
-            )
+            print(f"  Window: {acc['enc/window']:.3f} (w={args.w_window:.3f})")
             print(
                 f"  Jump: {acc['enc/jump']:.3f} "
                 f"(lambda={enc_metrics_0.get('jump_weight', 0.0):.3f})"
             )
             # --- Dynamics losses ---
-            _use_geodiff = getattr(args, "use_geodesic_diffusion", False)
-            if _use_geodiff:
+            use_geodiff = getattr(args, "use_geodesic_diffusion", False)
+            if use_geodiff:
                 print(
                     f"  GeoDiff: pos={acc.get('dyn/position', 0):.4f} "
                     f"endpoint={acc.get('dyn/endpoint', 0):.4f} "
@@ -2162,13 +2401,21 @@ def _run_phase3(
             print("-" * 60)
 
         should_save = (
-            (epoch > 0 and epoch % args.save_every == 0)
-            or epoch == args.phase3_epochs - 1
-        )
+            epoch > 0 and epoch % args.save_every == 0
+        ) or epoch == args.phase3_epochs - 1
         if should_save:
             _save_checkpoint(
-                args, model, jump_op, world_model, optimizer_enc, scheduler_enc, epoch, 3, acc,
-                probe=probe, probe_optimizer=probe_optimizer,
+                args,
+                model,
+                jump_op,
+                world_model,
+                optimizer_enc,
+                scheduler_enc,
+                epoch,
+                3,
+                acc,
+                probe=probe,
+                probe_optimizer=probe_optimizer,
                 dyn_trans_model=dyn_trans_model,
             )
 
@@ -2205,8 +2452,12 @@ def _save_checkpoint(
             "optimizer": optimizer.state_dict(),
             "scheduler": scheduler.state_dict() if scheduler else None,
             "probe": probe.state_dict() if probe is not None else None,
-            "probe_optimizer": probe_optimizer.state_dict() if probe_optimizer is not None else None,
-            "dyn_trans_model": dyn_trans_model.state_dict() if dyn_trans_model is not None else None,
+            "probe_optimizer": probe_optimizer.state_dict()
+            if probe_optimizer is not None
+            else None,
+            "dyn_trans_model": dyn_trans_model.state_dict()
+            if dyn_trans_model is not None
+            else None,
             "args": vars(args),
             "metrics": metrics,
         },
@@ -2241,6 +2492,7 @@ def _run_diagnostics(
     all_ep_ids_t = torch.cat(all_ep_ids)
 
     import matplotlib
+
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt  # noqa: E402
 
@@ -2255,7 +2507,8 @@ def _run_diagnostics(
     fig = plot_chart_transitions(K_chart_all.cpu(), all_ep_ids_t)
     fig.savefig(
         os.path.join(args.output_dir, "chart_transitions.png"),
-        dpi=150, bbox_inches="tight",
+        dpi=150,
+        bbox_inches="tight",
     )
     plt.close(fig)
 
@@ -2289,13 +2542,15 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
     if args.phase1_epochs > 0:
         single_ds = VLAFeatureDataset(args.feature_cache_dir, sequence_length=1, split="train")
         single_loader = DataLoader(
-            single_ds, batch_size=args.batch_size, shuffle=True,
-            drop_last=False, num_workers=0,
+            single_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=False,
+            num_workers=0,
         )
         input_dim = single_ds[0]["feature"].shape[0]
         print(
-            f"Single-frame train dataset: {len(single_ds)} frames, "
-            f"{len(single_loader)} batches",
+            f"Single-frame train dataset: {len(single_ds)} frames, {len(single_loader)} batches",
         )
     else:
         # Need input_dim from a probe
@@ -2303,10 +2558,13 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
         input_dim = probe_ds[0]["feature"].shape[0]
         # Still build single_loader for diagnostics
         single_loader = DataLoader(
-            probe_ds, batch_size=args.batch_size, shuffle=False,
-            drop_last=False, num_workers=0,
+            probe_ds,
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+            num_workers=0,
         )
-        print(f"Skipping Phase 1 (single-frame loader built for diagnostics only)")
+        print("Skipping Phase 1 (single-frame loader built for diagnostics only)")
 
     # Build seq_loader if P2/P3 need it (Phase 1 is always single-frame)
     if args.phase2_epochs > 0 or args.phase3_epochs > 0:
@@ -2316,8 +2574,11 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
             split="train",
         )
         seq_loader = DataLoader(
-            seq_ds, batch_size=args.batch_size, shuffle=True,
-            drop_last=True, num_workers=0,
+            seq_ds,
+            batch_size=args.batch_size,
+            shuffle=True,
+            drop_last=True,
+            num_workers=0,
         )
         print(
             f"Sequence train dataset: {len(seq_ds)} windows "
@@ -2339,11 +2600,11 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
         soft_equiv_metric=True,
         conv_backbone=False,
         film_conditioning=True,
-        commitment_beta=getattr(args, 'commitment_beta', 0.25),
-        codebook_loss_weight=getattr(args, 'codebook_loss_weight', 1.0),
-        dyn_codes_per_chart=getattr(args, 'dyn_codes_per_chart', 0),
-        dyn_commitment_beta=getattr(args, 'dyn_commitment_beta', 0.25),
-        dyn_codebook_loss_weight=getattr(args, 'dyn_codebook_loss_weight', 1.0),
+        commitment_beta=getattr(args, "commitment_beta", 0.25),
+        codebook_loss_weight=getattr(args, "codebook_loss_weight", 1.0),
+        dyn_codes_per_chart=getattr(args, "dyn_codes_per_chart", 0),
+        dyn_commitment_beta=getattr(args, "dyn_commitment_beta", 0.25),
+        dyn_codebook_loss_weight=getattr(args, "dyn_codebook_loss_weight", 1.0),
     ).to(device)
 
     jump_op = FactorizedJumpOperator(
@@ -2353,9 +2614,9 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
 
     world_model = None
     if args.phase2_epochs > 0 or args.phase3_epochs > 0:
-        _risk_alpha = getattr(args, "wm_risk_metric_alpha", None)
-        if _risk_alpha is None:
-            _risk_alpha = 0.0
+        risk_alpha = getattr(args, "wm_risk_metric_alpha", None)
+        if risk_alpha is None:
+            risk_alpha = 0.0
         world_model = GeometricWorldModel(
             latent_dim=args.latent_dim,
             action_dim=args.action_dim,
@@ -2373,7 +2634,7 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
             n_refine_steps=args.wm_refine_steps,
             jump_beta=args.wm_jump_beta,
             min_length=max(args.wm_min_length, 0.0),  # -1 (auto) deferred until after P1
-            risk_metric_alpha=_risk_alpha,
+            risk_metric_alpha=risk_alpha,
         ).to(device)
 
     # ── Parameter breakdown ──────────────────────────────────
@@ -2387,7 +2648,7 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
     if world_model is not None:
         n_wm = count_parameters(world_model)
         n_total += n_wm
-        print(f"  World model breakdown:")
+        print("  World model breakdown:")
         for name, child in world_model.named_children():
             nc = count_parameters(child)
             if nc > 0:
@@ -2395,12 +2656,14 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
         print(f"  World model total: {n_wm:>7,} params")
         if world_model.min_length > 0:
             print(f"  CFL bounds (ℓ_min={world_model.min_length:.4f}):")
-            print(f"    F_max={world_model.F_max:.2f}  V_alg={world_model.V_alg:.2f}  "
-                  f"cf_max={world_model.cf_max:.2f}")
+            print(
+                f"    F_max={world_model.F_max:.2f}  V_alg={world_model.V_alg:.2f}  "
+                f"cf_max={world_model.cf_max:.2f}"
+            )
         elif args.wm_min_length < 0:
-            print(f"  CFL bounds: auto-measure after Phase 1")
+            print("  CFL bounds: auto-measure after Phase 1")
         else:
-            print(f"  CFL bounds: disabled (no squashing)")
+            print("  CFL bounds: disabled (no squashing)")
     print(f"  TOTAL: {n_total:>13,} params")
 
     # ── Resume ────────────────────────────────────────────────
@@ -2416,8 +2679,10 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
                 "probe": ckpt["probe"],
                 "probe_optimizer": ckpt.get("probe_optimizer"),
             }
-        print(f"Resumed from {args.resume} (phase {ckpt.get('phase', '?')}, "
-              f"epoch {ckpt.get('epoch', '?')})")
+        print(
+            f"Resumed from {args.resume} (phase {ckpt.get('phase', '?')}, "
+            f"epoch {ckpt.get('epoch', '?')})"
+        )
 
     # ── Output dir ────────────────────────────────────────────
     os.makedirs(args.output_dir, exist_ok=True)
@@ -2447,7 +2712,11 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
 
     if args.phase1_epochs > 0:
         _, probe_from_p1 = _run_phase1(
-            model, jump_op, single_loader, args, device,
+            model,
+            jump_op,
+            single_loader,
+            args,
+            device,
             global_epoch_offset=0,
             total_epochs_all_phases=total_epochs_all_phases,
             seq_loader=seq_loader,
@@ -2472,7 +2741,12 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
         assert world_model is not None
         assert seq_loader is not None
         last_dyn_metrics, dyn_trans_model_p2 = _run_phase2(
-            model, jump_op, world_model, seq_loader, args, device,
+            model,
+            jump_op,
+            world_model,
+            seq_loader,
+            args,
+            device,
             global_epoch_offset=args.phase1_epochs,
             total_epochs_all_phases=total_epochs_all_phases,
         )
@@ -2482,7 +2756,12 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
         assert world_model is not None
         assert seq_loader is not None
         last_dyn_metrics, probe_from_p3 = _run_phase3(
-            model, jump_op, world_model, seq_loader, args, device,
+            model,
+            jump_op,
+            world_model,
+            seq_loader,
+            args,
+            device,
             global_epoch_offset=args.phase1_epochs + args.phase2_epochs,
             total_epochs_all_phases=total_epochs_all_phases,
             resume_probe_state=resume_probe_state,
@@ -2503,7 +2782,9 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
             "jump_op": jump_op.state_dict(),
             "world_model": world_model.state_dict() if world_model is not None else None,
             "probe": final_probe.state_dict() if final_probe is not None else None,
-            "dyn_trans_model": dyn_trans_model_p2.state_dict() if dyn_trans_model_p2 is not None else None,
+            "dyn_trans_model": dyn_trans_model_p2.state_dict()
+            if dyn_trans_model_p2 is not None
+            else None,
             "optimizer": None,
             "scheduler": None,
             "args": vars(args),
@@ -2515,7 +2796,12 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
 
     # ── Diagnostics ───────────────────────────────────────────
     _run_diagnostics(
-        model, single_loader, args, device, had_world_model, last_dyn_metrics,
+        model,
+        single_loader,
+        args,
+        device,
+        had_world_model,
+        last_dyn_metrics,
     )
 
 
@@ -2539,17 +2825,37 @@ def main() -> None:
     p.add_argument("--codes-per-chart", type=int, default=64)
     p.add_argument("--action-dim", type=int, default=6)
     p.add_argument("--sequence-length", type=int, default=8)
-    p.add_argument("--hard-routing", action=argparse.BooleanOptionalAction, default=True,
-                   help="Use hard routing by default (one-hot forward, ST gradients)")
-    p.add_argument("--hard-routing-warmup-epochs", type=int, default=5,
-                   help="Epochs of soft partition-of-unity routing before hard ST continuation")
-    p.add_argument("--hard-routing-tau", type=float, default=1.0,
-                   help="Starting temperature for hard routing; positive = Gumbel-softmax, "
-                        "negative = deterministic straight-through argmax (no Gumbel noise)")
-    p.add_argument("--hard-routing-tau-end", type=float, default=0.3,
-                   help="Final tau after annealing (None = no annealing, use constant tau)")
-    p.add_argument("--hard-routing-tau-anneal-epochs", type=int, default=200,
-                   help="Anneal tau linearly over this many epochs (None = total epochs)")
+    p.add_argument(
+        "--hard-routing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use hard routing by default (one-hot forward, ST gradients)",
+    )
+    p.add_argument(
+        "--hard-routing-warmup-epochs",
+        type=int,
+        default=5,
+        help="Epochs of soft partition-of-unity routing before hard ST continuation",
+    )
+    p.add_argument(
+        "--hard-routing-tau",
+        type=float,
+        default=1.0,
+        help="Starting temperature for hard routing; positive = Gumbel-softmax, "
+        "negative = deterministic straight-through argmax (no Gumbel noise)",
+    )
+    p.add_argument(
+        "--hard-routing-tau-end",
+        type=float,
+        default=0.3,
+        help="Final tau after annealing (None = no annealing, use constant tau)",
+    )
+    p.add_argument(
+        "--hard-routing-tau-anneal-epochs",
+        type=int,
+        default=200,
+        help="Anneal tau linearly over this many epochs (None = total epochs)",
+    )
 
     # Phase epochs (0 = skip)
     p.add_argument("--phase1-epochs", type=int, default=100)
@@ -2561,32 +2867,47 @@ def main() -> None:
     p.add_argument("--lr-wm", type=float, default=1e-3, help="Phase 2 world model LR")
     p.add_argument("--lr-joint-encoder", type=float, default=1e-4, help="Phase 3 encoder LR")
     p.add_argument("--lr-joint-wm", type=float, default=1e-3, help="Phase 3 world model LR")
-    p.add_argument("--lr-chart-centers-scale", type=float, default=0.1,
-                   help="LR scale for chart_centers relative to the base encoder LR")
-    p.add_argument("--lr-codebook-scale", type=float, default=0.5,
-                   help="LR scale for codebook parameters relative to the base encoder LR")
+    p.add_argument(
+        "--lr-chart-centers-scale",
+        type=float,
+        default=0.1,
+        help="LR scale for chart_centers relative to the base encoder LR",
+    )
+    p.add_argument(
+        "--lr-codebook-scale",
+        type=float,
+        default=0.5,
+        help="LR scale for codebook parameters relative to the base encoder LR",
+    )
 
     # Training
     p.add_argument("--batch-size", type=int, default=256)
     p.add_argument("--grad-clip", type=float, default=1.0)
-    p.add_argument("--use-scheduler", action="store_true",
-                   help="Enable cosine LR scheduler for all phases (legacy flag)")
-    p.add_argument("--phase1-cosine-lr", action="store_true",
-                   help="Cosine anneal LR in Phase 1")
-    p.add_argument("--phase1-eta-min", type=float, default=1e-6,
-                   help="Minimum LR for Phase 1 cosine schedule")
-    p.add_argument("--phase2-cosine-lr", action="store_true",
-                   help="Cosine anneal LR in Phase 2")
-    p.add_argument("--phase2-eta-min", type=float, default=1e-6,
-                   help="Minimum LR for Phase 2 cosine schedule")
-    p.add_argument("--phase3-cosine-lr", action="store_true",
-                   help="Cosine anneal LR in Phase 3")
-    p.add_argument("--phase3-eta-min", type=float, default=1e-6,
-                   help="Minimum LR for Phase 3 cosine schedule")
+    p.add_argument(
+        "--use-scheduler",
+        action="store_true",
+        help="Enable cosine LR scheduler for all phases (legacy flag)",
+    )
+    p.add_argument("--phase1-cosine-lr", action="store_true", help="Cosine anneal LR in Phase 1")
+    p.add_argument(
+        "--phase1-eta-min", type=float, default=1e-6, help="Minimum LR for Phase 1 cosine schedule"
+    )
+    p.add_argument("--phase2-cosine-lr", action="store_true", help="Cosine anneal LR in Phase 2")
+    p.add_argument(
+        "--phase2-eta-min", type=float, default=1e-6, help="Minimum LR for Phase 2 cosine schedule"
+    )
+    p.add_argument("--phase3-cosine-lr", action="store_true", help="Cosine anneal LR in Phase 3")
+    p.add_argument(
+        "--phase3-eta-min", type=float, default=1e-6, help="Minimum LR for Phase 3 cosine schedule"
+    )
 
     # World model params
-    p.add_argument("--wm-hidden-dim", type=int, default=None,
-                   help="World model MLP width (defaults to --hidden-dim)")
+    p.add_argument(
+        "--wm-hidden-dim",
+        type=int,
+        default=None,
+        help="World model MLP width (defaults to --hidden-dim)",
+    )
     p.add_argument("--wm-dt", type=float, default=0.01)
     p.add_argument("--wm-gamma-friction", type=float, default=1.0)
     p.add_argument("--wm-T-c", type=float, default=0.1)
@@ -2597,177 +2918,408 @@ def main() -> None:
     p.add_argument("--wm-no-boris", dest="wm_use_boris", action="store_false")
     p.add_argument("--wm-use-jump", action="store_true", default=True)
     p.add_argument("--wm-no-jump", dest="wm_use_jump", action="store_false")
-    p.add_argument("--wm-refine-steps", type=int, default=3,
-                   help="Number of BAOAB sub-steps per horizon step (WFR W2 component)")
-    p.add_argument("--wm-jump-beta", type=float, default=1.0,
-                   help="Inverse temperature for Boltzmann chart selection")
-    p.add_argument("--wm-min-length", type=float, default=0.03,
-                   help="Minimum geodesic length scale (derives F_max, V_alg, cf_max; "
-                        "0=off, -1=auto-measure from encoder after Phase 1)")
-    p.add_argument("--wm-d-model", type=int, default=128,
-                   help="CovariantAttention width for world model")
-    p.add_argument("--wm-risk-metric-alpha", type=float, default=None,
-                   help="Risk-metric coupling alpha; None uses config default (0=off)")
+    p.add_argument(
+        "--wm-refine-steps",
+        type=int,
+        default=3,
+        help="Number of BAOAB sub-steps per horizon step (WFR W2 component)",
+    )
+    p.add_argument(
+        "--wm-jump-beta",
+        type=float,
+        default=1.0,
+        help="Inverse temperature for Boltzmann chart selection",
+    )
+    p.add_argument(
+        "--wm-min-length",
+        type=float,
+        default=0.03,
+        help="Minimum geodesic length scale (derives F_max, V_alg, cf_max; "
+        "0=off, -1=auto-measure from encoder after Phase 1)",
+    )
+    p.add_argument(
+        "--wm-d-model", type=int, default=128, help="CovariantAttention width for world model"
+    )
+    p.add_argument(
+        "--wm-risk-metric-alpha",
+        type=float,
+        default=None,
+        help="Risk-metric coupling alpha; None uses config default (0=off)",
+    )
 
     # Phase 3 scaling
     p.add_argument("--phase3-encoder-scale", type=float, default=0.1)
     p.add_argument("--phase3-dynamics-scale", type=float, default=1.0)
-    p.add_argument("--phase3-zn-reg-scale", type=float, default=0.1,
-                   help="Scale for z_n regularization in phase 3 (0=disable)")
+    p.add_argument(
+        "--phase3-zn-reg-scale",
+        type=float,
+        default=0.1,
+        help="Scale for z_n regularization in phase 3 (0=disable)",
+    )
 
     # Encoder loss weights (same defaults as train_unsupervised)
     p.add_argument("--w-recon", type=float, default=1.0)
     p.add_argument("--w-vq", type=float, default=1.0)
     p.add_argument("--w-entropy", type=float, default=0.3)
     p.add_argument("--w-consistency", type=float, default=0.0)
-    p.add_argument("--w-diversity", type=float, default=1.0,
-                   help="Weight for hard/ST chart-usage entropy band")
-    p.add_argument("--chart-usage-h-low", type=float, default=None,
-                   help="Minimum hard chart-usage entropy (None = auto from num_charts)")
-    p.add_argument("--chart-usage-h-high", type=float, default=None,
-                   help="Optional maximum hard chart-usage entropy")
-    p.add_argument("--w-chart-ot", type=float, default=1.0,
-                   help="Entropic OT chart-balancing auxiliary weight")
-    p.add_argument("--chart-ot-epsilon", type=float, default=0.05,
-                   help="Entropic OT epsilon for chart balancing")
-    p.add_argument("--chart-ot-iters", type=int, default=20,
-                   help="Number of Sinkhorn iterations for chart balancing")
+    p.add_argument(
+        "--w-diversity",
+        type=float,
+        default=1.0,
+        help="Weight for hard/ST chart-usage entropy band",
+    )
+    p.add_argument(
+        "--chart-usage-h-low",
+        type=float,
+        default=None,
+        help="Minimum hard chart-usage entropy (None = auto from num_charts)",
+    )
+    p.add_argument(
+        "--chart-usage-h-high",
+        type=float,
+        default=None,
+        help="Optional maximum hard chart-usage entropy",
+    )
+    p.add_argument(
+        "--w-chart-ot",
+        type=float,
+        default=1.0,
+        help="Entropic OT chart-balancing auxiliary weight",
+    )
+    p.add_argument(
+        "--chart-ot-epsilon",
+        type=float,
+        default=0.05,
+        help="Entropic OT epsilon for chart balancing",
+    )
+    p.add_argument(
+        "--chart-ot-iters",
+        type=int,
+        default=20,
+        help="Number of Sinkhorn iterations for chart balancing",
+    )
     p.add_argument("--w-uniformity", type=float, default=0.05)
     p.add_argument("--w-radial-cal", type=float, default=0.1)
-    p.add_argument("--w-confidence-calibration", type=float, default=0.05,
-                   help="Align router confidence with per-sample reconstruction quality")
-    p.add_argument("--w-hard-routing-nll", type=float, default=0.5,
-                   help="Sharpen the deterministic hard chart partition in score space")
-    p.add_argument("--w-router-margin", type=float, default=2.0,
-                   help="Weight for enforcing a positive hard-routing score margin")
-    p.add_argument("--router-margin-target", type=float, default=0.05,
-                   help="Minimum desired gap between the winning and runner-up chart scores")
-    p.add_argument("--radial-quality-alpha", type=float, default=2.0,
-                   help="Sharpness of the reconstruction-quality target used by radial calibration")
-    p.add_argument("--radial-vq-alpha", type=float, default=1.0,
-                   help="Sharpness of the VQ-quality target used by radial calibration")
-    p.add_argument("--radial-quality-rank-mix", type=float, default=0.75,
-                   help="Blend from absolute error quality (0) to batch-rank quality (1)")
-    p.add_argument("--radial-recon-quality-weight", type=float, default=0.7,
-                   help="Weight of reconstruction quality when combining recon and VQ targets")
-    p.add_argument("--radial-quality-mix", type=float, default=1.0,
-                   help="Blend from confidence-only radial targets (0) to quality-gated targets (1)")
-    p.add_argument("--radial-quality-base-weight", type=float, default=0.0,
-                   help="Optional quality-driven base shell weight (default off for theory-aligned runs)")
-    p.add_argument("--radial-calibration-rho-max", type=float, default=4.0,
-                   help="Maximum hyperbolic radius assigned to confident, low-error samples")
-    p.add_argument("--radial-calibration-band-width", type=float, default=0.75,
-                   help="Half-width of the acceptable local hyperbolic-radius band")
-    p.add_argument("--w-v-tangent-barrier", type=float, default=0.01,
-                   help="Weight for the pre-squash tangent barrier on v_raw")
-    p.add_argument("--v-tangent-barrier-radius", type=float, default=0.9,
-                   help="Projected-radius threshold where the v_raw barrier activates")
+    p.add_argument(
+        "--w-confidence-calibration",
+        type=float,
+        default=0.05,
+        help="Align router confidence with per-sample reconstruction quality",
+    )
+    p.add_argument(
+        "--w-hard-routing-nll",
+        type=float,
+        default=0.5,
+        help="Sharpen the deterministic hard chart partition in score space",
+    )
+    p.add_argument(
+        "--w-router-margin",
+        type=float,
+        default=2.0,
+        help="Weight for enforcing a positive hard-routing score margin",
+    )
+    p.add_argument(
+        "--router-margin-target",
+        type=float,
+        default=0.05,
+        help="Minimum desired gap between the winning and runner-up chart scores",
+    )
+    p.add_argument(
+        "--radial-quality-alpha",
+        type=float,
+        default=2.0,
+        help="Sharpness of the reconstruction-quality target used by radial calibration",
+    )
+    p.add_argument(
+        "--radial-vq-alpha",
+        type=float,
+        default=1.0,
+        help="Sharpness of the VQ-quality target used by radial calibration",
+    )
+    p.add_argument(
+        "--radial-quality-rank-mix",
+        type=float,
+        default=0.75,
+        help="Blend from absolute error quality (0) to batch-rank quality (1)",
+    )
+    p.add_argument(
+        "--radial-recon-quality-weight",
+        type=float,
+        default=0.7,
+        help="Weight of reconstruction quality when combining recon and VQ targets",
+    )
+    p.add_argument(
+        "--radial-quality-mix",
+        type=float,
+        default=1.0,
+        help="Blend from confidence-only radial targets (0) to quality-gated targets (1)",
+    )
+    p.add_argument(
+        "--radial-quality-base-weight",
+        type=float,
+        default=0.0,
+        help="Optional quality-driven base shell weight (default off for theory-aligned runs)",
+    )
+    p.add_argument(
+        "--radial-calibration-rho-max",
+        type=float,
+        default=4.0,
+        help="Maximum hyperbolic radius assigned to confident, low-error samples",
+    )
+    p.add_argument(
+        "--radial-calibration-band-width",
+        type=float,
+        default=0.75,
+        help="Half-width of the acceptable local hyperbolic-radius band",
+    )
+    p.add_argument(
+        "--w-v-tangent-barrier",
+        type=float,
+        default=0.01,
+        help="Weight for the pre-squash tangent barrier on v_raw",
+    )
+    p.add_argument(
+        "--v-tangent-barrier-radius",
+        type=float,
+        default=0.9,
+        help="Projected-radius threshold where the v_raw barrier activates",
+    )
     p.add_argument("--w-codebook-spread", type=float, default=0.05)
     p.add_argument("--w-codebook-center", type=float, default=0.02)
-    p.add_argument("--w-chart-center-mean", type=float, default=0.02,
-                   help="Weight for tangent-space atlas barycenter anchoring")
-    p.add_argument("--w-chart-center-radius", type=float, default=0.05,
-                   help="Weight for hyperbolic safe-harbor radius regularization")
-    p.add_argument("--chart-center-radius-max", type=float, default=2.0,
-                   help="Maximum hyperbolic radius before chart centers are penalized")
-    p.add_argument("--w-chart-center-sep", type=float, default=0.02,
-                   help="Weight for hyperbolic chart-center separation")
-    p.add_argument("--chart-center-sep-margin", type=float, default=1.0,
-                   help="Minimum pairwise hyperbolic separation between chart centers")
-    p.add_argument("--w-chart-collapse", type=float, default=0.0,
-                   help="Deprecated; no longer part of the active Phase 1 stack")
-    p.add_argument("--w-code-collapse", type=float, default=0.5,
-                   help="Weight for hard/ST per-chart code-usage entropy band")
-    p.add_argument("--code-usage-h-low", type=float, default=None,
-                   help="Minimum per-chart code-usage entropy (None = auto from codes_per_chart)")
-    p.add_argument("--code-usage-h-high", type=float, default=None,
-                   help="Optional maximum per-chart code-usage entropy")
-    p.add_argument("--code-usage-temperature", type=float, default=1.0,
-                   help="Soft/ST temperature used for code-usage regularization")
+    p.add_argument(
+        "--w-chart-center-mean",
+        type=float,
+        default=0.02,
+        help="Weight for tangent-space atlas barycenter anchoring",
+    )
+    p.add_argument(
+        "--w-chart-center-radius",
+        type=float,
+        default=0.05,
+        help="Weight for hyperbolic safe-harbor radius regularization",
+    )
+    p.add_argument(
+        "--chart-center-radius-max",
+        type=float,
+        default=2.0,
+        help="Maximum hyperbolic radius before chart centers are penalized",
+    )
+    p.add_argument(
+        "--w-chart-center-sep",
+        type=float,
+        default=0.02,
+        help="Weight for hyperbolic chart-center separation",
+    )
+    p.add_argument(
+        "--chart-center-sep-margin",
+        type=float,
+        default=1.0,
+        help="Minimum pairwise hyperbolic separation between chart centers",
+    )
+    p.add_argument(
+        "--w-chart-collapse",
+        type=float,
+        default=0.0,
+        help="Deprecated; no longer part of the active Phase 1 stack",
+    )
+    p.add_argument(
+        "--w-code-collapse",
+        type=float,
+        default=0.5,
+        help="Weight for hard/ST per-chart code-usage entropy band",
+    )
+    p.add_argument(
+        "--code-usage-h-low",
+        type=float,
+        default=None,
+        help="Minimum per-chart code-usage entropy (None = auto from codes_per_chart)",
+    )
+    p.add_argument(
+        "--code-usage-h-high",
+        type=float,
+        default=None,
+        help="Optional maximum per-chart code-usage entropy",
+    )
+    p.add_argument(
+        "--code-usage-temperature",
+        type=float,
+        default=1.0,
+        help="Soft/ST temperature used for code-usage regularization",
+    )
     p.add_argument("--w-window", type=float, default=0.0)
     p.add_argument("--w-jump", type=float, default=0.0)
     p.add_argument("--w-jump-warmup", type=int, default=20)
     p.add_argument("--w-jump-ramp-end", type=int, default=50)
-    p.add_argument("--phase1-adaptive-multipliers", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="Enable adaptive multipliers for Phase 1 routing losses")
-    p.add_argument("--phase1-multiplier-max", type=float, default=8.0,
-                   help="Maximum adaptive multiplier scale in Phase 1")
-    p.add_argument("--phase1-multiplier-decay", type=float, default=0.05,
-                   help="Relaxation rate back toward base weights when constraints are satisfied")
-    p.add_argument("--conf-target-top1", type=float, default=0.55,
-                   help="Target mean soft top-1 routing probability")
-    p.add_argument("--conf-multiplier-lr", type=float, default=1.5,
-                   help="Adaptive multiplier update rate for routing confidence")
-    p.add_argument("--chart-multiplier-lr", type=float, default=1.0,
-                   help="Adaptive multiplier update rate for hard chart usage")
-    p.add_argument("--chart-ot-i-target", type=float, default=0.35,
-                   help="Target soft mutual information for OT balancing pressure")
-    p.add_argument("--chart-ot-multiplier-lr", type=float, default=1.0,
-                   help="Adaptive multiplier update rate for OT chart balancing")
-    p.add_argument("--code-usage-gate-h", type=float, default=1.25,
-                   help="Enable code-usage pressure only after hard chart entropy exceeds this value")
-    p.add_argument("--code-usage-ramp-epochs", type=int, default=50,
-                   help="Epochs to ramp code-usage pressure after the chart gate opens")
-    p.add_argument("--code-multiplier-lr", type=float, default=0.5,
-                   help="Adaptive multiplier update rate for code usage")
+    p.add_argument(
+        "--phase1-adaptive-multipliers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable adaptive multipliers for Phase 1 routing losses",
+    )
+    p.add_argument(
+        "--phase1-multiplier-max",
+        type=float,
+        default=8.0,
+        help="Maximum adaptive multiplier scale in Phase 1",
+    )
+    p.add_argument(
+        "--phase1-multiplier-decay",
+        type=float,
+        default=0.05,
+        help="Relaxation rate back toward base weights when constraints are satisfied",
+    )
+    p.add_argument(
+        "--conf-target-top1",
+        type=float,
+        default=0.55,
+        help="Target mean soft top-1 routing probability",
+    )
+    p.add_argument(
+        "--conf-multiplier-lr",
+        type=float,
+        default=1.5,
+        help="Adaptive multiplier update rate for routing confidence",
+    )
+    p.add_argument(
+        "--chart-multiplier-lr",
+        type=float,
+        default=1.0,
+        help="Adaptive multiplier update rate for hard chart usage",
+    )
+    p.add_argument(
+        "--chart-ot-i-target",
+        type=float,
+        default=0.35,
+        help="Target soft mutual information for OT balancing pressure",
+    )
+    p.add_argument(
+        "--chart-ot-multiplier-lr",
+        type=float,
+        default=1.0,
+        help="Adaptive multiplier update rate for OT chart balancing",
+    )
+    p.add_argument(
+        "--code-usage-gate-h",
+        type=float,
+        default=1.25,
+        help="Enable code-usage pressure only after hard chart entropy exceeds this value",
+    )
+    p.add_argument(
+        "--code-usage-ramp-epochs",
+        type=int,
+        default=50,
+        help="Epochs to ramp code-usage pressure after the chart gate opens",
+    )
+    p.add_argument(
+        "--code-multiplier-lr",
+        type=float,
+        default=0.5,
+        help="Adaptive multiplier update rate for code usage",
+    )
 
     # Dynamics codebook
-    p.add_argument("--dyn-codes-per-chart", type=int, default=0,
-                   help="Dynamics codebook codes per chart (0=disabled)")
-    p.add_argument("--dyn-codebook-loss-weight", type=float, default=1.0,
-                   help="Dynamics codebook loss weight")
-    p.add_argument("--dyn-commitment-beta", type=float, default=0.25,
-                   help="Dynamics codebook commitment beta")
-    p.add_argument("--w-dyn-transition", type=float, default=0.5,
-                   help="DynamicsTransitionModel CE weight")
-    p.add_argument("--dyn-transition-hidden-dim", type=int, default=128,
-                   help="Dynamics transition model MLP hidden dim")
-    p.add_argument("--lr-dyn-codebook", type=float, default=1e-3,
-                   help="Phase 2/3 LR for dynamics codebook + transition model")
+    p.add_argument(
+        "--dyn-codes-per-chart",
+        type=int,
+        default=0,
+        help="Dynamics codebook codes per chart (0=disabled)",
+    )
+    p.add_argument(
+        "--dyn-codebook-loss-weight", type=float, default=1.0, help="Dynamics codebook loss weight"
+    )
+    p.add_argument(
+        "--dyn-commitment-beta", type=float, default=0.25, help="Dynamics codebook commitment beta"
+    )
+    p.add_argument(
+        "--w-dyn-transition", type=float, default=0.5, help="DynamicsTransitionModel CE weight"
+    )
+    p.add_argument(
+        "--dyn-transition-hidden-dim",
+        type=int,
+        default=128,
+        help="Dynamics transition model MLP hidden dim",
+    )
+    p.add_argument(
+        "--lr-dyn-codebook",
+        type=float,
+        default=1e-3,
+        help="Phase 2/3 LR for dynamics codebook + transition model",
+    )
 
     # Dynamics loss weights
     p.add_argument("--w-geodesic", type=float, default=1.0)
     p.add_argument("--w-chart-transition", type=float, default=0.5)
     p.add_argument("--w-momentum-reg", type=float, default=0.01)
     p.add_argument("--w-energy-conservation", type=float, default=0.01)
-    p.add_argument("--w-screened-poisson", type=float, default=0.0,
-                   help="Screened Poisson PDE residual weight; 0 = disabled")
-    p.add_argument("--wm-screening-kappa", type=float, default=1.0,
-                   help="Screening mass kappa for screened Poisson loss")
-    p.add_argument("--w-hodge", type=float, default=0.0,
-                   help="Hodge consistency loss weight; 0 = disabled")
+    p.add_argument(
+        "--w-screened-poisson",
+        type=float,
+        default=0.0,
+        help="Screened Poisson PDE residual weight; 0 = disabled",
+    )
+    p.add_argument(
+        "--wm-screening-kappa",
+        type=float,
+        default=1.0,
+        help="Screening mass kappa for screened Poisson loss",
+    )
+    p.add_argument(
+        "--w-hodge", type=float, default=0.0, help="Hodge consistency loss weight; 0 = disabled"
+    )
 
     # Supervised geodesic diffusion
-    p.add_argument("--wm-diffusion-substeps", type=int, default=8,
-                   help="Number of waypoints between z_t and z_{t+1}")
-    p.add_argument("--w-position", type=float, default=1.0,
-                   help="Position loss weight (waypoint matching)")
-    p.add_argument("--w-endpoint", type=float, default=2.0,
-                   help="Endpoint loss weight (z_N == z_{t+1})")
-    p.add_argument("--w-momentum-target", type=float, default=0.1,
-                   help="Momentum supervision weight")
-    p.add_argument("--w-hodge-perp", type=float, default=0.01,
-                   help="Harmonic force penalty")
-    p.add_argument("--use-geodesic-diffusion", action="store_true", default=False,
-                   help="Use supervised geodesic diffusion for Phase 2/3 WM training")
+    p.add_argument(
+        "--wm-diffusion-substeps",
+        type=int,
+        default=8,
+        help="Number of waypoints between z_t and z_{t+1}",
+    )
+    p.add_argument(
+        "--w-position", type=float, default=1.0, help="Position loss weight (waypoint matching)"
+    )
+    p.add_argument(
+        "--w-endpoint", type=float, default=2.0, help="Endpoint loss weight (z_N == z_{t+1})"
+    )
+    p.add_argument(
+        "--w-momentum-target", type=float, default=0.1, help="Momentum supervision weight"
+    )
+    p.add_argument("--w-hodge-perp", type=float, default=0.01, help="Harmonic force penalty")
+    p.add_argument(
+        "--use-geodesic-diffusion",
+        action="store_true",
+        default=False,
+        help="Use supervised geodesic diffusion for Phase 2/3 WM training",
+    )
 
     # Orthogonality & enclosure
-    p.add_argument("--w-perp", type=float, default=0.01,
-                   help="Orthogonality loss weight (z_n vs z_tex decorrelation)")
-    p.add_argument("--w-enclosure", type=float, default=0.0,
-                   help="Causal enclosure loss weight (0=disabled)")
+    p.add_argument(
+        "--w-perp",
+        type=float,
+        default=0.01,
+        help="Orthogonality loss weight (z_n vs z_tex decorrelation)",
+    )
+    p.add_argument(
+        "--w-enclosure", type=float, default=0.0, help="Causal enclosure loss weight (0=disabled)"
+    )
     p.add_argument("--enclosure-probe-hidden-dim", type=int, default=128)
     p.add_argument("--enclosure-probe-lr", type=float, default=3e-3)
     p.add_argument("--enclosure-grl-max-alpha", type=float, default=1.0)
     p.add_argument("--enclosure-grl-warmup-steps", type=int, default=5000)
 
     # Zeno loss (routing smoothness)
-    p.add_argument("--w-zeno", type=float, default=0.0,
-                   help="Zeno loss weight (routing distribution smoothness; 0=disabled)")
-    p.add_argument("--zeno-mode", type=str, default="jsd",
-                   choices=["jsd", "kl"],
-                   help="Zeno divergence mode: 'jsd' (recommended) or 'kl'")
+    p.add_argument(
+        "--w-zeno",
+        type=float,
+        default=0.0,
+        help="Zeno loss weight (routing distribution smoothness; 0=disabled)",
+    )
+    p.add_argument(
+        "--zeno-mode",
+        type=str,
+        default="jsd",
+        choices=["jsd", "kl"],
+        help="Zeno divergence mode: 'jsd' (recommended) or 'kl'",
+    )
 
     # Logging / saving / resume
     p.add_argument("--log-every", type=int, default=5)

@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from types import SimpleNamespace
 
 import numpy as np
 import torch
@@ -34,8 +33,8 @@ from fragile.checkpoints import (
 from fragile.core.layers import FactorizedJumpOperator
 from fragile.vla.extract_features import VLAFeatureDataset
 from fragile.vla.losses import (
-    DynamicsTransitionModel,
     compute_dynamics_markov_loss,
+    DynamicsTransitionModel,
 )
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
@@ -43,11 +42,6 @@ from fragile.vla.phase1_control import (
     update_phase1_adaptive_state,
 )
 from fragile.vla.train_joint import (
-    ENCODER_LOSS_KEYS,
-    INFO_KEYS,
-    DYN_SYMBOL_KEYS,
-    ENCLOSURE_DIAG_KEYS,
-    ZENO_DIAG_KEYS,
     _compute_encoder_losses,
     _eval_pass,
     _get_hard_routing_tau,
@@ -56,6 +50,11 @@ from fragile.vla.train_joint import (
     _run_diagnostics,
     _save_checkpoint,
     _use_hard_routing,
+    DYN_SYMBOL_KEYS,
+    ENCLOSURE_DIAG_KEYS,
+    ENCODER_LOSS_KEYS,
+    INFO_KEYS,
+    ZENO_DIAG_KEYS,
 )
 
 from .encoder import SharedDynTopoEncoder
@@ -75,7 +74,7 @@ def _init_shared_dyn_accumulators() -> dict[str, float]:
         + list(ZENO_DIAG_KEYS)
         + ["zeno"]
     )
-    return {k: 0.0 for k in keys}
+    return dict.fromkeys(keys, 0.0)
 
 
 # ── Symbol usage statistics ───────────────────────────────────────
@@ -100,7 +99,7 @@ def _symbol_usage_stats(
         per_chart_code_entropy, per_chart_code_perplexity,
         per_chart_active_codes.
     """
-    N = K_chart.numel()
+    K_chart.numel()
     num_states = num_charts * codes_per_chart
 
     # Joint (chart, code) flat index
@@ -116,7 +115,7 @@ def _symbol_usage_stats(
     per_chart_perplexity = []
     per_chart_active = []
     for c in range(num_charts):
-        mask = (K_chart == c)
+        mask = K_chart == c
         if mask.sum() > 0:
             codes_c = K_code_dyn[mask]
             c_counts = torch.bincount(codes_c.long(), minlength=codes_per_chart).float()
@@ -183,25 +182,38 @@ def _test_eval_dynamics(
 
     for batch in test_seq_loader:
         features = batch["features"].to(device)  # [B, H, D_feat]
-        actions = batch["actions"].to(device)     # [B, H, A]
+        actions = batch["actions"].to(device)  # [B, H, A]
         B, H, D_feat = features.shape
 
         # Encode all frames
         flat = features.reshape(B * H, D_feat)
         (
-            K_flat, K_code_flat, z_n_flat, z_tex_flat,
-            rw_flat, z_geo_flat, vq_loss_flat, _, _, c_bar_flat,
-            v_local_flat, z_q_flat,
+            K_flat,
+            _K_code_flat,
+            _z_n_flat,
+            _z_tex_flat,
+            rw_flat,
+            z_geo_flat,
+            vq_loss_flat,
+            _,
+            _,
+            c_bar_flat,
+            v_local_flat,
+            _z_q_flat,
         ) = model.encoder(
-            flat, hard_routing=hard_routing, hard_routing_tau=hard_routing_tau,
+            flat,
+            hard_routing=hard_routing,
+            hard_routing_tau=hard_routing_tau,
         )
 
         # Reconstruction loss on all frames (MSE between input and decoder output)
         router_override = rw_flat if hard_routing else None
         x_recon, _, _ = model.decoder(
-            z_geo_flat, None, chart_index=None,
+            z_geo_flat,
+            chart_index=None,
             router_weights=router_override,
-            hard_routing=hard_routing, hard_routing_tau=hard_routing_tau,
+            hard_routing=hard_routing,
+            hard_routing_tau=hard_routing_tau,
         )
         recon_loss = torch.nn.functional.mse_loss(x_recon, flat)
         recon_sum += recon_loss.item()
@@ -252,7 +264,8 @@ def _test_eval_dynamics(
         K_chart_cat = torch.cat(all_K_chart).reshape(-1)
         K_code_cat = torch.cat(all_K_code_dyn).reshape(-1)
         sym = _symbol_usage_stats(
-            K_chart_cat, K_code_cat,
+            K_chart_cat,
+            K_code_cat,
             num_charts=args.num_charts,
             codes_per_chart=args.codes_per_chart,
         )
@@ -290,7 +303,9 @@ def _train_symbol_usage(
         flat = features.reshape(B * H, D_feat)
 
         K_flat, _, _, _, rw_flat, _, _, _, _, _, v_local_flat, _ = model.encoder(
-            flat, hard_routing=hard_routing, hard_routing_tau=hard_routing_tau,
+            flat,
+            hard_routing=hard_routing,
+            hard_routing_tau=hard_routing_tau,
         )
         K_all = K_flat.reshape(B, H)
         v_local_all = v_local_flat.reshape(B, H, -1)
@@ -300,7 +315,8 @@ def _train_symbol_usage(
         K_code_list = []
         for t in range(H):
             _, K_code_t, _, _ = model.encoder.dynamics_vq(
-                v_local_all[:, t], rw_all[:, t],
+                v_local_all[:, t],
+                rw_all[:, t],
             )
             K_code_list.append(K_code_t)
         K_code_dyn = torch.stack(K_code_list, dim=1)  # [B, H]
@@ -313,12 +329,12 @@ def _train_symbol_usage(
 
     K_chart_cat = torch.cat(all_K_chart).reshape(-1)
     K_code_cat = torch.cat(all_K_code_dyn).reshape(-1)
-    sym = _symbol_usage_stats(
-        K_chart_cat, K_code_cat,
+    return _symbol_usage_stats(
+        K_chart_cat,
+        K_code_cat,
         num_charts=args.num_charts,
         codes_per_chart=args.codes_per_chart,
     )
-    return sym
 
 
 # ── Main training loop ───────────────────────────────────────────
@@ -361,7 +377,9 @@ def _run_unified(
     scheduler = None
     if args.use_scheduler or args.phase1_cosine_lr:
         scheduler = CosineAnnealingLR(
-            optimizer, T_max=args.phase1_epochs, eta_min=args.phase1_eta_min,
+            optimizer,
+            T_max=args.phase1_epochs,
+            eta_min=args.phase1_eta_min,
         )
 
     K = args.num_charts
@@ -381,17 +399,30 @@ def _run_unified(
         phase1_config = _phase1_config_from_args(args, phase1_state)
 
         for batch in seq_loader:
-            features = batch["features"].to(device)   # [B, H, D_feat]
-            actions = batch["actions"].to(device)      # [B, H, A]
+            features = batch["features"].to(device)  # [B, H, D_feat]
+            actions = batch["actions"].to(device)  # [B, H, A]
             B, H, D_feat = features.shape
 
             # ── 1. Full encoder losses on frame 0 ─────────────────
             (
-                base_loss, zn_reg_loss, metrics,
-                _z_geo_0, enc_w_0, K_ch_0, zn_0, ztex_0,
-                c_bar_0, K_code_0, _, v_local_0,
+                base_loss,
+                zn_reg_loss,
+                metrics,
+                _z_geo_0,
+                enc_w_0,
+                K_ch_0,
+                _zn_0,
+                _ztex_0,
+                c_bar_0,
+                _K_code_0,
+                _,
+                v_local_0,
             ) = _compute_encoder_losses(
-                features[:, 0, :], model, jump_op, args, epoch,
+                features[:, 0, :],
+                model,
+                jump_op,
+                args,
+                epoch,
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
                 phase1_config=phase1_config,
@@ -401,9 +432,18 @@ def _run_unified(
             if H > 1:
                 rest = features[:, 1:, :].reshape(B * (H - 1), D_feat)
                 (
-                    K_rest, Kcode_rest, _zn_rest, _ztex_rest,
-                    rw_rest, _z_rest, _, _, _, c_bar_rest,
-                    v_local_rest, _,
+                    K_rest,
+                    _Kcode_rest,
+                    _zn_rest,
+                    _ztex_rest,
+                    rw_rest,
+                    _z_rest,
+                    _,
+                    _,
+                    _,
+                    c_bar_rest,
+                    v_local_rest,
+                    _,
                 ) = model.encoder(
                     rest,
                     hard_routing=current_hard_routing,
@@ -458,10 +498,7 @@ def _run_unified(
 
             # ── 6. Accumulate ─────────────────────────────────────
             current_lr = optimizer.param_groups[0]["lr"]
-            update_ratio = (
-                current_lr * grad_norm / (param_norm + 1e-12)
-                if param_norm > 0 else 0.0
-            )
+            update_ratio = current_lr * grad_norm / (param_norm + 1e-12) if param_norm > 0 else 0.0
 
             acc["total"] += total.item()
             for k in ENCODER_LOSS_KEYS:
@@ -489,11 +526,19 @@ def _run_unified(
         need_eval = should_log or (phase1_state is not None)
         if need_eval:
             (
-                hard_usage, hard_perplexity, hard_active,
-                soft_usage, soft_perplexity, soft_active,
-                mean_r, extra,
+                hard_usage,
+                hard_perplexity,
+                hard_active,
+                soft_usage,
+                soft_perplexity,
+                soft_active,
+                mean_r,
+                extra,
             ) = _eval_pass(
-                model, single_loader, K, device,
+                model,
+                single_loader,
+                K,
+                device,
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
             )
@@ -508,28 +553,41 @@ def _run_unified(
         train_sym: dict[str, float] = {}
         if should_log:
             train_sym = _train_symbol_usage(
-                model, seq_loader, args, device,
+                model,
+                seq_loader,
+                args,
+                device,
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
             )
 
         # ── Eval pass (test set) ──────────────────────────────────
         test_metrics: dict[str, float] = {}
-        test_extra: dict = {}
         if should_log and test_seq_loader is not None:
             test_metrics = _test_eval_dynamics(
-                model, dyn_trans_model, test_seq_loader,
-                args, device,
+                model,
+                dyn_trans_model,
+                test_seq_loader,
+                args,
+                device,
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
             )
             if test_single_loader is not None:
                 (
-                    _, test_perplexity, test_active,
-                    _, test_soft_perplexity, test_soft_active,
-                    test_mean_r, test_extra,
+                    _,
+                    test_perplexity,
+                    test_active,
+                    _,
+                    test_soft_perplexity,
+                    test_soft_active,
+                    test_mean_r,
+                    _test_extra,
                 ) = _eval_pass(
-                    model, test_single_loader, K, device,
+                    model,
+                    test_single_loader,
+                    K,
+                    device,
                     hard_routing=current_hard_routing,
                     hard_routing_tau=current_tau,
                 )
@@ -606,8 +664,7 @@ def _run_unified(
                 )
                 pac = train_sym["per_chart_active_codes"]
                 print(
-                    f"  Per-chart active codes: "
-                    f"{np.array2string(np.array(pac), separator=', ')}"
+                    f"  Per-chart active codes: {np.array2string(np.array(pac), separator=', ')}"
                 )
             if extra.get("code_entropy_mean_active") is not None:
                 print(
@@ -649,18 +706,25 @@ def _run_unified(
 
         if phase1_state is not None:
             update_phase1_adaptive_state(
-                phase1_state, args,
-                train_metrics=acc, eval_metrics=extra, epoch=epoch,
+                phase1_state,
+                args,
+                train_metrics=acc,
+                eval_metrics=extra,
+                epoch=epoch,
             )
 
-        should_save = (
-            (epoch > 0 and epoch % args.save_every == 0)
-            or epoch == total_epochs - 1
-        )
+        should_save = (epoch > 0 and epoch % args.save_every == 0) or epoch == total_epochs - 1
         if should_save:
             _save_checkpoint(
-                args, model, jump_op, None, optimizer, scheduler,
-                epoch, 1, acc,
+                args,
+                model,
+                jump_op,
+                None,
+                optimizer,
+                scheduler,
+                epoch,
+                1,
+                acc,
                 dyn_trans_model=dyn_trans_model,
             )
 
@@ -686,8 +750,11 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
     # Train
     single_ds = VLAFeatureDataset(args.feature_cache_dir, sequence_length=1, split="train")
     single_loader = DataLoader(
-        single_ds, batch_size=args.batch_size, shuffle=True,
-        drop_last=False, num_workers=0,
+        single_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=False,
+        num_workers=0,
     )
     input_dim = single_ds[0]["feature"].shape[0]
     print(f"Train single-frame: {len(single_ds)} frames, {len(single_loader)} batches")
@@ -698,8 +765,11 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
         split="train",
     )
     seq_loader = DataLoader(
-        seq_ds, batch_size=args.batch_size, shuffle=True,
-        drop_last=True, num_workers=0,
+        seq_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        drop_last=True,
+        num_workers=0,
     )
     print(
         f"Train sequences: {len(seq_ds)} windows "
@@ -709,8 +779,11 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
     # Test
     test_single_ds = VLAFeatureDataset(args.feature_cache_dir, sequence_length=1, split="test")
     test_single_loader = DataLoader(
-        test_single_ds, batch_size=args.batch_size, shuffle=False,
-        drop_last=False, num_workers=0,
+        test_single_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
     )
     test_seq_ds = VLAFeatureDataset(
         args.feature_cache_dir,
@@ -718,17 +791,14 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
         split="test",
     )
     test_seq_loader = DataLoader(
-        test_seq_ds, batch_size=args.batch_size, shuffle=False,
-        drop_last=False, num_workers=0,
+        test_seq_ds,
+        batch_size=args.batch_size,
+        shuffle=False,
+        drop_last=False,
+        num_workers=0,
     )
-    print(
-        f"Test single-frame: {len(test_single_ds)} frames, "
-        f"{len(test_single_loader)} batches"
-    )
-    print(
-        f"Test sequences: {len(test_seq_ds)} windows, "
-        f"{len(test_seq_loader)} batches"
-    )
+    print(f"Test single-frame: {len(test_single_ds)} frames, {len(test_single_loader)} batches")
+    print(f"Test sequences: {len(test_seq_ds)} windows, {len(test_seq_loader)} batches")
     print(f"Feature dim: {input_dim}")
 
     # ── Model ─────────────────────────────────────────────────
@@ -774,8 +844,10 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
     print(f"  Jump op:        {n_jump:>10,} params")
     print(f"  Dyn transition: {n_dyn:>10,} params")
     print(f"  TOTAL:          {n_total:>10,} params")
-    print(f"  (codebook_dyn is None — dynamics uses main codebook "
-          f"[{K} charts x {args.codes_per_chart} codes])")
+    print(
+        f"  (codebook_dyn is None — dynamics uses main codebook "
+        f"[{K} charts x {args.codes_per_chart} codes])"
+    )
 
     # ── Resume ────────────────────────────────────────────────
     if args.resume:
@@ -799,13 +871,21 @@ def train_shared_dyn(args: argparse.Namespace) -> None:
         else:
             print("\nWarm-starting chart centers with k-means...")
             model.warmstart_chart_centers(
-                single_loader, device, max_batches=10, radius_floor=0.0,
+                single_loader,
+                device,
+                max_batches=10,
+                radius_floor=0.0,
             )
 
     # ── Run unified training ──────────────────────────────────
     last_metrics = _run_unified(
-        model, jump_op, single_loader, seq_loader,
-        dyn_trans_model, args, device,
+        model,
+        jump_op,
+        single_loader,
+        seq_loader,
+        dyn_trans_model,
+        args,
+        device,
         test_single_loader=test_single_loader,
         test_seq_loader=test_seq_loader,
     )
@@ -859,15 +939,17 @@ def main() -> None:
     p.add_argument("--hard-routing-tau-anneal-epochs", type=int, default=200)
 
     # Epochs
-    p.add_argument("--phase1-epochs", type=int, default=100,
-                   help="Number of unified training epochs")
+    p.add_argument(
+        "--phase1-epochs", type=int, default=100, help="Number of unified training epochs"
+    )
 
     # Learning rates
     p.add_argument("--lr", type=float, default=1e-3)
     p.add_argument("--lr-chart-centers-scale", type=float, default=0.1)
     p.add_argument("--lr-codebook-scale", type=float, default=0.5)
-    p.add_argument("--lr-dyn-transition", type=float, default=3e-3,
-                   help="LR for dynamics transition model")
+    p.add_argument(
+        "--lr-dyn-transition", type=float, default=3e-3, help="LR for dynamics transition model"
+    )
 
     # Training
     p.add_argument("--batch-size", type=int, default=256)
@@ -877,14 +959,15 @@ def main() -> None:
     p.add_argument("--phase1-eta-min", type=float, default=1e-6)
 
     # Dynamics loss weights (shared codebook)
-    p.add_argument("--w-dyn-transition", type=float, default=0.5,
-                   help="Markov transition CE weight")
-    p.add_argument("--w-zeno", type=float, default=0.1,
-                   help="Zeno routing-smoothness weight")
+    p.add_argument(
+        "--w-dyn-transition", type=float, default=0.5, help="Markov transition CE weight"
+    )
+    p.add_argument("--w-zeno", type=float, default=0.1, help="Zeno routing-smoothness weight")
     p.add_argument("--zeno-mode", type=str, default="jsd", choices=["jsd", "kl"])
     p.add_argument("--dyn-transition-hidden-dim", type=int, default=128)
-    p.add_argument("--commitment-beta", type=float, default=0.25,
-                   help="VQ commitment loss weight (beta)")
+    p.add_argument(
+        "--commitment-beta", type=float, default=0.25, help="VQ commitment loss weight (beta)"
+    )
 
     # Encoder loss weights (same as train_joint)
     p.add_argument("--w-recon", type=float, default=1.0)
@@ -933,8 +1016,9 @@ def main() -> None:
     p.add_argument("--w-perp", type=float, default=0.01)
 
     # Adaptive multipliers
-    p.add_argument("--phase1-adaptive-multipliers", action=argparse.BooleanOptionalAction,
-                   default=True)
+    p.add_argument(
+        "--phase1-adaptive-multipliers", action=argparse.BooleanOptionalAction, default=True
+    )
     p.add_argument("--phase1-multiplier-max", type=float, default=8.0)
     p.add_argument("--phase1-multiplier-decay", type=float, default=0.05)
     p.add_argument("--conf-target-top1", type=float, default=0.55)

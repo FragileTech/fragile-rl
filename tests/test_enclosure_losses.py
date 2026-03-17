@@ -4,23 +4,23 @@ import pytest
 import torch
 import torch.nn.functional as F
 
+from fragile.core.layers.gauge import hyperbolic_distance, poincare_exp_map
 from fragile.vla.losses import (
-    orthogonality_loss,
-    GradientReversalLayer,
-    EnclosureProbe,
-    DynamicsTransitionModel,
-    compute_enclosure_loss,
     compute_dynamics_markov_loss,
-    grl_alpha_schedule,
-    zeno_loss,
-    geodesic_interpolation,
+    compute_enclosure_loss,
     compute_momentum_targets,
-    position_loss,
-    endpoint_loss,
-    momentum_loss,
     compute_supervised_wm_loss,
+    DynamicsTransitionModel,
+    EnclosureProbe,
+    endpoint_loss,
+    geodesic_interpolation,
+    GradientReversalLayer,
+    grl_alpha_schedule,
+    momentum_loss,
+    orthogonality_loss,
+    position_loss,
+    zeno_loss,
 )
-from fragile.core.layers.gauge import poincare_exp_map, hyperbolic_distance
 
 
 class _DummyAtlasEncoder(torch.nn.Module):
@@ -38,7 +38,7 @@ class _DummyAtlasEncoder(torch.nn.Module):
         chart_idx = router_weights.argmax(dim=-1)
         codebook = self.codebook_dyn[chart_idx]
         diff = v_local.unsqueeze(1) - codebook
-        dist = (diff ** 2).sum(dim=-1)
+        dist = (diff**2).sum(dim=-1)
         code_idx = dist.argmin(dim=-1)
         z_q = codebook[torch.arange(v_local.shape[0]), code_idx]
         vq_loss = ((v_local - z_q.detach()) ** 2).mean() + ((v_local.detach() - z_q) ** 2).mean()
@@ -116,8 +116,12 @@ class TestEnclosureProbe:
         """Forward pass should return correct shapes for (chart, code) state space."""
         B, D, A, K, C = 16, 8, 6, 4, 32
         probe = EnclosureProbe(
-            chart_dim=D, ztex_dim=D, action_dim=A,
-            num_charts=K, codes_per_chart=C, hidden_dim=64,
+            chart_dim=D,
+            ztex_dim=D,
+            action_dim=A,
+            num_charts=K,
+            codes_per_chart=C,
+            hidden_dim=64,
         )
         S = K * C  # total state count
         chart_embed = torch.randn(B, D)
@@ -131,8 +135,12 @@ class TestEnclosureProbe:
     def test_parameter_count_small(self):
         """Probe should have reasonable parameter count."""
         probe = EnclosureProbe(
-            chart_dim=16, ztex_dim=16, action_dim=6,
-            num_charts=8, codes_per_chart=32, hidden_dim=128,
+            chart_dim=16,
+            ztex_dim=16,
+            action_dim=6,
+            num_charts=8,
+            codes_per_chart=32,
+            hidden_dim=128,
         )
         n_params = sum(p.numel() for p in probe.parameters())
         assert n_params < 200000  # larger output but still small
@@ -143,8 +151,12 @@ class TestComputeEnclosureLoss:
         """Should return (tensor, tensor, dict)."""
         B, D, A, K, C = 16, 8, 6, 4, 32
         probe = EnclosureProbe(
-            chart_dim=D, ztex_dim=D, action_dim=A,
-            num_charts=K, codes_per_chart=C, hidden_dim=64,
+            chart_dim=D,
+            ztex_dim=D,
+            action_dim=A,
+            num_charts=K,
+            codes_per_chart=C,
+            hidden_dim=64,
         )
         chart_embed = torch.randn(B, D, requires_grad=True)
         action = torch.randn(B, A)
@@ -154,8 +166,13 @@ class TestComputeEnclosureLoss:
         K_code_tp1 = torch.randint(0, C, (B,))
 
         loss_enc, loss_probe, diag = compute_enclosure_loss(
-            probe, chart_embed, action, z_tex, K_chart_tp1,
-            K_code_t=K_code_t, K_code_tp1=K_code_tp1,
+            probe,
+            chart_embed,
+            action,
+            z_tex,
+            K_chart_tp1,
+            K_code_t=K_code_t,
+            K_code_tp1=K_code_tp1,
             codes_per_chart=C,
         )
         assert isinstance(loss_enc, torch.Tensor)
@@ -168,8 +185,12 @@ class TestComputeEnclosureLoss:
         """Diagnostics should contain expected keys."""
         B, D, A, K, C = 8, 4, 2, 3, 8
         probe = EnclosureProbe(
-            chart_dim=D, ztex_dim=D, action_dim=A,
-            num_charts=K, codes_per_chart=C, hidden_dim=32,
+            chart_dim=D,
+            ztex_dim=D,
+            action_dim=A,
+            num_charts=K,
+            codes_per_chart=C,
+            hidden_dim=32,
         )
         chart_embed = torch.randn(B, D)
         action = torch.randn(B, A)
@@ -179,8 +200,13 @@ class TestComputeEnclosureLoss:
         K_code_tp1 = torch.randint(0, C, (B,))
 
         _, _, diag = compute_enclosure_loss(
-            probe, chart_embed, action, z_tex, K_chart_tp1,
-            K_code_t=K_code_t, K_code_tp1=K_code_tp1,
+            probe,
+            chart_embed,
+            action,
+            z_tex,
+            K_chart_tp1,
+            K_code_t=K_code_t,
+            K_code_tp1=K_code_tp1,
             codes_per_chart=C,
         )
         expected_keys = {"acc_full", "acc_base", "defect_acc", "defect_ce", "ce_full", "ce_base"}
@@ -190,8 +216,13 @@ class TestComputeEnclosureLoss:
         """Gradients through z_tex should be reversed."""
         B, D, A, K, C = 8, 4, 2, 3, 8
         probe = EnclosureProbe(
-            chart_dim=D, ztex_dim=D, action_dim=A,
-            num_charts=K, codes_per_chart=C, hidden_dim=32, alpha=1.0,
+            chart_dim=D,
+            ztex_dim=D,
+            action_dim=A,
+            num_charts=K,
+            codes_per_chart=C,
+            hidden_dim=32,
+            alpha=1.0,
         )
         z_tex = torch.randn(B, D, requires_grad=True)
         chart_embed = torch.randn(B, D, requires_grad=True)
@@ -201,8 +232,13 @@ class TestComputeEnclosureLoss:
         K_code_tp1 = torch.randint(0, C, (B,))
 
         loss_enc, _, _ = compute_enclosure_loss(
-            probe, chart_embed, action, z_tex, K_chart_tp1,
-            K_code_t=K_code_t, K_code_tp1=K_code_tp1,
+            probe,
+            chart_embed,
+            action,
+            z_tex,
+            K_chart_tp1,
+            K_code_t=K_code_t,
+            K_code_tp1=K_code_tp1,
             codes_per_chart=C,
         )
         loss_enc.backward()
@@ -215,16 +251,24 @@ class TestComputeEnclosureLoss:
         """Should still work when K_code args are omitted (defaults to zeros)."""
         B, D, A, K = 8, 4, 2, 3
         probe = EnclosureProbe(
-            chart_dim=D, ztex_dim=D, action_dim=A,
-            num_charts=K, codes_per_chart=8, hidden_dim=32,
+            chart_dim=D,
+            ztex_dim=D,
+            action_dim=A,
+            num_charts=K,
+            codes_per_chart=8,
+            hidden_dim=32,
         )
         chart_embed = torch.randn(B, D)
         action = torch.randn(B, A)
         z_tex = torch.randn(B, D)
         K_chart_tp1 = torch.randint(0, K, (B,))
 
-        loss_enc, loss_probe, diag = compute_enclosure_loss(
-            probe, chart_embed, action, z_tex, K_chart_tp1,
+        loss_enc, loss_probe, _diag = compute_enclosure_loss(
+            probe,
+            chart_embed,
+            action,
+            z_tex,
+            K_chart_tp1,
         )
         assert loss_enc.shape == ()
         assert loss_probe.shape == ()
@@ -270,6 +314,7 @@ class TestZenoLoss:
     def test_jsd_bounded(self):
         """JSD should be bounded in [0, log 2]."""
         import math
+
         B, K = 64, 8
         # Maximally different: one-hot vs another one-hot
         w_t = torch.zeros(B, K)
@@ -406,12 +451,13 @@ class TestGeodesicInterpolation:
             dists = []
             for k in range(N + 1):
                 d = hyperbolic_distance(
-                    z_start[b:b+1], waypoints[b:b+1, k],
+                    z_start[b : b + 1],
+                    waypoints[b : b + 1, k],
                 )
                 dists.append(d.item())
             for i in range(1, len(dists)):
-                assert dists[i] >= dists[i-1] - 1e-4, (
-                    f"Distance not monotonic at step {i}: {dists[i]} < {dists[i-1]}"
+                assert dists[i] >= dists[i - 1] - 1e-4, (
+                    f"Distance not monotonic at step {i}: {dists[i]} < {dists[i - 1]}"
                 )
 
     def test_N_equals_1(self):
@@ -495,20 +541,30 @@ class TestSupervisedWMLoss:
     @pytest.fixture
     def wm_and_config(self):
         """Create a small world model and config for testing."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
         from types import SimpleNamespace
+
+        from fragile.vla.covariant_world_model import GeometricWorldModel
 
         D, A, K = 4, 2, 4
         wm = GeometricWorldModel(
-            latent_dim=D, action_dim=A, num_charts=K,
-            d_model=32, hidden_dim=32, dt=0.01,
-            gamma_friction=1.0, T_c=0.1,
-            use_boris=False, use_jump=False,
+            latent_dim=D,
+            action_dim=A,
+            num_charts=K,
+            d_model=32,
+            hidden_dim=32,
+            dt=0.01,
+            gamma_friction=1.0,
+            T_c=0.1,
+            use_boris=False,
+            use_jump=False,
             n_refine_steps=2,
         )
         config = SimpleNamespace(
-            w_position=1.0, w_endpoint=2.0, w_momentum_target=0.1,
-            w_hodge_perp=0.01, w_energy_conservation=0.01,
+            w_position=1.0,
+            w_endpoint=2.0,
+            w_momentum_target=0.1,
+            w_hodge_perp=0.01,
+            w_energy_conservation=0.01,
             wm_dt=0.01,
         )
         return wm, config, D, A, K
@@ -523,7 +579,14 @@ class TestSupervisedWMLoss:
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
         loss, metrics = compute_supervised_wm_loss(
-            wm, z_start, z_end, action, rw, N, config.wm_dt, config,
+            wm,
+            z_start,
+            z_end,
+            action,
+            rw,
+            N,
+            config.wm_dt,
+            config,
         )
         assert isinstance(loss, torch.Tensor)
         assert loss.shape == ()
@@ -542,7 +605,14 @@ class TestSupervisedWMLoss:
         rw = torch.softmax(torch.randn(B, K), dim=-1)
 
         loss, _ = compute_supervised_wm_loss(
-            wm, z_start, z_end, action, rw, N, config.wm_dt, config,
+            wm,
+            z_start,
+            z_end,
+            action,
+            rw,
+            N,
+            config.wm_dt,
+            config,
         )
         loss.backward()
 

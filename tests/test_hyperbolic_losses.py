@@ -13,12 +13,12 @@ from fragile.hyperbolic_losses import (
     compute_chart_center_radius_loss,
     compute_chart_center_separation_loss,
     compute_chart_usage_band_loss,
-    compute_confidence_calibration_loss,
     compute_code_usage_band_loss,
+    compute_confidence_calibration_loss,
     compute_error_quality_targets,
     compute_hard_routing_nll,
-    compute_rank_quality_targets,
     compute_radial_calibration_loss,
+    compute_rank_quality_targets,
     compute_router_margin_loss,
     compute_router_score_metrics,
     get_jump_weight_schedule,
@@ -48,10 +48,14 @@ def test_chart_usage_band_loss_prefers_balanced_hard_assignments() -> None:
     )
 
     loss_balanced, _ = compute_chart_usage_band_loss(
-        balanced, num_charts=2, h_low=0.5,
+        balanced,
+        num_charts=2,
+        h_low=0.5,
     )
     loss_collapsed, _ = compute_chart_usage_band_loss(
-        collapsed, num_charts=2, h_low=0.5,
+        collapsed,
+        num_charts=2,
+        h_low=0.5,
     )
 
     assert loss_balanced.item() < loss_collapsed.item()
@@ -121,12 +125,18 @@ def test_code_usage_band_loss_prefers_per_chart_code_utilization() -> None:
     )
 
     loss_balanced, _ = compute_code_usage_band_loss(
-        v_local_balanced, codebook, router_weights,
-        temperature=0.05, h_low=math.log(1.5),
+        v_local_balanced,
+        codebook,
+        router_weights,
+        temperature=0.05,
+        h_low=math.log(1.5),
     )
     loss_collapsed, _ = compute_code_usage_band_loss(
-        v_local_collapsed, codebook, router_weights,
-        temperature=0.05, h_low=math.log(1.5),
+        v_local_collapsed,
+        codebook,
+        router_weights,
+        temperature=0.05,
+        h_low=math.log(1.5),
     )
 
     assert loss_balanced.item() < loss_collapsed.item()
@@ -147,11 +157,17 @@ def test_code_usage_band_loss_respects_explicit_hard_indices() -> None:
     v_local = torch.tensor([[0.0, 0.0], [0.0, 0.0]], dtype=torch.float32)
 
     loss_default, _ = compute_code_usage_band_loss(
-        v_local, codebook, router_weights, temperature=0.05, h_low=math.log(1.5),
+        v_local,
+        codebook,
+        router_weights,
+        temperature=0.05,
+        h_low=math.log(1.5),
     )
     explicit_indices = torch.tensor([[0], [1]], dtype=torch.long)
     loss_explicit, _ = compute_code_usage_band_loss(
-        v_local, codebook, router_weights,
+        v_local,
+        codebook,
+        router_weights,
         hard_code_indices=explicit_indices,
         temperature=0.05,
         h_low=math.log(1.5),
@@ -172,7 +188,9 @@ def test_hard_routing_keeps_live_soft_router_weights() -> None:
     )
     x = torch.randn(8, 3)
     _, _, enc_weights, _, _, _, _, _, _ = model(
-        x, use_hard_routing=True, hard_routing_tau=-1.0,
+        x,
+        use_hard_routing=True,
+        hard_routing_tau=-1.0,
     )
 
     soft_live = model.encoder._last_soft_router_weights_live
@@ -595,7 +613,8 @@ def test_phase1_code_usage_requires_chart_local_latent() -> None:
     except RuntimeError as exc:
         assert "chart-local latent" in str(exc)
     else:
-        raise AssertionError("compute_phase1_loss should require v_local for code usage")
+        msg = "compute_phase1_loss should require v_local for code usage"
+        raise AssertionError(msg)
 
 
 def test_phase1_loss_reports_information_metrics_even_without_window_loss() -> None:

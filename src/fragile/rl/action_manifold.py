@@ -29,7 +29,9 @@ class LatentTokenizer(nn.Module):
         return self.embed(z).unsqueeze(1), z.unsqueeze(1)
 
 
-def _state_index(chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int) -> torch.Tensor:
+def _state_index(
+    chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int
+) -> torch.Tensor:
     """Flatten `(chart, code)` into one discrete symbolic state index."""
     return chart_idx.long() * int(codes_per_chart) + code_idx.long()
 
@@ -82,10 +84,16 @@ def compose_structured_state_with_atlas(
         selected_code = codebook[chart_idx, code_idx.long()]
         selected_idx = code_idx.long()
         # Keep a per-chart view for downstream diagnostics and compatibility.
-        code_probs = F.one_hot(
-            selected_idx,
-            num_classes=codebook.shape[1],
-        ).to(dtype=dtype).unsqueeze(1).expand(-1, codebook.shape[0], -1)
+        code_probs = (
+            F
+            .one_hot(
+                selected_idx,
+                num_classes=codebook.shape[1],
+            )
+            .to(dtype=dtype)
+            .unsqueeze(1)
+            .expand(-1, codebook.shape[0], -1)
+        )
         z_q_all = _poincare_weighted_mean_per_chart(codebook, code_probs)
         z_q = selected_code
     else:
@@ -129,7 +137,9 @@ def symbolize_latent_with_atlas(
         router_weights = router_weights / router_weights.sum(dim=-1, keepdim=True).clamp(min=1e-8)
         if hard_routing:
             chart_idx = router_weights.argmax(dim=-1)
-            router_weights = F.one_hot(chart_idx, num_classes=atlas.num_charts).to(dtype=z_latent.dtype)
+            router_weights = F.one_hot(chart_idx, num_classes=atlas.num_charts).to(
+                dtype=z_latent.dtype
+            )
         else:
             chart_idx = router_weights.argmax(dim=-1)
     else:

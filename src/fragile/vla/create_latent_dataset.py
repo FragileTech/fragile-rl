@@ -29,34 +29,44 @@ def main() -> None:
         ),
     )
     p.add_argument(
-        "--model-id", default=VLAConfig.smolvla_model_id,
+        "--model-id",
+        default=VLAConfig.smolvla_model_id,
         help=f"HuggingFace model ID for SmolVLA (default: {VLAConfig.smolvla_model_id}).",
     )
     p.add_argument(
-        "--dataset", default=VLAConfig.dataset_name,
+        "--dataset",
+        default=VLAConfig.dataset_name,
         help=f"LeRobot dataset name (default: {VLAConfig.dataset_name}).",
     )
     p.add_argument(
-        "--output-dir", default=VLAConfig.feature_cache_dir,
+        "--output-dir",
+        default=VLAConfig.feature_cache_dir,
         help=f"Where to save the cached features (default: {VLAConfig.feature_cache_dir}).",
     )
     p.add_argument(
-        "--pooling", default=VLAConfig.pooling, choices=["mean", "modality_aware"],
+        "--pooling",
+        default=VLAConfig.pooling,
+        choices=["mean", "modality_aware"],
         help=f"Token pooling strategy (default: {VLAConfig.pooling}).",
     )
     p.add_argument(
-        "--max-episodes", type=int, default=0,
+        "--max-episodes",
+        type=int,
+        default=0,
         help="Max episodes to extract (0 = all).",
     )
     p.add_argument(
-        "--test-episodes", type=int, default=VLAConfig.held_out_test_episodes,
+        "--test-episodes",
+        type=int,
+        default=VLAConfig.held_out_test_episodes,
         help=(
             "How many cached episodes to reserve as held-out test data "
             f"(default: {VLAConfig.held_out_test_episodes})."
         ),
     )
     p.add_argument(
-        "--device", default="auto",
+        "--device",
+        default="auto",
         help='Device: "auto", "cuda", or "cpu".',
     )
 
@@ -65,6 +75,7 @@ def main() -> None:
     device = args.device
     if device == "auto":
         import torch
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
     config = VLAConfig(

@@ -117,7 +117,9 @@ def test_exact_projection_is_enforced_by_construction(reward_head, z, rw, monkey
     )
 
     torch.testing.assert_close(info["reward_form_cov_raw"], raw_form)
-    torch.testing.assert_close(info["reward_form_cov"], torch.zeros_like(raw_form), atol=1e-6, rtol=0)
+    torch.testing.assert_close(
+        info["reward_form_cov"], torch.zeros_like(raw_form), atol=1e-6, rtol=0
+    )
     torch.testing.assert_close(
         info["reward_nonconservative"],
         torch.zeros(z.shape[0], 1, device=z.device, dtype=z.dtype),

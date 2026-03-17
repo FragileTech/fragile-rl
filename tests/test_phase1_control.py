@@ -35,10 +35,14 @@ def test_sinkhorn_chart_loss_prefers_balanced_scores() -> None:
     )
 
     loss_balanced, metrics_balanced = compute_sinkhorn_balanced_chart_loss(
-        balanced_scores, epsilon=0.1, num_iters=30,
+        balanced_scores,
+        epsilon=0.1,
+        num_iters=30,
     )
-    loss_collapsed, metrics_collapsed = compute_sinkhorn_balanced_chart_loss(
-        collapsed_scores, epsilon=0.1, num_iters=30,
+    loss_collapsed, _metrics_collapsed = compute_sinkhorn_balanced_chart_loss(
+        collapsed_scores,
+        epsilon=0.1,
+        num_iters=30,
     )
 
     assert loss_balanced.item() < loss_collapsed.item()

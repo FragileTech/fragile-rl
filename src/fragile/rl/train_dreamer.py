@@ -21,7 +21,7 @@ from __future__ import annotations
 import argparse
 import contextlib
 import copy
-from dataclasses import asdict, dataclass, fields
+from dataclasses import asdict, fields
 import os
 import time
 
@@ -67,6 +67,15 @@ from .boundary import (
     critic_value,
 )
 from .config import DreamerConfig
+from .env_helpers import (
+    _apply_task_preset,
+    _build_episode_dict,
+    _flatten_obs,
+    _infer_action_dim,
+    _make_env,
+    _sample_collection_action,
+    ObservationNormalizer,
+)
 from .replay_buffer import SequenceReplayBuffer
 from .reward_head import RewardHead
 
@@ -89,319 +98,15 @@ except ImportError:
     MLFLOW_AVAILABLE = False
 
 
-# ---------------------------------------------------------------------------
-# Environment helpers (dm_control)
-# ---------------------------------------------------------------------------
-
-
-def _make_env(domain: str, task: str):
-    """Create a dm_control environment."""
-    from dm_control import suite
-
-    return suite.load(domain_name=domain, task_name=task)
-
-
-def _flatten_obs(time_step) -> np.ndarray:
-    """Flatten dm_control observation OrderedDict to a single vector."""
-    parts = []
-    for v in time_step.observation.values():
-        v = np.asarray(v, dtype=np.float32).flatten()
-        parts.append(v)
-    return np.concatenate(parts)
-
-
-def _infer_action_dim(env) -> int:
-    """Infer the flattened continuous action dimension from an env or wrapper."""
-    action_spec = None
-    if hasattr(env, "action_spec"):
-        action_spec = env.action_spec()
-    elif hasattr(env, "action_space"):
-        action_spec = env.action_space
-    if action_spec is None:
-        msg = "Environment does not expose action_spec() or action_space."
-        raise AttributeError(msg)
-    shape = tuple(getattr(action_spec, "shape", ()))
-    if not shape:
-        msg = "Environment action spec does not expose a valid shape."
-        raise ValueError(msg)
-    action_dim = int(np.prod(shape))
-    if action_dim <= 0:
-        msg = f"Environment action spec has invalid flattened dimension {action_dim}."
-        raise ValueError(msg)
-    return action_dim
-
-
-def _apply_task_preset(config: DreamerConfig) -> tuple[str | None, dict[str, tuple[object, object]]]:
-    """Apply environment-specific defaults while respecting explicit user overrides."""
-    preset_name = str(getattr(config, "task_preset", "auto") or "auto").strip().lower()
-    if preset_name in {"", "none", "off", "false"}:
-        return None, {}
-    if preset_name == "auto":
-        if (config.domain, config.task) == ("cartpole", "swingup"):
-            preset_name = "cartpole_swingup"
-        elif (config.domain, config.task) == ("cartpole", "balance"):
-            preset_name = "cartpole_balance"
-        else:
-            return None, {}
-    if preset_name not in {"cartpole_swingup", "cartpole_balance"}:
-        msg = f"Unknown task preset: {config.task_preset}"
-        raise ValueError(msg)
-
-    defaults = DreamerConfig()
-    changes: dict[str, tuple[object, object]] = {}
-    old_num_charts = config.num_charts
-    old_num_action_charts = config.num_action_charts
-    old_num_action_macros = config.num_action_macros
-    old_codes_per_chart = config.codes_per_chart
-    old_action_codes_per_chart = config.action_codes_per_chart
-
-    def _maybe_override(name: str, value: object) -> None:
-        current = getattr(config, name)
-        default = getattr(defaults, name)
-        if current == default and current != value:
-            setattr(config, name, value)
-            changes[name] = (current, value)
-
-    def _maybe_override_from(name: str, value: object, allowed_currents: tuple[object, ...]) -> None:
-        current = getattr(config, name)
-        if current in allowed_currents and current != value:
-            setattr(config, name, value)
-            changes[name] = (current, value)
-
-    _maybe_override("latent_dim", 8)
-    _maybe_override("num_charts", 4)
-    _maybe_override("codes_per_chart", 8)
-    _maybe_override("d_model", 64)
-    _maybe_override("hidden_dim", 128)
-    _maybe_override("max_episode_steps", 200)
-    _maybe_override("batch_size", 8)
-    _maybe_override("seq_len", 32)
-    _maybe_override("imagination_horizon", 8)
-    _maybe_override("actor_return_horizon", 8)
-    _maybe_override("hard_routing", True)
-    _maybe_override("hard_routing_warmup_epochs", 0)
-    _maybe_override("hard_routing_tau", 1.0)
-    _maybe_override("hard_routing_tau_end", 1.0)
-    _maybe_override("hard_routing_tau_anneal_epochs", 0)
-    _maybe_override("w_entropy", 0.05)
-    _maybe_override("w_diversity", 2.0)
-    _maybe_override("chart_multiplier_lr", 1.5)
-    _maybe_override("phase1_multiplier_max", 12.0)
-    _maybe_override("w_reward_nonconservative_norm", 0.1)
-    _maybe_override("w_reward_nonconservative_budget", 0.25)
-    _maybe_override("reward_nonconservative_budget_ratio", 0.05)
-    _maybe_override("reward_nonconservative_budget_floor", 0.001)
-    _maybe_override("w_wm_code", 0.25)
-    _maybe_override("w_wm_symbol", 0.5)
-    _maybe_override("w_reward_exact_orth", 0.1)
-    _maybe_override("w_reward_conservative_match", 10.0)
-    _maybe_override("w_screened_poisson", 2.0)
-    _maybe_override("screened_poisson_warmup_epochs", 10)
-    _maybe_override("w_critic", 1.0)
-    _maybe_override("w_critic_exact_increment", 1.0)
-    _maybe_override("w_critic_stiffness", 5.0)
-    _maybe_override("w_critic_covector_align", 5.0)
-    _maybe_override("critic_covector_warmup_epochs", 5)
-    _maybe_override("critic_stiffness_warmup_epochs", 10)
-    _maybe_override("critic_macro_pullback_warmup_epochs", 8)
-    _maybe_override("critic_on_policy_warmup_epochs", 8)
-    _maybe_override("critic_grad_metrics_every", 1)
-    _maybe_override("w_macro_value", 0.25)
-    _maybe_override("w_macro_exact_increment", 0.5)
-    _maybe_override("w_macro_pullback", 0.25)
-    _maybe_override("w_macro_covector_pullback", 0.1)
-    _maybe_override("w_macro_on_policy_pullback", 0.1)
-    _maybe_override("w_macro_on_policy_covector_pullback", 0.05)
-    _maybe_override("w_macro_transition", 0.25)
-    _maybe_override("w_macro_transition_entropy", 0.01)
-    _maybe_override("macro_multistep_horizon", 4)
-    _maybe_override("macro_multistep_decay", 0.8)
-    _maybe_override("macro_on_policy_horizon", 4)
-    _maybe_override("macro_on_policy_batch_size", 4)
-    _maybe_override("macro_target_scale_quantile", 0.75)
-    _maybe_override("macro_target_scale_min", 1e-3)
-    _maybe_override("macro_transition_closure_acc_target", 0.5)
-    _maybe_override("macro_transition_enclosure_defect_acc_scale", 4.0)
-    _maybe_override("macro_transition_enclosure_defect_ce_scale", 1.0)
-    _maybe_override("critic_stiffness_min", 0.001)
-    _maybe_override("critic_stiffness_target_max", 0.05)
-    _maybe_override("actor_return_chart_acc_target", 0.5)
-    _maybe_override("actor_return_update_every", 2)
-    _maybe_override("actor_return_warmup_epochs", 2)
-    _maybe_override("actor_metric_fisher_scale", 0.01)
-    _maybe_override("actor_stiffness_min", 0.001)
-    _maybe_override("actor_supervise_warmup_epochs", 2)
-    _maybe_override("actor_supervise_decay_epochs", 20)
-    _maybe_override("actor_supervise_min_scale", 0.05)
-    _maybe_override("w_actor_old_policy_chart_kl", 0.01)
-    _maybe_override("w_actor_old_policy_code_kl", 0.01)
-    _maybe_override("collect_every", 1)
-    _maybe_override("collect_n_env_workers", 4)
-    _maybe_override("eval_every", 10)
-    _maybe_override("checkpoint_every", 25)
-    _maybe_override("actor_return_exact_increment_rel_scale", 1.0)
-    _maybe_override("actor_return_exact_covector_rel_scale", 1.0)
-    _maybe_override("actor_return_exact_control_power", 1.0)
-    _maybe_override("actor_macro_backbone_weight", 0.25)
-    _maybe_override("actor_macro_backbone_power", 1.0)
-    _maybe_override("critic_on_policy_decay", 1.0)
-    _maybe_override("actor_curiosity_closure_acc_target", 0.5)
-    _maybe_override("actor_curiosity_enclosure_defect_acc_scale", 4.0)
-    _maybe_override("actor_curiosity_enclosure_defect_ce_scale", 1.0)
-    _maybe_override("macro_lr_multiplier", 3.0)
-
-    if preset_name == "cartpole_balance":
-        _maybe_override("seed_episodes", 8)
-        _maybe_override("critic_multistep_horizon", 4)
-        _maybe_override("critic_multistep_decay", 0.75)
-        _maybe_override("w_critic_on_policy_covector_align", 2.0)
-        _maybe_override("w_critic_on_policy_stiffness", 1.0)
-        _maybe_override("critic_on_policy_horizon", 4)
-        _maybe_override("critic_on_policy_batch_size", 4)
-        _maybe_override("w_macro_covector_pullback", 0.1)
-        _maybe_override("w_macro_on_policy_covector_pullback", 0.05)
-        _maybe_override("actor_macro_backbone_weight", 0.25)
-        _maybe_override("w_macro_on_policy_pullback", 0.1)
-        _maybe_override("w_macro_transition", 0.25)
-        _maybe_override("w_macro_transition_entropy", 0.01)
-        _maybe_override("w_wm_code", 0.5)
-        _maybe_override("w_wm_symbol", 1.0)
-        _maybe_override("critic_covector_warmup_epochs", 3)
-        _maybe_override("critic_stiffness_warmup_epochs", 6)
-        _maybe_override("critic_macro_pullback_warmup_epochs", 5)
-        _maybe_override("critic_on_policy_warmup_epochs", 5)
-        _maybe_override("sigma_motor", 0.1)
-        _maybe_override("sigma_motor_init", 0.15)
-        _maybe_override("sigma_motor_anneal_epochs", 20)
-        _maybe_override("sigma_motor_exact_gate_target", 0.35)
-        _maybe_override("w_actor_curiosity", 0.05)
-    else:
-        _maybe_override_from("seed_episodes", 24, (defaults.seed_episodes, 8))
-        _maybe_override_from("codes_per_chart", 16, (defaults.codes_per_chart, 8))
-        _maybe_override_from(
-            "action_codes_per_chart",
-            16,
-            (defaults.action_codes_per_chart, 8),
-        )
-        _maybe_override_from("seq_len", 64, (defaults.seq_len, 32))
-        _maybe_override_from("max_episode_steps", 500, (defaults.max_episode_steps, 200))
-        _maybe_override_from("imagination_horizon", 12, (defaults.imagination_horizon, 8))
-        _maybe_override_from("actor_return_horizon", 12, (defaults.actor_return_horizon, 8))
-        _maybe_override_from("critic_multistep_horizon", 16, (defaults.critic_multistep_horizon, 4))
-        _maybe_override_from("critic_multistep_decay", 0.8, (defaults.critic_multistep_decay, 0.75))
-        _maybe_override_from(
-            "w_critic_on_policy_covector_align",
-            5.0,
-            (defaults.w_critic_on_policy_covector_align, 2.0),
-        )
-        _maybe_override_from(
-            "w_critic_on_policy_stiffness",
-            2.0,
-            (defaults.w_critic_on_policy_stiffness, 1.0),
-        )
-        _maybe_override_from("critic_on_policy_horizon", 12, (defaults.critic_on_policy_horizon, 4))
-        _maybe_override_from("critic_on_policy_batch_size", 8, (defaults.critic_on_policy_batch_size, 4))
-        _maybe_override_from("critic_on_policy_decay", 0.9, (defaults.critic_on_policy_decay, 1.0))
-        _maybe_override_from("w_macro_value", 0.5, (defaults.w_macro_value, 0.25))
-        _maybe_override_from("w_macro_exact_increment", 1.0, (defaults.w_macro_exact_increment, 0.5))
-        _maybe_override_from("w_macro_pullback", 0.5, (defaults.w_macro_pullback, 0.25))
-        _maybe_override_from(
-            "w_macro_covector_pullback",
-            0.5,
-            (defaults.w_macro_covector_pullback, 0.1),
-        )
-        _maybe_override_from("w_macro_on_policy_pullback", 0.25, (defaults.w_macro_on_policy_pullback, 0.1))
-        _maybe_override_from(
-            "w_macro_on_policy_covector_pullback",
-            0.25,
-            (defaults.w_macro_on_policy_covector_pullback, 0.05),
-        )
-        _maybe_override_from("w_macro_transition", 0.75, (defaults.w_macro_transition, 0.25))
-        _maybe_override_from(
-            "w_macro_transition_entropy",
-            0.05,
-            (defaults.w_macro_transition_entropy, 0.01),
-        )
-        _maybe_override_from("w_wm_code", 0.75, (defaults.w_wm_code, 0.25, 0.5))
-        _maybe_override_from("w_wm_symbol", 1.5, (defaults.w_wm_symbol, 0.5, 1.0))
-        _maybe_override_from(
-            "screened_poisson_warmup_epochs",
-            20,
-            (defaults.screened_poisson_warmup_epochs, 10),
-        )
-        _maybe_override_from("critic_covector_warmup_epochs", 10, (defaults.critic_covector_warmup_epochs, 5, 3))
-        _maybe_override_from("critic_stiffness_warmup_epochs", 20, (defaults.critic_stiffness_warmup_epochs, 10, 6))
-        _maybe_override_from(
-            "critic_macro_pullback_warmup_epochs",
-            15,
-            (defaults.critic_macro_pullback_warmup_epochs, 8, 5),
-        )
-        _maybe_override_from(
-            "critic_on_policy_warmup_epochs",
-            15,
-            (defaults.critic_on_policy_warmup_epochs, 8, 5),
-        )
-        _maybe_override_from("macro_multistep_horizon", 16, (defaults.macro_multistep_horizon, 4))
-        _maybe_override_from("macro_multistep_decay", 0.85, (defaults.macro_multistep_decay, 0.8))
-        _maybe_override_from("macro_on_policy_horizon", 12, (defaults.macro_on_policy_horizon, 4))
-        _maybe_override_from("macro_on_policy_batch_size", 8, (defaults.macro_on_policy_batch_size, 4))
-        _maybe_override_from(
-            "actor_macro_backbone_weight",
-            1.0,
-            (defaults.actor_macro_backbone_weight, 0.25),
-        )
-        _maybe_override("sigma_motor", 0.2)
-        _maybe_override_from("sigma_motor_init", 0.5, (defaults.sigma_motor_init, 0.15))
-        _maybe_override_from("sigma_motor_anneal_epochs", 60, (defaults.sigma_motor_anneal_epochs, 20))
-        _maybe_override_from("sigma_motor_exact_gate_target", 0.45, (defaults.sigma_motor_exact_gate_target, 0.35))
-        _maybe_override("w_actor_curiosity", 0.2)
-        _maybe_override_from("macro_lr_multiplier", 10.0, (defaults.macro_lr_multiplier, 3.0))
-
-    chart_entropy_max = float(np.log(max(config.num_charts, 1)))
-    _maybe_override("chart_usage_h_low", 0.6 * chart_entropy_max)
-    _maybe_override("chart_usage_h_high", 0.95 * chart_entropy_max)
-
-    if old_num_action_charts in {defaults.num_action_charts, old_num_charts}:
-        if config.num_action_charts != config.num_charts:
-            changes["num_action_charts"] = (config.num_action_charts, config.num_charts)
-            config.num_action_charts = config.num_charts
-    if old_num_action_macros in {defaults.num_action_macros, old_num_action_charts, old_num_charts}:
-        if config.num_action_macros != config.num_action_charts:
-            changes["num_action_macros"] = (config.num_action_macros, config.num_action_charts)
-            config.num_action_macros = config.num_action_charts
-    if old_action_codes_per_chart in {defaults.action_codes_per_chart, old_codes_per_chart}:
-        if config.action_codes_per_chart != config.codes_per_chart:
-            changes["action_codes_per_chart"] = (
-                config.action_codes_per_chart,
-                config.codes_per_chart,
-            )
-            config.action_codes_per_chart = config.codes_per_chart
-
-    return preset_name, changes
-
-
 def _rollout_routing_tau(hard_routing: bool, hard_routing_tau: float) -> float:
     """Preserve the configured routing temperature for rollouts and evaluation."""
     del hard_routing
     return hard_routing_tau
 
 
-def _sample_collection_action(
-    action_mean: np.ndarray,
-    *,
-    action_min: np.ndarray,
-    action_max: np.ndarray,
-    sigma_motor: float,
-) -> np.ndarray:
-    """Sample thermal motor exploration around the deterministic action mean."""
-    action = np.clip(action_mean, action_min, action_max).astype(np.float32, copy=False)
-    if sigma_motor <= 0.0:
-        return action
-    noise = np.random.normal(loc=0.0, scale=float(sigma_motor), size=action.shape).astype(np.float32)
-    return np.clip(action + noise, action_min, action_max).astype(np.float32, copy=False)
-
-
-def _structured_state_from_encoder_output(enc_out: tuple[torch.Tensor, ...]) -> dict[str, torch.Tensor]:
+def _structured_state_from_encoder_output(
+    enc_out: tuple[torch.Tensor, ...],
+) -> dict[str, torch.Tensor]:
     """Pack the encoder's `(K, z_n, z_geo)` outputs into a named state dict."""
     return {
         "chart_idx": enc_out[0],
@@ -476,7 +181,9 @@ class MacroValueModel(nn.Module):
         sa_idx = state_idx.long() * self.num_actions + action_idx.long()
         return self.state_action_reward(sa_idx).squeeze(-1)
 
-    def reward_from_probs(self, state_probs: torch.Tensor, action_probs: torch.Tensor) -> torch.Tensor:
+    def reward_from_probs(
+        self, state_probs: torch.Tensor, action_probs: torch.Tensor
+    ) -> torch.Tensor:
         reward_table = self.state_action_reward.weight.view(self.num_states, self.num_actions)
         return torch.einsum("bi,ij,bj->b", state_probs, reward_table, action_probs)
 
@@ -520,7 +227,9 @@ class MacroValueModel(nn.Module):
         return reward + float(gamma) * continuation_scale * next_value
 
 
-def _state_index(chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int) -> torch.Tensor:
+def _state_index(
+    chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int
+) -> torch.Tensor:
     """Flatten `(chart, code)` symbolic state indices."""
     return chart_idx.long() * int(codes_per_chart) + code_idx.long()
 
@@ -580,14 +289,26 @@ def _symbolic_transition_supervision_losses(
     batch_idx = torch.arange(flat_target_state.shape[0], device=flat_state_probs.device)
 
     target_chart_code_probs = flat_code_probs[batch_idx, flat_target_charts]
-    target_code_log_prob = target_chart_code_probs.gather(
-        1,
-        flat_target_codes.unsqueeze(-1),
-    ).squeeze(-1).clamp(min=1e-8).log()
-    target_state_log_prob = flat_state_probs.gather(
-        1,
-        flat_target_state.unsqueeze(-1),
-    ).squeeze(-1).clamp(min=1e-8).log()
+    target_code_log_prob = (
+        target_chart_code_probs
+        .gather(
+            1,
+            flat_target_codes.unsqueeze(-1),
+        )
+        .squeeze(-1)
+        .clamp(min=1e-8)
+        .log()
+    )
+    target_state_log_prob = (
+        flat_state_probs
+        .gather(
+            1,
+            flat_target_state.unsqueeze(-1),
+        )
+        .squeeze(-1)
+        .clamp(min=1e-8)
+        .log()
+    )
 
     L_code = _masked_mean(-target_code_log_prob, flat_valid)
     L_symbol = _masked_mean(-target_state_log_prob, flat_valid)
@@ -604,19 +325,25 @@ def _symbolic_transition_supervision_losses(
         f"{metric_prefix}/code_nll": float(L_code.detach()),
         f"{metric_prefix}/symbol_nll": float(L_symbol.detach()),
         f"{metric_prefix}/code_acc": float(
-            _masked_mean((code_pred_target_chart == flat_target_codes).to(flat_state_probs.dtype), flat_valid)
-            .detach(),
+            _masked_mean(
+                (code_pred_target_chart == flat_target_codes).to(flat_state_probs.dtype),
+                flat_valid,
+            ).detach(),
         ),
         f"{metric_prefix}/chart_acc_from_symbol": float(
-            _masked_mean((symbol_pred_chart == flat_target_charts).to(flat_state_probs.dtype), flat_valid)
-            .detach(),
+            _masked_mean(
+                (symbol_pred_chart == flat_target_charts).to(flat_state_probs.dtype), flat_valid
+            ).detach(),
         ),
         f"{metric_prefix}/symbol_acc": float(
-            _masked_mean((symbol_pred == flat_target_state).to(flat_state_probs.dtype), flat_valid).detach(),
+            _masked_mean(
+                (symbol_pred == flat_target_state).to(flat_state_probs.dtype), flat_valid
+            ).detach(),
         ),
         f"{metric_prefix}/symbol_code_acc": float(
-            _masked_mean((symbol_pred_code == flat_target_codes).to(flat_state_probs.dtype), flat_valid)
-            .detach(),
+            _masked_mean(
+                (symbol_pred_code == flat_target_codes).to(flat_state_probs.dtype), flat_valid
+            ).detach(),
         ),
         f"{metric_prefix}/state_entropy": float(_masked_mean(symbol_entropy, flat_valid).detach()),
     }
@@ -679,8 +406,7 @@ def _macro_state_transition_distribution(
         "next_state_probs": next_symbolic["state_probs"],
         "next_state_entropy": next_symbolic["state_value_entropy"],
         "next_chart_entropy": -(
-            next_symbolic["router_weights"]
-            * next_symbolic["router_weights"].clamp(min=1e-8).log()
+            next_symbolic["router_weights"] * next_symbolic["router_weights"].clamp(min=1e-8).log()
         ).sum(dim=-1),
     }
 
@@ -709,23 +435,30 @@ def _macro_transition_observability_metrics(
         next_state_probs_flat * next_state_probs_flat.clamp(min=1e-8).log()
     ).sum(dim=-1)
     next_state_top1 = next_state_probs_flat.max(dim=-1).values
-    self_transition_prob = next_state_probs_flat.gather(1, state_idx_flat.unsqueeze(-1)).squeeze(-1)
+    self_transition_prob = next_state_probs_flat.gather(1, state_idx_flat.unsqueeze(-1)).squeeze(
+        -1
+    )
     positive_chart_mask = (
-        macro_critic.state_action_q.weight.detach()
+        macro_critic.state_action_q.weight
+        .detach()
         .view(macro_critic.num_states, macro_critic.num_actions)
         .amax(dim=-1)
         > 0.0
     ).to(next_state_probs_flat)
     positive_value_mass = (next_state_probs_flat * positive_chart_mask.unsqueeze(0)).sum(dim=-1)
     return {
-        f"{metric_prefix}/reward_pred_mean": float(_masked_mean(reward_pred_flat, valid_flat).detach()),
+        f"{metric_prefix}/reward_pred_mean": float(
+            _masked_mean(reward_pred_flat, valid_flat).detach()
+        ),
         f"{metric_prefix}/reward_target_mean": float(
             _masked_mean(reward_target_flat, valid_flat).detach(),
         ),
         f"{metric_prefix}/reward_abs_err": float(
             _masked_mean((reward_pred_flat - reward_target_flat).abs(), valid_flat).detach(),
         ),
-        f"{metric_prefix}/value_next_mean": float(_masked_mean(next_value_flat, valid_flat).detach()),
+        f"{metric_prefix}/value_next_mean": float(
+            _masked_mean(next_value_flat, valid_flat).detach()
+        ),
         f"{metric_prefix}/bootstrap_term_mean": float(
             _masked_mean(bootstrap_term_flat, valid_flat).detach(),
         ),
@@ -792,7 +525,9 @@ def _macro_pullback_value_covector(
 ) -> dict[str, torch.Tensor]:
     """Lift the macro value table back to latent space and differentiate it."""
     z_req = z_latent.detach().requires_grad_(True)
-    router_override = router_weights_override.detach() if router_weights_override is not None else None
+    router_override = (
+        router_weights_override.detach() if router_weights_override is not None else None
+    )
     symbolic = _soft_symbolic_state_distribution(
         atlas_model,
         z_req,
@@ -844,7 +579,9 @@ def _macro_control_pullback_covector(
 ) -> dict[str, torch.Tensor]:
     """Lift the transition-backed symbolic control backbone back to latent space."""
     z_req = z_latent.detach().requires_grad_(True)
-    router_override = router_weights_override.detach() if router_weights_override is not None else None
+    router_override = (
+        router_weights_override.detach() if router_weights_override is not None else None
+    )
     state_symbolic = _soft_symbolic_state_distribution(
         atlas_model,
         z_req,
@@ -1014,66 +751,6 @@ def _mark_compile_step_begin() -> None:
         mark_step()
 
 
-@dataclass
-class ObservationNormalizer:
-    """Fixed per-dimension affine observation normalization."""
-
-    mean: torch.Tensor
-    std: torch.Tensor
-    min_std: float = 1e-3
-
-    @classmethod
-    def from_episodes(
-        cls,
-        episodes: list[dict[str, np.ndarray]],
-        device: torch.device,
-        *,
-        min_std: float = 1e-3,
-    ) -> ObservationNormalizer:
-        if not episodes:
-            msg = "Need at least one episode to estimate observation normalization stats."
-            raise ValueError(msg)
-        obs = np.concatenate([episode["obs"] for episode in episodes], axis=0).astype(np.float32)
-        mean = torch.from_numpy(obs.mean(axis=0)).to(device=device)
-        std = torch.from_numpy(obs.std(axis=0)).to(device=device).clamp(min=min_std)
-        return cls(mean=mean, std=std, min_std=min_std)
-
-    @classmethod
-    def from_state_dict(
-        cls,
-        state_dict: dict[str, torch.Tensor | float],
-        device: torch.device,
-    ) -> ObservationNormalizer:
-        min_std = float(state_dict.get("min_std", 1e-3))
-        mean = torch.as_tensor(state_dict["mean"], device=device, dtype=torch.float32)
-        std = torch.as_tensor(state_dict["std"], device=device, dtype=torch.float32).clamp(
-            min=min_std,
-        )
-        return cls(mean=mean, std=std, min_std=min_std)
-
-    def state_dict(self) -> dict[str, torch.Tensor | float]:
-        return {
-            "mean": self.mean.detach().cpu(),
-            "std": self.std.detach().cpu(),
-            "min_std": float(self.min_std),
-        }
-
-    def normalize_tensor(self, obs: torch.Tensor) -> torch.Tensor:
-        mean = self.mean.to(device=obs.device, dtype=obs.dtype)
-        std = self.std.to(device=obs.device, dtype=obs.dtype)
-        return (obs - mean) / std
-
-    def denormalize_tensor(self, obs: torch.Tensor) -> torch.Tensor:
-        mean = self.mean.to(device=obs.device, dtype=obs.dtype)
-        std = self.std.to(device=obs.device, dtype=obs.dtype)
-        return obs * std + mean
-
-    def normalize_numpy(self, obs: np.ndarray) -> np.ndarray:
-        mean = self.mean.detach().cpu().numpy()
-        std = self.std.detach().cpu().numpy()
-        return ((obs - mean) / std).astype(np.float32, copy=False)
-
-
 def _policy_action(
     actor: GeometricActor,
     action_model: SharedDynTopoEncoder,
@@ -1093,7 +770,6 @@ def _policy_action(
     with torch.inference_mode():
         action_mean, _, _ = action_model.decoder(
             action_state["action_z_geo"].detach(),
-            None,
             router_weights=action_state["action_router_weights"].detach(),
             hard_routing=hard_routing,
             hard_routing_tau=hard_routing_tau,
@@ -1111,39 +787,6 @@ def _policy_action(
         "action_z_n": action_state["action_z_n"].detach(),
         "action_chart_logits": action_state["action_chart_logits"],
         "action_code_logits": action_state["action_code_logits"],
-    }
-
-
-def _build_episode_dict(
-    obs_list: list[np.ndarray],
-    act_list: list[np.ndarray],
-    rew_list: list[np.float32],
-    done_list: list[np.float32],
-    action_mean_list: list[np.ndarray],
-    action_latent_list: list[np.ndarray],
-    action_router_weight_list: list[np.ndarray],
-    action_chart_idx_list: list[np.int64],
-    action_code_idx_list: list[np.int64],
-    action_code_latent_list: list[np.ndarray],
-) -> dict[str, np.ndarray]:
-    """Pack per-step episode traces into the replay-buffer episode format."""
-    return {
-        "obs": np.stack(obs_list),
-        "actions": np.stack([*act_list, np.zeros_like(act_list[0])]),
-        "action_means": np.stack([*action_mean_list, np.zeros_like(action_mean_list[0])]),
-        "action_latents": np.stack(
-            [*action_latent_list, np.zeros_like(action_latent_list[0])],
-        ),
-        "action_router_weights": np.stack(
-            [*action_router_weight_list, np.zeros_like(action_router_weight_list[0])],
-        ),
-        "action_charts": np.array([*action_chart_idx_list, 0], dtype=np.int64),
-        "action_codes": np.array([*action_code_idx_list, 0], dtype=np.int64),
-        "action_code_latents": np.stack(
-            [*action_code_latent_list, np.zeros_like(action_code_latent_list[0])],
-        ),
-        "rewards": np.array([*rew_list, 0.0], dtype=np.float32),
-        "dones": np.array([*done_list, 1.0], dtype=np.float32),
     }
 
 
@@ -1178,7 +821,8 @@ def _collect_episode(
 
         if actor is None or action_model is None:
             action = np.random.uniform(
-                action_spec.minimum, action_spec.maximum,
+                action_spec.minimum,
+                action_spec.maximum,
                 size=action_spec.shape,
             ).astype(np.float32)
             action_mean = action.copy()
@@ -1346,8 +990,12 @@ def _collect_parallel_episodes(
             )
             action_latents = action_out["action_canonical"].cpu().numpy()
             action_router_weights = action_out["action_router_weights"].cpu().numpy()
-            action_chart_idx = action_out["action_chart_idx"].cpu().numpy().astype(np.int64, copy=False)
-            action_code_idx = action_out["action_code_idx"].cpu().numpy().astype(np.int64, copy=False)
+            action_chart_idx = (
+                action_out["action_chart_idx"].cpu().numpy().astype(np.int64, copy=False)
+            )
+            action_code_idx = (
+                action_out["action_code_idx"].cpu().numpy().astype(np.int64, copy=False)
+            )
             action_code_latents = action_out["action_code_latent"].cpu().numpy()
             action_means = np.clip(action_means, action_min, action_max)
 
@@ -1453,8 +1101,6 @@ def _eval_policy(
         "eval/reward_std": float(np.std(rewards)),
         "eval/length_mean": float(np.mean(lengths)),
     }
-
-
 
 
 # ---------------------------------------------------------------------------
@@ -1633,13 +1279,13 @@ def _imagine(
     return {
         "z_states": torch.stack(z_state_list, dim=1),  # [B, H, D]
         "rw_states": torch.stack(rw_state_list, dim=1),  # [B, H, K]
-        "z_traj": torch.stack(z_list, dim=1),   # [B, H, D]
-        "rw_traj": torch.stack(rw_list, dim=1),   # [B, H, K]
+        "z_traj": torch.stack(z_list, dim=1),  # [B, H, D]
+        "rw_traj": torch.stack(rw_list, dim=1),  # [B, H, K]
         "action_canonicals": torch.stack(action_canonical_list, dim=1),  # [B, H, D]
         "action_latents": torch.stack(action_latent_list, dim=1),  # [B, H, D]
         "action_router_weights": torch.stack(action_router_list, dim=1),  # [B, H, K_a]
         "actions": torch.stack(action_list, dim=1),  # [B, H, A]
-        "rewards": torch.stack(r_list, dim=1),   # [B, H]
+        "rewards": torch.stack(r_list, dim=1),  # [B, H]
         "reward_conservative": torch.stack(r_cons_list, dim=1),  # [B, H]
         "reward_nonconservative": torch.stack(r_noncons_list, dim=1),  # [B, H]
         "reward_curl_norm": torch.stack(r_curl_list, dim=1),  # [B, H]
@@ -1648,7 +1294,7 @@ def _imagine(
         "policy_router_sync": torch.stack(policy_router_sync_list, dim=1),  # [B, H]
         "policy_force_rel_err": torch.stack(force_rel_err_list, dim=1),  # [B, H]
         "policy_hodge_conservative_exact": torch.stack(hodge_cons_exact_list, dim=1),  # [B, H]
-        "phi_eff": torch.stack(phi_list, dim=1),    # [B, H, 1]
+        "phi_eff": torch.stack(phi_list, dim=1),  # [B, H, 1]
     }
 
 
@@ -1814,10 +1460,15 @@ def _per_chart_diagnostics(
     z_norm_means = z_norm_sums / counts.clamp(min=1.0)
 
     flat_code_idx = K_chart * codes_per_chart + K_code
-    code_counts = torch.bincount(
-        flat_code_idx,
-        minlength=num_charts * codes_per_chart,
-    ).to(dtype=z_geo.dtype).reshape(num_charts, codes_per_chart)
+    code_counts = (
+        torch
+        .bincount(
+            flat_code_idx,
+            minlength=num_charts * codes_per_chart,
+        )
+        .to(dtype=z_geo.dtype)
+        .reshape(num_charts, codes_per_chart)
+    )
     code_mass = code_counts.sum(dim=-1, keepdim=True).clamp(min=1.0)
     code_probs = code_counts / code_mass
     code_entropy = -(code_probs * code_probs.clamp(min=1e-8).log()).sum(dim=-1)
@@ -1869,9 +1520,7 @@ def _phase1_controller_metrics(
         "soft_I_XK": float(metrics.get(f"{enc_prefix}/I_XK", 0.0)),
         "hard_entropy": float(metrics.get(f"{chart_prefix}/usage_entropy", 0.0)),
         "code_entropy_mean_active": (
-            float(np.mean(active_code_entropies))
-            if active_code_entropies
-            else 0.0
+            float(np.mean(active_code_entropies)) if active_code_entropies else 0.0
         ),
     }
 
@@ -1913,7 +1562,9 @@ def _masked_corrcoef(left: torch.Tensor, right: torch.Tensor, mask: torch.Tensor
     return (left_centered * right_centered).mean() / denom
 
 
-def _masked_sign_agreement(left: torch.Tensor, right: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+def _masked_sign_agreement(
+    left: torch.Tensor, right: torch.Tensor, mask: torch.Tensor
+) -> torch.Tensor:
     """Fraction of masked entries with matching signs."""
     valid = mask.reshape(-1).bool()
     left_valid = left.reshape(-1)[valid]
@@ -2013,14 +1664,18 @@ def _exact_increment_observability_metrics(
     support_threshold: float,
 ) -> dict[str, float]:
     """Detailed observability metrics for exact-increment supervision."""
-    positive_mask = (target.reshape(-1) >= float(support_threshold)).to(target.dtype).reshape_as(target)
+    positive_mask = (
+        (target.reshape(-1) >= float(support_threshold)).to(target.dtype).reshape_as(target)
+    )
     return {
         f"{metric_prefix}/exact_increment_pred_std": float(_masked_std(pred, mask).detach()),
         f"{metric_prefix}/exact_increment_target_std": float(_masked_std(target, mask).detach()),
         f"{metric_prefix}/exact_increment_sign_acc": float(
             _masked_sign_agreement(pred, target, mask).detach(),
         ),
-        f"{metric_prefix}/exact_increment_corr": float(_masked_corrcoef(pred, target, mask).detach()),
+        f"{metric_prefix}/exact_increment_corr": float(
+            _masked_corrcoef(pred, target, mask).detach()
+        ),
         f"{metric_prefix}/exact_increment_support_frac": float(
             _masked_support_fraction(target, mask, threshold=support_threshold).detach(),
         ),
@@ -2044,7 +1699,9 @@ def _critic_stage_scales(config: DreamerConfig, epoch: int) -> dict[str, float]:
         "poisson": _linear_warmup_scale(epoch, int(config.screened_poisson_warmup_epochs)),
         "covector": _linear_warmup_scale(epoch, int(config.critic_covector_warmup_epochs)),
         "stiffness": _linear_warmup_scale(epoch, int(config.critic_stiffness_warmup_epochs)),
-        "macro_pullback": _linear_warmup_scale(epoch, int(config.critic_macro_pullback_warmup_epochs)),
+        "macro_pullback": _linear_warmup_scale(
+            epoch, int(config.critic_macro_pullback_warmup_epochs)
+        ),
         "on_policy": _linear_warmup_scale(epoch, int(config.critic_on_policy_warmup_epochs)),
     }
 
@@ -2145,11 +1802,15 @@ def _conservative_force_diagnostics(
     direct_kick = direct_terms["force"] - u_pi
     exact_kick = exact_terms["force"] - u_pi
     if world_model.F_max > 0:
-        direct_kick = world_model.F_max * direct_kick / (
-            world_model.F_max + direct_kick.norm(dim=-1, keepdim=True)
+        direct_kick = (
+            world_model.F_max
+            * direct_kick
+            / (world_model.F_max + direct_kick.norm(dim=-1, keepdim=True))
         )
-        exact_kick = world_model.F_max * exact_kick / (
-            world_model.F_max + exact_kick.norm(dim=-1, keepdim=True)
+        exact_kick = (
+            world_model.F_max
+            * exact_kick
+            / (world_model.F_max + exact_kick.norm(dim=-1, keepdim=True))
         )
     curl_F = None
     if world_model.curl_net is not None:
@@ -2195,7 +1856,9 @@ def _conservative_force_diagnostics(
         z,
         direct_terms["risk_force"] - exact_terms["risk_force"],
     )
-    total_exact_sq = _metric_covector_norm_sq(world_model.metric, z, exact_terms["force"]).clamp_min(1e-8)
+    total_exact_sq = _metric_covector_norm_sq(
+        world_model.metric, z, exact_terms["force"]
+    ).clamp_min(1e-8)
     task_exact_sq = _metric_covector_norm_sq(
         world_model.metric,
         z,
@@ -2285,9 +1948,9 @@ def _critic_stiffness_loss(
             device=exact_covector_norm_mean.device,
             dtype=exact_covector_norm_mean.dtype,
         ).clamp_min(max(float(config.critic_stiffness_min), 1e-8))
-    stiffness_deficit = (
-        (stiffness_scale_t - exact_covector_norm).clamp(min=0.0) / stiffness_scale_t
-    )
+    stiffness_deficit = (stiffness_scale_t - exact_covector_norm).clamp(
+        min=0.0
+    ) / stiffness_scale_t
     L_critic_stiffness = _masked_mean(stiffness_deficit.pow(2), replay_valid.reshape(-1))
     metrics = {
         "critic/L_stiffness": float(L_critic_stiffness.detach()),
@@ -2336,7 +1999,9 @@ def _macro_covector_pullback_loss(
         f"{metric_prefix}/covector_pullback_abs_err": float(
             _masked_mean(diff_norm, valid_flat).detach(),
         ),
-        f"{metric_prefix}/covector_norm_mean": float(_masked_mean(macro_norm, valid_flat).detach()),
+        f"{metric_prefix}/covector_norm_mean": float(
+            _masked_mean(macro_norm, valid_flat).detach()
+        ),
         f"{metric_prefix}/covector_target_norm_mean": float(
             _masked_mean(exact_norm, valid_flat).detach(),
         ),
@@ -2383,7 +2048,9 @@ def _critic_covector_alignment_loss(
     reward_scale = target_reward.detach().abs() / (displacement_norm.detach() + 1e-8)
     stiffness_scale = (
         float(config.critic_stiffness_target_scale)
-        * _masked_quantile(reward_scale, replay_valid_flat, float(config.critic_stiffness_quantile))
+        * _masked_quantile(
+            reward_scale, replay_valid_flat, float(config.critic_stiffness_quantile)
+        )
     ).clamp_min(max(float(config.critic_stiffness_min), 1e-8))
     stiffness_max = float(config.critic_stiffness_target_max)
     if stiffness_max > 0.0:
@@ -2597,9 +2264,10 @@ def _multistep_exact_increment_loss(
     )
     for step, target_k, continuation_k, valid_k in target_sequences:
         seq_len = target_k.shape[1]
-        pred_k = value_seq[:, :seq_len] - (
-            float(gamma) ** step
-        ) * continuation_k * value_seq[:, step : step + seq_len]
+        pred_k = (
+            value_seq[:, :seq_len]
+            - (float(gamma) ** step) * continuation_k * value_seq[:, step : step + seq_len]
+        )
         weight = float(decay) ** (step - 1)
         pred_samples.append(pred_k)
         target_samples.append(target_k)
@@ -2624,11 +2292,14 @@ def _multistep_exact_increment_loss(
         min_scale=target_scale_min,
         template=value_seq,
     )
-    for (step, target_k, continuation_k, valid_k), weight in zip(target_sequences, weights, strict=False):
+    for (step, target_k, continuation_k, valid_k), weight in zip(
+        target_sequences, weights, strict=False
+    ):
         seq_len = target_k.shape[1]
-        pred_k = value_seq[:, :seq_len] - (
-            float(gamma) ** step
-        ) * continuation_k * value_seq[:, step : step + seq_len]
+        pred_k = (
+            value_seq[:, :seq_len]
+            - (float(gamma) ** step) * continuation_k * value_seq[:, step : step + seq_len]
+        )
         losses.append(weight * _masked_mean(((pred_k - target_k) / target_scale).pow(2), valid_k))
         abs_err_terms.append(weight * _masked_mean((pred_k - target_k).abs(), valid_k))
         pred_mean_terms.append(weight * _masked_mean(pred_k, valid_k))
@@ -2748,7 +2419,9 @@ def _multistep_covector_alignment_loss(
     target_scale = _target_normalization_scale(
         target_samples,
         target_masks,
-        quantile=config.critic_target_scale_quantile if metric_prefix.startswith("critic") else 0.75,
+        quantile=config.critic_target_scale_quantile
+        if metric_prefix.startswith("critic")
+        else 0.75,
         min_scale=config.critic_target_scale_min if metric_prefix.startswith("critic") else 1e-3,
         template=value_seq,
     )
@@ -2762,21 +2435,29 @@ def _multistep_covector_alignment_loss(
             -1,
         )
         local_value_delta = (exact_covector_seq[:, :seq_len] * displacement).sum(dim=-1)
-        predicted_k = value_seq[:, :seq_len] - (
-            float(gamma) ** step
-        ) * continuation_k * (value_seq[:, :seq_len] + local_value_delta)
+        predicted_k = value_seq[:, :seq_len] - (float(gamma) ** step) * continuation_k * (
+            value_seq[:, :seq_len] + local_value_delta
+        )
         weight = float(decay) ** (step - 1)
-        losses.append(weight * _masked_mean(((predicted_k - target_k) / target_scale).pow(2), valid_k))
+        losses.append(
+            weight * _masked_mean(((predicted_k - target_k) / target_scale).pow(2), valid_k)
+        )
         abs_err_terms.append(weight * _masked_mean((predicted_k - target_k).abs(), valid_k))
         pred_mean_terms.append(weight * _masked_mean(predicted_k, valid_k))
         target_mean_terms.append(weight * _masked_mean(target_k, valid_k))
-        displacement_norm = _metric_vector_norm_sq(
-            metric,
-            z_curr.detach(),
-            displacement.reshape(-1, displacement.shape[-1]),
-        ).sqrt().reshape_as(target_k)
+        displacement_norm = (
+            _metric_vector_norm_sq(
+                metric,
+                z_curr.detach(),
+                displacement.reshape(-1, displacement.shape[-1]),
+            )
+            .sqrt()
+            .reshape_as(target_k)
+        )
         disp_mean_terms.append(weight * _masked_mean(displacement_norm, valid_k))
-        stiffness_samples.append((target_k.detach().abs() / (displacement_norm.detach() + 1e-8)).reshape(-1))
+        stiffness_samples.append(
+            (target_k.detach().abs() / (displacement_norm.detach() + 1e-8)).reshape(-1)
+        )
         stiffness_masks.append(valid_k.reshape(-1))
         total_weight += weight
 
@@ -2914,7 +2595,9 @@ def _actor_return_trust(
         -float(config.actor_return_policy_sync_scale) * policy_sync_err_t.clamp(min=0.0),
     )
     conservative_factor = hodge_conservative_t.clamp(0.0, 1.0)
-    trust = (chart_factor * force_factor * policy_sync_factor * conservative_factor).clamp(0.0, 1.0)
+    trust = (chart_factor * force_factor * policy_sync_factor * conservative_factor).clamp(
+        0.0, 1.0
+    )
     trust_metrics = {
         "actor/return_trust": float(trust.detach()),
         "actor/return_trust_chart": float(chart_factor.detach()),
@@ -3027,12 +2710,15 @@ def _macro_control_gate(
     template: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     """Certify whether the symbolic macro value is calibrated enough to stage actor RL."""
-    if max(
-        float(config.w_macro_value),
-        float(config.w_macro_exact_increment),
-        float(config.w_macro_pullback),
-        float(config.w_macro_on_policy_pullback),
-    ) <= 0.0:
+    if (
+        max(
+            float(config.w_macro_value),
+            float(config.w_macro_exact_increment),
+            float(config.w_macro_pullback),
+            float(config.w_macro_on_policy_pullback),
+        )
+        <= 0.0
+    ):
         one = template.new_ones(())
         metrics = {
             "actor/macro_control_gate": 1.0,
@@ -3045,7 +2731,9 @@ def _macro_control_gate(
             "actor/macro_control_calibration_factor": 1.0,
         }
         return one, metrics
-    macro_increment_rel = macro_exact_increment_abs_err / max(abs(macro_exact_increment_target_mean), 1e-6)
+    macro_increment_rel = macro_exact_increment_abs_err / max(
+        abs(macro_exact_increment_target_mean), 1e-6
+    )
     macro_pullback_rel = macro_on_policy_pullback_abs_err / max(abs(macro_target_scale), 1e-6)
     macro_signal_scale = max(
         abs(macro_on_policy_exact_increment_pred_abs_mean),
@@ -3062,8 +2750,7 @@ def _macro_control_gate(
         * macro_increment_rel_t.clamp(min=0.0),
     )
     macro_pullback_factor = torch.exp(
-        -float(config.actor_return_macro_pullback_rel_scale)
-        * macro_pullback_rel_t.clamp(min=0.0),
+        -float(config.actor_return_macro_pullback_rel_scale) * macro_pullback_rel_t.clamp(min=0.0),
     )
     macro_calibration_factor = macro_calibration_ratio_t.clamp(0.0, 1.0)
     macro_control_gate = (
@@ -3119,11 +2806,15 @@ def _scheduled_sigma_motor(
 ) -> tuple[float, dict[str, float]]:
     """Schedule thermal motor exploration with optional exact-field-aware cooling."""
     sigma_final = max(float(config.sigma_motor), 0.0)
-    sigma_init = float(config.sigma_motor_init) if float(config.sigma_motor_init) > 0.0 else sigma_final
+    sigma_init = (
+        float(config.sigma_motor_init) if float(config.sigma_motor_init) > 0.0 else sigma_final
+    )
     anneal_epochs = max(int(config.sigma_motor_anneal_epochs), 0)
     epoch_progress = 1.0 if anneal_epochs <= 0 else min(max((epoch + 1) / anneal_epochs, 0.0), 1.0)
     exact_target = max(float(config.sigma_motor_exact_gate_target), 0.0)
-    exact_progress = 1.0 if exact_target <= 0.0 else min(max(exact_control_gate / exact_target, 0.0), 1.0)
+    exact_progress = (
+        1.0 if exact_target <= 0.0 else min(max(exact_control_gate / exact_target, 0.0), 1.0)
+    )
     cooling_progress = min(epoch_progress, exact_progress)
     sigma = sigma_init + (sigma_final - sigma_init) * cooling_progress
     metrics = {
@@ -3189,7 +2880,7 @@ def _actor_state_metric(
     alpha = value_diag.mean().sqrt()
     beta_pi_raw = fisher_diag.mean().sqrt()
     beta_pi = fisher_diag_scaled.mean().sqrt()
-    scale_barrier = ((beta_pi - alpha).clamp(min=0.0) / (beta_pi + 1e-8))
+    scale_barrier = (beta_pi - alpha).clamp(min=0.0) / (beta_pi + 1e-8)
     scale_trust = torch.exp(-scale_barrier)
     scale_certified = bool(float(alpha.detach()) > float(beta_pi.detach()))
     metrics = {
@@ -3232,7 +2923,12 @@ def _relative_trust_region_scale(
     if scale < 1.0:
         for param in grads:
             param.grad.mul_(scale)
-    return scale, float(param_norm_t.detach()), float(step_norm_t.detach()), float(max_step_t.detach())
+    return (
+        scale,
+        float(param_norm_t.detach()),
+        float(step_norm_t.detach()),
+        float(max_step_t.detach()),
+    )
 
 
 def _world_model_closure_losses(
@@ -3254,31 +2950,43 @@ def _world_model_closure_losses(
     """Measure closure and router smoothness from the observation Markov model."""
     zero = z_0.new_zeros(())
     if action_canonicals.shape[1] == 0 or target_charts.shape[1] == 0:
-        return zero, zero, zero, zero, {
-            "closure/obs_state_acc": 0.0,
-            "closure/obs_symbol_acc": 0.0,
-            "closure/chart_entropy": 0.0,
-            "closure/enclosure_acc_full": 0.0,
-            "closure/enclosure_acc_base": 0.0,
-            "closure/enclosure_defect_acc": 0.0,
-            "closure/enclosure_defect_ce": 0.0,
-            "closure/grl_alpha": 0.0,
-        }
+        return (
+            zero,
+            zero,
+            zero,
+            zero,
+            {
+                "closure/obs_state_acc": 0.0,
+                "closure/obs_symbol_acc": 0.0,
+                "closure/chart_entropy": 0.0,
+                "closure/enclosure_acc_full": 0.0,
+                "closure/enclosure_acc_base": 0.0,
+                "closure/enclosure_defect_acc": 0.0,
+                "closure/enclosure_defect_ce": 0.0,
+                "closure/grl_alpha": 0.0,
+            },
+        )
 
     wm_out = world_model(z_0, action_canonicals, rw_0)
     chart_logits_all = wm_out["chart_logits"]
     T_sync = min(chart_logits_all.shape[1], target_charts.shape[1])
     if T_sync == 0:
-        return zero, zero, zero, zero, {
-            "closure/obs_state_acc": 0.0,
-            "closure/obs_symbol_acc": 0.0,
-            "closure/chart_entropy": 0.0,
-            "closure/enclosure_acc_full": 0.0,
-            "closure/enclosure_acc_base": 0.0,
-            "closure/enclosure_defect_acc": 0.0,
-            "closure/enclosure_defect_ce": 0.0,
-            "closure/grl_alpha": 0.0,
-        }
+        return (
+            zero,
+            zero,
+            zero,
+            zero,
+            {
+                "closure/obs_state_acc": 0.0,
+                "closure/obs_symbol_acc": 0.0,
+                "closure/chart_entropy": 0.0,
+                "closure/enclosure_acc_full": 0.0,
+                "closure/enclosure_acc_base": 0.0,
+                "closure/enclosure_defect_acc": 0.0,
+                "closure/enclosure_defect_ce": 0.0,
+                "closure/grl_alpha": 0.0,
+            },
+        )
 
     chart_logits = chart_logits_all[:, :T_sync]
     target = target_charts[:, :T_sync].detach()
@@ -3328,10 +3036,13 @@ def _should_run_actor_update(
     update_idx: int,
 ) -> bool:
     """Return whether the imagined-return actor step should run."""
-    if max(
-        float(config.w_actor_return),
-        float(config.w_actor_curiosity),
-    ) <= 0.0:
+    if (
+        max(
+            float(config.w_actor_return),
+            float(config.w_actor_curiosity),
+        )
+        <= 0.0
+    ):
         return False
     if config.actor_return_update_every <= 0:
         return False
@@ -3408,7 +3119,6 @@ def _imagine_actor_return(
         )
         action_mean, _, _ = action_model.decoder(
             action_state["action_z_geo"],
-            None,
             router_weights=action_state["action_router_weights"],
             hard_routing=hard_routing,
             hard_routing_tau=routing_tau,
@@ -3487,7 +3197,9 @@ def _imagine_actor_return(
                     world_model.metric,
                     z.detach(),
                     exact_covector.detach(),
-                ).sqrt().mean(),
+                )
+                .sqrt()
+                .mean(),
                 force_rel_err_mean=force_diag["force_rel_err"].mean(),
             )
         reward_nonconservative = reward_nonconservative_gate.detach() * reward_nonconservative_raw
@@ -3506,11 +3218,15 @@ def _imagine_actor_return(
         curiosity_step = (chart_varentropy / (max_chart_entropy**2)).clamp(min=0.0)
         chart_acc_list.append((chart_logits.argmax(dim=-1) == chart_target).float())
         chart_ce_list.append(F.cross_entropy(chart_logits, chart_target, reduction="none"))
-        router_sync = (rw_next.detach() - next_obs_info["router_weights"].detach()).abs().mean(dim=-1)
+        router_sync = (
+            (rw_next.detach() - next_obs_info["router_weights"].detach()).abs().mean(dim=-1)
+        )
         router_sync_list.append(router_sync)
         force_rel_err_list.append(force_diag["force_rel_err"])
         hodge_cons_list.append(force_diag["hodge_exact"]["conservative_ratio"])
-        reward_noncons_gate_list.append(reward_nonconservative_gate.expand_as(reward_nonconservative))
+        reward_noncons_gate_list.append(
+            reward_nonconservative_gate.expand_as(reward_nonconservative)
+        )
         policy_sync_loss_list.append(chart_ce_list[-1] + router_sync)
         curiosity_list.append(curiosity_step)
         curiosity_entropy_list.append(chart_entropy / max_chart_entropy)
@@ -3696,7 +3412,7 @@ def _train_step(
             enc_w_flat,
             K_ch_flat,
             z_n_flat,
-            _z_tex_flat,
+            z_tex_flat,
             c_bar_flat,
             K_code_flat,
             z_q_flat,
@@ -3720,7 +3436,7 @@ def _train_step(
             K_ch_flat.reshape(B, T + 1),
             K_code_flat.reshape(B, T + 1),
             z_n_flat.reshape(B, T + 1, -1),
-            _z_tex_flat.reshape(B, T + 1, -1),
+            z_tex_flat.reshape(B, T + 1, -1),
             c_bar_flat.reshape(B, T + 1, -1),
             z_q_flat.reshape(B, T + 1, -1),
             v_local_flat.reshape(B, T + 1, -1),
@@ -3743,7 +3459,7 @@ def _train_step(
             K_code_all,
             zn_all,
             z_tex_all,
-            _c_bar_all,
+            c_bar_all,
             _z_q_all,
             _v_local_all,
         ) = _encode_sequence(flat_obs, model, jump_op, phase1_cfg)
@@ -3785,7 +3501,7 @@ def _train_step(
             enclosure_probe,
             z_all[:, 0],
             rw_all[:, 0],
-            _c_bar_all[:, :-1],
+            c_bar_all[:, :-1],
             z_tex_all[:, :-1],
             action_z_all[:, :-1][:, :H_closure],
             K_code_all[:, :-1],
@@ -3903,8 +3619,12 @@ def _train_step(
         router_weights_override=chart_probs.reshape(-1, config.num_charts),
         hard_routing_tau=current_tau,
     )
-    wm_state_probs = wm_symbolic["state_probs"].reshape(B, T_wm, config.num_charts * config.codes_per_chart)
-    wm_code_probs = wm_symbolic["code_probs"].reshape(B, T_wm, config.num_charts, config.codes_per_chart)
+    wm_state_probs = wm_symbolic["state_probs"].reshape(
+        B, T_wm, config.num_charts * config.codes_per_chart
+    )
+    wm_code_probs = wm_symbolic["code_probs"].reshape(
+        B, T_wm, config.num_charts, config.codes_per_chart
+    )
     L_wm_code, L_wm_symbol, wm_symbol_metrics = _symbolic_transition_supervision_losses(
         state_probs=wm_state_probs,
         code_probs=wm_code_probs,
@@ -3921,14 +3641,20 @@ def _train_step(
     metrics["wm/L_chart"] = float(L_chart)
     metrics["wm/L_code"] = float(L_wm_code.detach())
     metrics["wm/L_symbol"] = float(L_wm_symbol.detach())
-    metrics["wm/chart_acc"] = float(_masked_mean(
-        (wm_out["chart_logits"][:, :T_wm].argmax(dim=-1) == target_charts).to(chart_probs.dtype),
-        wm_valid,
-    ).detach())
-    metrics["wm/code_acc_model_chart"] = float(_masked_mean(
-        (wm_pred_code == target_codes).to(chart_probs.dtype),
-        wm_valid,
-    ).detach())
+    metrics["wm/chart_acc"] = float(
+        _masked_mean(
+            (wm_out["chart_logits"][:, :T_wm].argmax(dim=-1) == target_charts).to(
+                chart_probs.dtype
+            ),
+            wm_valid,
+        ).detach()
+    )
+    metrics["wm/code_acc_model_chart"] = float(
+        _masked_mean(
+            (wm_pred_code == target_codes).to(chart_probs.dtype),
+            wm_valid,
+        ).detach()
+    )
     metrics.update(wm_symbol_metrics)
     metrics["wm/chart_entropy"] = float(
         _masked_mean(
@@ -4017,7 +3743,9 @@ def _train_step(
     rollout_rw_hodge = torch.cat([rw_0.unsqueeze(1), chart_probs[:, :-1].detach()], dim=1)
     rollout_z_hodge = torch.cat([z_0.unsqueeze(1), z_pred[:, :-1].detach()], dim=1)
     rollout_p0_hodge = world_model_mod.momentum_init(z_0.detach()).detach()
-    rollout_p_hodge = torch.cat([rollout_p0_hodge.unsqueeze(1), wm_out["momenta"][:, :-1].detach()], dim=1)
+    rollout_p_hodge = torch.cat(
+        [rollout_p0_hodge.unsqueeze(1), wm_out["momenta"][:, :-1].detach()], dim=1
+    )
     rollout_force_diag = _conservative_force_diagnostics(
         world_model_mod,
         rollout_z_hodge.reshape(-1, config.latent_dim),
@@ -4043,10 +3771,12 @@ def _train_step(
         force_consistency_diag["force_rel_err"],
         replay_valid.reshape(-1),
     )
-    reward_nonconservative_gate, reward_nonconservative_gate_metrics = _reward_nonconservative_gate(
-        config,
-        exact_covector_norm_mean=exact_covector_norm_mean,
-        force_rel_err_mean=force_rel_err_mean,
+    reward_nonconservative_gate, reward_nonconservative_gate_metrics = (
+        _reward_nonconservative_gate(
+            config,
+            exact_covector_norm_mean=exact_covector_norm_mean,
+            force_rel_err_mean=force_rel_err_mean,
+        )
     )
     r_noncons_effective = reward_nonconservative_gate.detach() * r_noncons
     reward_residual_target = reward_nonconservative_gate.detach() * (
@@ -4117,32 +3847,44 @@ def _train_step(
     metrics["wm/reward_nonconservative_mean"] = float(r_noncons.mean())
     metrics["wm/reward_nonconservative_effective_mean"] = float(r_noncons_effective.mean())
     metrics["wm/reward_residual_target_mean"] = float(reward_residual_target.mean())
-    metrics["wm/reward_exact_cos2_mean"] = float(_masked_mean(reward_exact_cos2, replay_valid.reshape(-1)))
+    metrics["wm/reward_exact_cos2_mean"] = float(
+        _masked_mean(reward_exact_cos2, replay_valid.reshape(-1))
+    )
     metrics["wm/reward_nonconservative_frac"] = float(
         r_noncons_effective.abs().mean() / (r_pred.abs().mean() + 1e-8)
     )
     metrics["wm/reward_density_mean"] = float(rho_r.mean())
     metrics["wm/reward_form_metric_norm_mean"] = float(
-        _metric_covector_norm_sq(world_model_mod.metric, z_prev_flat.detach(), reward_form_cov).sqrt().mean()
+        _metric_covector_norm_sq(world_model_mod.metric, z_prev_flat.detach(), reward_form_cov)
+        .sqrt()
+        .mean()
     )
     metrics["wm/reward_form_raw_metric_norm_mean"] = float(
         _metric_covector_norm_sq(
             world_model_mod.metric,
             z_prev_flat.detach(),
             reward_form_cov_raw,
-        ).sqrt().mean()
+        )
+        .sqrt()
+        .mean()
     )
     metrics["wm/reward_form_exact_leakage_metric_mean"] = float(
         _metric_covector_norm_sq(
             world_model_mod.metric,
             z_prev_flat.detach(),
             reward_form_exact_component,
-        ).sqrt().mean()
+        )
+        .sqrt()
+        .mean()
     )
     metrics["wm/reward_exact_covector_norm_mean"] = float(exact_covector_norm_mean)
     metrics["wm/force_exact_rel_mean"] = float(force_rel_err_mean)
-    metrics["wm/force_task_exact_rel_mean"] = float(force_consistency_diag["task_force_rel_err"].mean())
-    metrics["wm/force_risk_exact_rel_mean"] = float(force_consistency_diag["risk_force_rel_err"].mean())
+    metrics["wm/force_task_exact_rel_mean"] = float(
+        force_consistency_diag["task_force_rel_err"].mean()
+    )
+    metrics["wm/force_risk_exact_rel_mean"] = float(
+        force_consistency_diag["risk_force_rel_err"].mean()
+    )
     if reward_info["reward_curl"].numel() > 0:
         metrics["wm/reward_curl_norm_mean"] = float(
             torch.linalg.norm(reward_info["reward_curl"], dim=(-2, -1)).mean()
@@ -4208,7 +3950,9 @@ def _train_step(
         template=replay_values,
     )
     replay_reward_support_threshold = max(0.1 * float(replay_target_scale.detach()), 1e-6)
-    metrics["critic/replay_reward_mean"] = float(_masked_mean(replay_cons_target, replay_valid).detach())
+    metrics["critic/replay_reward_mean"] = float(
+        _masked_mean(replay_cons_target, replay_valid).detach()
+    )
     metrics["critic/replay_return_mean"] = float(_masked_mean(replay_rtg, replay_valid).detach())
     metrics["critic/replay_target_scale"] = float(replay_target_scale.detach())
     metrics["critic/replay_reward_support_frac"] = float(
@@ -4369,13 +4113,15 @@ def _train_step(
     ):
         replay_macro_covector = replay_symbolic_soft["macro_covector"]
         if config.w_macro_covector_pullback > 0.0:
-            L_macro_covector_pullback, macro_covector_pullback_metrics = _macro_covector_pullback_loss(
-                metric=world_model_mod.metric,
-                z=z_prev_flat.detach(),
-                macro_covector=replay_macro_covector,
-                exact_covector=exact_covector_train.detach(),
-                replay_valid=replay_valid,
-                metric_prefix="macro",
+            L_macro_covector_pullback, macro_covector_pullback_metrics = (
+                _macro_covector_pullback_loss(
+                    metric=world_model_mod.metric,
+                    z=z_prev_flat.detach(),
+                    macro_covector=replay_macro_covector,
+                    exact_covector=exact_covector_train.detach(),
+                    replay_valid=replay_valid,
+                    metric_prefix="macro",
+                )
             )
             metrics.update(macro_covector_pullback_metrics)
         if config.w_macro_pullback > 0.0:
@@ -4471,12 +4217,14 @@ def _train_step(
     metrics["macro/target_scale"] = float(macro_target_scale.detach())
     metrics["macro/L_transition"] = float(L_macro_transition.detach())
     metrics["macro/L_transition_entropy"] = float(L_macro_transition_entropy.detach())
-    metrics["macro/transition_ce"] = float(_masked_mean(replay_macro_transition_ce, replay_valid).detach())
+    metrics["macro/transition_ce"] = float(
+        _masked_mean(replay_macro_transition_ce, replay_valid).detach()
+    )
     metrics["macro/transition_acc"] = float(
         _masked_mean(
-            (
-                replay_macro_next_state_probs.argmax(dim=-1) == replay_next_state_idx_seq
-            ).to(replay_macro_next_state_probs.dtype),
+            (replay_macro_next_state_probs.argmax(dim=-1) == replay_next_state_idx_seq).to(
+                replay_macro_next_state_probs.dtype
+            ),
             replay_valid,
         ).detach(),
     )
@@ -4600,12 +4348,9 @@ def _train_step(
             max(int(config.critic_on_policy_horizon), 0),
             max(int(config.actor_return_horizon), int(config.imagination_horizon)),
         )
-        if (
-            critic_on_policy_horizon > 0
-            and (
-                config.w_critic_on_policy_covector_align > 0.0
-                or config.w_critic_on_policy_stiffness > 0.0
-            )
+        if critic_on_policy_horizon > 0 and (
+            config.w_critic_on_policy_covector_align > 0.0
+            or config.w_critic_on_policy_stiffness > 0.0
         ):
             critic_on_policy_batch = (
                 min(B, int(config.critic_on_policy_batch_size))
@@ -4614,7 +4359,9 @@ def _train_step(
             )
             if critic_on_policy_batch > 0:
                 if critic_on_policy_batch < B:
-                    critic_policy_idx = torch.randperm(B, device=z_0.device)[:critic_on_policy_batch]
+                    critic_policy_idx = torch.randperm(B, device=z_0.device)[
+                        :critic_on_policy_batch
+                    ]
                     z_policy_0 = z_0.detach()[critic_policy_idx]
                     rw_policy_0 = rw_0.detach()[critic_policy_idx]
                 else:
@@ -4690,15 +4437,15 @@ def _train_step(
                 metrics["critic/on_policy/L_stiffness"] = float(
                     L_critic_stiffness_on_policy.detach(),
                 )
-                metrics["critic/on_policy/exact_covector_norm_mean"] = critic_on_policy_stiffness_metrics[
-                    "critic/exact_covector_norm_mean"
-                ]
+                metrics["critic/on_policy/exact_covector_norm_mean"] = (
+                    critic_on_policy_stiffness_metrics["critic/exact_covector_norm_mean"]
+                )
                 metrics["critic/on_policy/stiffness_target"] = critic_on_policy_stiffness_metrics[
                     "critic/stiffness_target"
                 ]
-                metrics["critic/on_policy/stiffness_certified"] = critic_on_policy_stiffness_metrics[
-                    "critic/stiffness_certified"
-                ]
+                metrics["critic/on_policy/stiffness_certified"] = (
+                    critic_on_policy_stiffness_metrics["critic/stiffness_certified"]
+                )
                 metrics["critic/on_policy/calibration_ratio"] = float(
                     critic_on_policy_stiffness_metrics["critic/exact_covector_norm_mean"]
                     / max(critic_on_policy_stiffness_metrics["critic/stiffness_target"], 1e-6),
@@ -4708,28 +4455,33 @@ def _train_step(
                     max(int(config.macro_on_policy_horizon), 0),
                     critic_on_policy_horizon,
                 )
-                if (
-                    macro_on_policy_horizon > 0
-                    and (
-                        config.w_macro_on_policy_pullback > 0.0
-                        or config.w_macro_pullback > 0.0
-                        or config.w_macro_on_policy_covector_pullback > 0.0
-                    )
+                if macro_on_policy_horizon > 0 and (
+                    config.w_macro_on_policy_pullback > 0.0
+                    or config.w_macro_pullback > 0.0
+                    or config.w_macro_on_policy_covector_pullback > 0.0
                 ):
                     policy_macro_control = _macro_control_pullback_covector(
                         model,
                         world_model_mod,
                         macro_critic,
                         actor,
-                        policy_z_seq[:, :macro_on_policy_horizon].reshape(-1, config.latent_dim).detach(),
-                        action_state_probs=policy_rollout["action_state_probs"][:, :macro_on_policy_horizon]
+                        policy_z_seq[:, :macro_on_policy_horizon]
+                        .reshape(-1, config.latent_dim)
+                        .detach(),
+                        action_state_probs=policy_rollout["action_state_probs"][
+                            :, :macro_on_policy_horizon
+                        ]
                         .reshape(-1, macro_critic.num_actions)
                         .detach(),
-                        action_canonical=policy_rollout["action_canonical_seq"][:, :macro_on_policy_horizon]
+                        action_canonical=policy_rollout["action_canonical_seq"][
+                            :, :macro_on_policy_horizon
+                        ]
                         .reshape(-1, config.latent_dim)
                         .detach(),
                         gamma=config.gamma,
-                        continuation=policy_valid[:, :macro_on_policy_horizon].reshape(-1, 1).detach(),
+                        continuation=policy_valid[:, :macro_on_policy_horizon]
+                        .reshape(-1, 1)
+                        .detach(),
                         router_weights_override=policy_rw_seq[:, :macro_on_policy_horizon]
                         .reshape(-1, config.num_charts)
                         .detach(),
@@ -4793,10 +4545,7 @@ def _train_step(
                     )
                     metrics["macro/on_policy/pullback_abs_err"] = float(
                         _masked_mean(
-                            (
-                                policy_macro_reward_seq
-                                - policy_macro_exact_target
-                            ).abs(),
+                            (policy_macro_reward_seq - policy_macro_exact_target).abs(),
                             policy_valid[:, :macro_on_policy_horizon],
                         ).detach(),
                     )
@@ -4805,9 +4554,7 @@ def _train_step(
                     )
                     metrics["macro/on_policy/exact_increment_abs_err"] = float(
                         _masked_mean(
-                            (
-                                policy_macro_exact_pred - policy_macro_exact_target
-                            ).abs(),
+                            (policy_macro_exact_pred - policy_macro_exact_target).abs(),
                             policy_valid[:, :macro_on_policy_horizon],
                         ).detach(),
                     )
@@ -4845,7 +4592,9 @@ def _train_step(
                                 z=policy_z_seq[:, :macro_on_policy_horizon]
                                 .reshape(-1, config.latent_dim)
                                 .detach(),
-                                macro_covector=policy_macro_covector.reshape(-1, config.latent_dim),
+                                macro_covector=policy_macro_covector.reshape(
+                                    -1, config.latent_dim
+                                ),
                                 exact_covector=policy_exact_covector[:, :macro_on_policy_horizon]
                                 .detach()
                                 .reshape(
@@ -4859,19 +4608,21 @@ def _train_step(
                         if config.w_macro_on_policy_pullback > 0.0:
                             L_critic_macro_covector_pullback_on_policy, _ = (
                                 _macro_covector_pullback_loss(
-                                metric=world_model_mod.metric,
-                                z=policy_z_seq[:, :macro_on_policy_horizon]
-                                .reshape(-1, config.latent_dim)
-                                .detach(),
-                                macro_covector=policy_macro_covector.detach().reshape(
-                                    -1,
-                                    config.latent_dim,
-                                ),
-                                exact_covector=policy_exact_covector[:, :macro_on_policy_horizon]
-                                .reshape(-1, config.latent_dim),
-                                replay_valid=policy_valid[:, :macro_on_policy_horizon],
-                                metric_prefix="critic/on_policy",
-                            ))
+                                    metric=world_model_mod.metric,
+                                    z=policy_z_seq[:, :macro_on_policy_horizon]
+                                    .reshape(-1, config.latent_dim)
+                                    .detach(),
+                                    macro_covector=policy_macro_covector.detach().reshape(
+                                        -1,
+                                        config.latent_dim,
+                                    ),
+                                    exact_covector=policy_exact_covector[
+                                        :, :macro_on_policy_horizon
+                                    ].reshape(-1, config.latent_dim),
+                                    replay_valid=policy_valid[:, :macro_on_policy_horizon],
+                                    metric_prefix="critic/on_policy",
+                                )
+                            )
                             metrics["critic/on_policy/L_macro_covector_pullback"] = float(
                                 L_critic_macro_covector_pullback_on_policy.detach(),
                             )
@@ -4891,9 +4642,7 @@ def _train_step(
         metrics["critic/exact_covector_norm_mean"] = critic_exact_covector_norm_mean
         metrics["critic/stiffness_target"] = float(config.critic_stiffness_min)
         metrics["critic/stiffness_certified"] = (
-            1.0
-            if critic_exact_covector_norm_mean >= float(config.critic_stiffness_min)
-            else 0.0
+            1.0 if critic_exact_covector_norm_mean >= float(config.critic_stiffness_min) else 0.0
         )
         metrics["critic/calibration_ratio"] = float(
             critic_exact_covector_norm_mean / max(float(config.critic_stiffness_min), 1e-6),
@@ -5065,7 +4814,9 @@ def _train_step(
             actor_out["action_chart_logits"],
             action_K_prev_flat.detach().long(),
         )
-        sample_idx = torch.arange(actor_out["action_code_logits"].shape[0], device=actor_obs_z.device)
+        sample_idx = torch.arange(
+            actor_out["action_code_logits"].shape[0], device=actor_obs_z.device
+        )
         selected_code_logits = actor_out["action_code_logits"][
             sample_idx,
             action_K_prev_flat.detach().long(),
@@ -5086,17 +4837,15 @@ def _train_step(
             actor_scale_trust,
             actor_scale_barrier,
             actor_metric_metrics,
-        ) = (
-            _actor_state_metric(
-                config,
-                metric=world_model_mod.metric,
-                state_z_geo=z_prev_flat.detach(),
-                actor_out=actor_out,
-                obs_z_n=actor_obs_z,
-                target_chart_idx=action_K_prev_flat.detach(),
-                target_code_idx=action_K_code_prev_flat.detach(),
-                exact_covector=exact_covector,
-            )
+        ) = _actor_state_metric(
+            config,
+            metric=world_model_mod.metric,
+            state_z_geo=z_prev_flat.detach(),
+            actor_out=actor_out,
+            obs_z_n=actor_obs_z,
+            target_chart_idx=action_K_prev_flat.detach(),
+            target_code_idx=action_K_code_prev_flat.detach(),
+            exact_covector=exact_covector,
         )
         metrics.update(actor_metric_metrics)
         L_actor_old_policy_geodesic = hyperbolic_distance(
@@ -5114,9 +4863,7 @@ def _train_step(
         L_actor_old_policy_chart_kl = (
             config.w_actor_old_policy_chart_kl * actor_old_policy_chart_kl
         )
-        L_actor_old_policy_code_kl = (
-            config.w_actor_old_policy_code_kl * actor_old_policy_code_kl
-        )
+        L_actor_old_policy_code_kl = config.w_actor_old_policy_code_kl * actor_old_policy_code_kl
 
         actor_update_due = _should_run_actor_update(config, epoch=epoch, update_idx=update_idx)
         L_actor_return = actor_out["action_z_n"].new_zeros(())
@@ -5163,7 +4910,9 @@ def _train_step(
             (actor_out["action_chart_idx"].detach() == action_K_prev_flat.detach()).float().mean()
         )
         actor_code_acc = float(
-            (actor_out["action_code_idx"].detach() == action_K_code_prev_flat.detach()).float().mean()
+            (actor_out["action_code_idx"].detach() == action_K_code_prev_flat.detach())
+            .float()
+            .mean()
         )
         actor_symbol_acc = float(
             (
@@ -5231,9 +4980,9 @@ def _train_step(
                 actor_return_macro = actor_rollout["objective_macro"].mean()
                 actor_curiosity = actor_rollout["objective_curiosity"].mean()
                 actor_router_drift = float(
-                    (
-                        actor_rollout["rw_traj"].detach() - actor_rollout["rw_states"].detach()
-                    ).abs().mean()
+                    (actor_rollout["rw_traj"].detach() - actor_rollout["rw_states"].detach())
+                    .abs()
+                    .mean()
                 )
                 actor_policy_chart_acc = float(actor_rollout["policy_chart_acc"].detach().mean())
                 actor_policy_chart_ce = float(actor_rollout["policy_chart_ce"].detach().mean())
@@ -5260,8 +5009,12 @@ def _train_step(
                     config,
                     exact_increment_abs_err=metrics["critic/exact_increment_abs_err"],
                     exact_increment_target_mean=metrics["critic/exact_increment_target_mean"],
-                    on_policy_covector_align_abs_err=metrics["critic/on_policy/covector_align_abs_err"],
-                    on_policy_covector_target_mean=metrics["critic/on_policy/covector_target_reward_mean"],
+                    on_policy_covector_align_abs_err=metrics[
+                        "critic/on_policy/covector_align_abs_err"
+                    ],
+                    on_policy_covector_target_mean=metrics[
+                        "critic/on_policy/covector_target_reward_mean"
+                    ],
                     on_policy_exact_covector_norm_mean=metrics[
                         "critic/on_policy/exact_covector_norm_mean"
                     ],
@@ -5282,12 +5035,14 @@ def _train_step(
                     template=actor_return_conservative,
                 )
                 metrics.update(macro_control_metrics)
-                actor_curiosity_closure_gate, curiosity_closure_metrics = _actor_curiosity_closure_gate(
-                    config,
-                    obs_state_acc=metrics["closure/obs_state_acc"],
-                    enclosure_defect_acc=metrics["closure/enclosure_defect_acc"],
-                    enclosure_defect_ce=metrics["closure/enclosure_defect_ce"],
-                    template=actor_return_conservative,
+                actor_curiosity_closure_gate, curiosity_closure_metrics = (
+                    _actor_curiosity_closure_gate(
+                        config,
+                        obs_state_acc=metrics["closure/obs_state_acc"],
+                        enclosure_defect_acc=metrics["closure/enclosure_defect_acc"],
+                        enclosure_defect_ce=metrics["closure/enclosure_defect_ce"],
+                        template=actor_return_conservative,
+                    )
                 )
                 metrics.update(curiosity_closure_metrics)
                 conservative_control_gate = (
@@ -5299,21 +5054,23 @@ def _train_step(
                 nonconservative_weight = conservative_control_gate.pow(
                     config.actor_return_nonconservative_power,
                 )
-                actor_macro_control_weight = (
-                    float(config.actor_macro_backbone_weight)
-                    * actor_macro_control_gate.pow(float(config.actor_macro_backbone_power))
-                )
+                actor_macro_control_weight = float(
+                    config.actor_macro_backbone_weight
+                ) * actor_macro_control_gate.pow(float(config.actor_macro_backbone_power))
                 actor_return = (
                     actor_return_conservative
                     + actor_macro_control_weight * actor_return_macro
                     + nonconservative_weight * actor_return_nonconservative
                 )
-                rollout_velocity = (
-                    actor_rollout["z_traj"].reshape(-1, config.latent_dim)
-                    - actor_rollout["z_states"].reshape(-1, config.latent_dim)
+                rollout_velocity = actor_rollout["z_traj"].reshape(
+                    -1, config.latent_dim
+                ) - actor_rollout["z_states"].reshape(-1, config.latent_dim)
+                rollout_exact_covector = actor_rollout["exact_covector"].reshape(
+                    -1, config.latent_dim
                 )
-                rollout_exact_covector = actor_rollout["exact_covector"].reshape(-1, config.latent_dim)
-                rollout_macro_covector = actor_rollout["macro_covector"].reshape(-1, config.latent_dim)
+                rollout_macro_covector = actor_rollout["macro_covector"].reshape(
+                    -1, config.latent_dim
+                )
                 rollout_reward_form_cov = actor_rollout["reward_form_cov"].reshape(
                     -1,
                     config.latent_dim,
@@ -5324,29 +5081,36 @@ def _train_step(
                     + actor_macro_control_weight * rollout_macro_covector
                     - nonconservative_weight * rollout_reward_form_cov
                 )
-                actor_natural_objective = -(
-                    (gauge_covector * rollout_velocity) * actor_metric_inv.unsqueeze(0)
-                ).sum(dim=-1).mean()
-                actor_macro_covector_norm = _metric_covector_norm_sq(
-                    world_model_mod.metric,
-                    rollout_state_z.detach(),
-                    rollout_macro_covector,
-                ).sqrt().mean()
-                actor_gauge_norm = _metric_covector_norm_sq(
-                    world_model_mod.metric,
-                    rollout_state_z.detach(),
-                    gauge_covector,
-                ).sqrt().mean()
+                actor_natural_objective = (
+                    -((gauge_covector * rollout_velocity) * actor_metric_inv.unsqueeze(0))
+                    .sum(dim=-1)
+                    .mean()
+                )
+                actor_macro_covector_norm = (
+                    _metric_covector_norm_sq(
+                        world_model_mod.metric,
+                        rollout_state_z.detach(),
+                        rollout_macro_covector,
+                    )
+                    .sqrt()
+                    .mean()
+                )
+                actor_gauge_norm = (
+                    _metric_covector_norm_sq(
+                        world_model_mod.metric,
+                        rollout_state_z.detach(),
+                        gauge_covector,
+                    )
+                    .sqrt()
+                    .mean()
+                )
                 L_actor_sync = config.w_actor_wm_sync * actor_rollout["policy_sync_loss"].mean()
                 actor_stiffness_scale = max(float(config.actor_stiffness_min), 1e-8)
-                actor_stiffness_deficit = (
-                    (actor_stiffness_scale - actor_gauge_norm).clamp(min=0.0)
-                    / actor_stiffness_scale
-                )
+                actor_stiffness_deficit = (actor_stiffness_scale - actor_gauge_norm).clamp(
+                    min=0.0
+                ) / actor_stiffness_scale
                 actor_stiffness_trust = torch.exp(-actor_stiffness_deficit)
-                L_actor_stiffness = config.w_actor_stiffness * (
-                    actor_stiffness_deficit.pow(2)
-                )
+                L_actor_stiffness = config.w_actor_stiffness * (actor_stiffness_deficit.pow(2))
                 L_actor_scale = config.w_actor_scale_barrier * actor_scale_barrier.pow(2)
                 L_actor_curiosity = (
                     -config.w_actor_curiosity * actor_curiosity_gate * actor_curiosity
@@ -5360,13 +5124,9 @@ def _train_step(
                 )
                 if float(actor_return_trust.detach()) >= config.actor_return_trust_min:
                     actor_return_gate = (
-                        conservative_control_gate
-                        * actor_scale_trust
-                        * actor_stiffness_trust
+                        conservative_control_gate * actor_scale_trust * actor_stiffness_trust
                     ).clamp(0.0, 1.0)
-                    L_actor_return = (
-                        -config.w_actor_return * actor_return_gate * actor_return
-                    )
+                    L_actor_return = -config.w_actor_return * actor_return_gate * actor_return
                     L_actor_natural = (
                         -config.w_actor_natural
                         * actor_return_gate.pow(config.actor_return_exact_control_power)
@@ -5587,7 +5347,9 @@ def _train_step(
         )
         metrics["critic/value_bias"] = float(_masked_mean(replay_gap, replay_valid))
         metrics["critic/value_mean"] = float(_masked_mean(replay_values_diag, replay_valid))
-        metrics["critic/replay_bellman_abs"] = float(_masked_mean(replay_delta.abs(), replay_valid))
+        metrics["critic/replay_bellman_abs"] = float(
+            _masked_mean(replay_delta.abs(), replay_valid)
+        )
         bellman_centered = replay_delta - _masked_mean(replay_delta, replay_valid)
         metrics["critic/replay_bellman_std"] = float(
             (_masked_mean(bellman_centered.pow(2), replay_valid) + 1e-8).sqrt()
@@ -5612,16 +5374,22 @@ def _train_step(
             (
                 obs_centers
                 - _project_to_ball(world_model_mod.potential_net.chart_tok.chart_centers.detach())
-            ).norm(dim=-1).mean()
+            )
+            .norm(dim=-1)
+            .mean()
         )
         metrics["action_chart/actor_center_drift"] = float(
-            (action_centers - _project_to_ball(actor.action_chart_centers.detach())).norm(dim=-1).mean()
+            (action_centers - _project_to_ball(actor.action_chart_centers.detach()))
+            .norm(dim=-1)
+            .mean()
         )
         metrics["action_chart/reward_center_drift"] = float(
             (
                 action_centers
                 - _project_to_ball(reward_head_mod.action_chart_tok.chart_centers.detach())
-            ).norm(dim=-1).mean()
+            )
+            .norm(dim=-1)
+            .mean()
         )
         metrics["time/diagnostics"] = time.perf_counter() - t_section
     else:
@@ -5651,8 +5419,7 @@ def train(config: DreamerConfig) -> None:
     applied_preset, preset_changes = _apply_task_preset(config)
     if applied_preset is not None and preset_changes:
         change_items = ", ".join(
-            f"{name}={old}->{new}"
-            for name, (old, new) in sorted(preset_changes.items())
+            f"{name}={old}->{new}" for name, (old, new) in sorted(preset_changes.items())
         )
         print(f"Applied task preset {applied_preset}: {change_items}")
 
@@ -5683,8 +5450,10 @@ def train(config: DreamerConfig) -> None:
         print(f"Overriding action_dim: {config.action_dim} -> {actual_action_dim}")
         config.action_dim = actual_action_dim
 
-    print(f"Environment: {config.domain}-{config.task}  "
-          f"obs_dim={config.obs_dim}  action_dim={config.action_dim}")
+    print(
+        f"Environment: {config.domain}-{config.task}  "
+        f"obs_dim={config.obs_dim}  action_dim={config.action_dim}"
+    )
 
     # --- Models ---
     model = SharedDynTopoEncoder(
@@ -5837,10 +5606,7 @@ def train(config: DreamerConfig) -> None:
         *(id(p) for p in reward_head_mod.chart_tok.parameters()),
         *(id(p) for p in reward_head_mod.z_embed.parameters()),
     }
-    reward_own_params = [
-        p for p in reward_head_mod.parameters()
-        if id(p) not in reward_shared_ids
-    ]
+    reward_own_params = [p for p in reward_head_mod.parameters() if id(p) not in reward_shared_ids]
     wm_param_groups = [
         {"params": world_model.parameters(), "lr": config.lr_wm},
         {"params": reward_own_params, "lr": config.lr_wm},
@@ -6049,11 +5815,15 @@ def train(config: DreamerConfig) -> None:
             seed_episodes_data.append(ep)
             seed_count += 1
             ep_r = ep["rewards"].sum()
-            print(f"  Seed {seed_count}/{config.seed_episodes}: reward={ep_r:.1f}  len={len(ep['obs'])}")
+            print(
+                f"  Seed {seed_count}/{config.seed_episodes}: reward={ep_r:.1f}  len={len(ep['obs'])}"
+            )
 
     if config.normalize_observations and obs_normalizer is None:
         if not seed_episodes_data:
-            msg = "Observation normalization requires at least one seed episode or checkpoint stats."
+            msg = (
+                "Observation normalization requires at least one seed episode or checkpoint stats."
+            )
             raise ValueError(msg)
         obs_normalizer = ObservationNormalizer.from_episodes(
             seed_episodes_data,
@@ -6074,11 +5844,17 @@ def train(config: DreamerConfig) -> None:
     best_eval_reward = -float("inf")
     last_exact_control_gate = 0.0
 
-    _tpb = config.batch_size * max(config.seq_len, 1)
-    _est_upd = config.updates_per_epoch if config.updates_per_epoch > 0 else max(1, buffer.total_steps // _tpb)
-    print(f"\nStarting training for {config.total_epochs} epochs "
-          f"(~{_est_upd} updates/epoch, buffer={buffer.total_steps} steps, "
-          f"capacity={config.buffer_capacity})")
+    tpb = config.batch_size * max(config.seq_len, 1)
+    est_upd = (
+        config.updates_per_epoch
+        if config.updates_per_epoch > 0
+        else max(1, buffer.total_steps // tpb)
+    )
+    print(
+        f"\nStarting training for {config.total_epochs} epochs "
+        f"(~{est_upd} updates/epoch, buffer={buffer.total_steps} steps, "
+        f"capacity={config.buffer_capacity})"
+    )
     print("=" * 80)
 
     for epoch in range(start_epoch, config.total_epochs):
@@ -6167,15 +5943,15 @@ def train(config: DreamerConfig) -> None:
         metrics_accum: dict[str, list[float]] = {}
         sample_time_total = 0.0
         update_time_total = 0.0
-        for _u in range(n_updates):
+        for u in range(n_updates):
             sample_t0 = time.perf_counter()
             batch = buffer.sample(config.batch_size, device=device)
             sample_time_total += time.perf_counter() - sample_t0
             step_t0 = time.perf_counter()
             compute_diagnostics = (
                 config.diagnostics_every_updates <= 1
-                or ((_u + 1) % config.diagnostics_every_updates == 0)
-                or (_u == n_updates - 1)
+                or ((u + 1) % config.diagnostics_every_updates == 0)
+                or (u == n_updates - 1)
             )
 
             step_metrics = _train_step(
@@ -6202,7 +5978,7 @@ def train(config: DreamerConfig) -> None:
                 epoch,
                 current_hard_routing,
                 current_tau,
-                update_idx=epoch * max(n_updates, 1) + _u,
+                update_idx=epoch * max(n_updates, 1) + u,
                 obs_normalizer=obs_normalizer,
                 compute_diagnostics=compute_diagnostics,
                 optimizer_macro=optimizer_macro,
@@ -6285,9 +6061,7 @@ def train(config: DreamerConfig) -> None:
             )
             if episode_rewards:
                 metrics["env/last_episode_reward"] = episode_rewards[-1]
-                metrics["env/mean_episode_reward_20"] = float(
-                    np.mean(episode_rewards[-20:])
-                )
+                metrics["env/mean_episode_reward_20"] = float(np.mean(episode_rewards[-20:]))
 
             # Console output
             hdr = f"E{epoch:04d} [{n_updates}upd]"
@@ -6429,8 +6203,7 @@ def train(config: DreamerConfig) -> None:
 
             def _fmt(pairs):
                 return "  ".join(
-                    f"{label}={metrics[key]:.4f}"
-                    for label, key in pairs if key in metrics
+                    f"{label}={metrics[key]:.4f}" for label, key in pairs if key in metrics
                 )
 
             print(f"{hdr}  {_fmt(line1_keys)}  dt={dt:.2f}s")
@@ -6452,7 +6225,7 @@ def train(config: DreamerConfig) -> None:
                 if key in metrics:
                     usage_parts.append(f"c{k}={metrics[key]:.2f}")
             if usage_parts:
-                active_charts = int(round(metrics.get("chart/active_charts", 0.0)))
+                active_charts = round(metrics.get("chart/active_charts", 0.0))
                 print(
                     f"  {'':4s}  charts: {active_charts}/{config.num_charts} active  "
                     f"{' '.join(usage_parts)}",
@@ -6464,7 +6237,7 @@ def train(config: DreamerConfig) -> None:
                 if key in metrics:
                     action_usage_parts.append(f"a{k}={metrics[key]:.2f}")
             if action_usage_parts:
-                active_action_charts = int(round(metrics.get("action_chart/active_charts", 0.0)))
+                active_action_charts = round(metrics.get("action_chart/active_charts", 0.0))
                 print(
                     f"  {'':4s}  action charts: {active_action_charts}/{config.num_action_charts} active  "
                     f"{' '.join(action_usage_parts)}",
@@ -6475,12 +6248,12 @@ def train(config: DreamerConfig) -> None:
                 active_key = f"chart/{k}/active_codes"
                 entropy_key = f"chart/{k}/code_entropy"
                 if active_key in metrics and entropy_key in metrics:
-                    active_codes = int(round(metrics[active_key]))
+                    active_codes = round(metrics[active_key])
                     symbol_parts.append(
                         f"c{k}={active_codes}/{config.codes_per_chart}(H={metrics[entropy_key]:.2f})",
                     )
             if symbol_parts:
-                active_symbols = int(round(metrics.get("chart/active_symbols", 0.0)))
+                active_symbols = round(metrics.get("chart/active_symbols", 0.0))
                 total_symbols = config.num_charts * config.codes_per_chart
                 print(
                     f"  {'':4s}  symbols: {active_symbols}/{total_symbols} active  "
@@ -6492,12 +6265,12 @@ def train(config: DreamerConfig) -> None:
                 active_key = f"action_chart/{k}/active_codes"
                 entropy_key = f"action_chart/{k}/code_entropy"
                 if active_key in metrics and entropy_key in metrics:
-                    active_codes = int(round(metrics[active_key]))
+                    active_codes = round(metrics[active_key])
                     action_symbol_parts.append(
                         f"a{k}={active_codes}/{config.action_codes_per_chart}(H={metrics[entropy_key]:.2f})",
                     )
             if action_symbol_parts:
-                active_action_symbols = int(round(metrics.get("action_chart/active_symbols", 0.0)))
+                active_action_symbols = round(metrics.get("action_chart/active_symbols", 0.0))
                 total_action_symbols = config.num_action_charts * config.action_codes_per_chart
                 print(
                     f"  {'':4s}  action symbols: {active_action_symbols}/{total_action_symbols} active  "
@@ -6529,13 +6302,16 @@ def train(config: DreamerConfig) -> None:
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
             )
-            print(f"  EVAL  reward={eval_metrics['eval/reward_mean']:.1f} "
-                  f"+/- {eval_metrics['eval/reward_std']:.1f}  "
-                  f"len={eval_metrics['eval/length_mean']:.0f}")
+            print(
+                f"  EVAL  reward={eval_metrics['eval/reward_mean']:.1f} "
+                f"+/- {eval_metrics['eval/reward_std']:.1f}  "
+                f"len={eval_metrics['eval/length_mean']:.0f}"
+            )
             if mlflow_enabled and log_mlflow_metrics is not None:
                 log_mlflow_metrics(
                     {f"phase4/{k}": v for k, v in eval_metrics.items()},
-                    step=epoch, enabled=True,
+                    step=epoch,
+                    enabled=True,
                 )
             if eval_metrics["eval/reward_mean"] > best_eval_reward:
                 best_eval_reward = eval_metrics["eval/reward_mean"]
@@ -6672,15 +6448,11 @@ def _save_checkpoint(
         "world_model": {
             k: v.cpu() for k, v in _unwrap_compiled_module(world_model).state_dict().items()
         },
-        "actor": {
-            k: v.cpu() for k, v in _unwrap_compiled_module(actor).state_dict().items()
-        },
+        "actor": {k: v.cpu() for k, v in _unwrap_compiled_module(actor).state_dict().items()},
         "actor_old": {
             k: v.cpu() for k, v in _unwrap_compiled_module(actor_old).state_dict().items()
         },
-        "critic": {
-            k: v.cpu() for k, v in _unwrap_compiled_module(critic).state_dict().items()
-        },
+        "critic": {k: v.cpu() for k, v in _unwrap_compiled_module(critic).state_dict().items()},
         "macro_critic": {
             k: v.cpu() for k, v in _unwrap_compiled_module(macro_critic).state_dict().items()
         },

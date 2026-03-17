@@ -6,6 +6,7 @@ import holoviews as hv
 import numpy as np
 import torch
 
+
 def conformal_factor_np(z_geo: np.ndarray, eps: float = 1e-7) -> np.ndarray:
     """Poincare conformal factor lambda(z) = 2 / (1 - |z|^2)."""
     r_sq = np.sum(z_geo**2, axis=1)
@@ -55,8 +56,12 @@ def plot_poincare_disk(
     ax.plot(np.cos(theta), np.sin(theta), "k-", linewidth=0.8, alpha=0.3)
 
     scatter = ax.scatter(
-        z_2d[:, 0], z_2d[:, 1],
-        c=K, cmap="tab10", s=8, alpha=0.6,
+        z_2d[:, 0],
+        z_2d[:, 1],
+        c=K,
+        cmap="tab10",
+        s=8,
+        alpha=0.6,
     )
     ax.set_xlim(-1.1, 1.1)
     ax.set_ylim(-1.1, 1.1)
@@ -69,8 +74,12 @@ def plot_poincare_disk(
         for label in np.unique(tl):
             mask = tl == label
             ax.scatter(
-                z_2d[mask, 0], z_2d[mask, 1],
-                marker=f"${int(label)}$", s=30, alpha=0.5, color="black",
+                z_2d[mask, 0],
+                z_2d[mask, 1],
+                marker=f"${int(label)}$",
+                s=30,
+                alpha=0.5,
+                color="black",
             )
 
     return fig
@@ -330,7 +339,7 @@ def hv_dynamics_trajectory(
         vdims=["step", "z0", "z1"],
     ).opts(color="red", size=5, marker="square", alpha=0.7, tools=["hover"])
 
-    overlay = (circle * target_line * target_pts * pred_line * pred_pts).opts(
+    return (circle * target_line * target_pts * pred_line * pred_pts).opts(
         width=800,
         height=600,
         xlim=(-1.1, 1.1),
@@ -338,7 +347,6 @@ def hv_dynamics_trajectory(
         aspect="equal",
         title=title,
     )
-    return overlay
 
 
 def full_diagnostic(
@@ -367,8 +375,15 @@ def full_diagnostic(
 
     with torch.no_grad():
         (
-            x_recon, vq_loss, enc_rw, dec_rw,
-            K_chart, z_geo, z_n, c_bar, aux,
+            x_recon,
+            _vq_loss,
+            _enc_rw,
+            _dec_rw,
+            K_chart,
+            z_geo,
+            _z_n,
+            _c_bar,
+            _aux,
         ) = encoder(features.to(device))
 
     z_np = z_geo.cpu().numpy()
@@ -425,6 +440,7 @@ def full_diagnostic(
 
     if save_dir is not None:
         import os
+
         os.makedirs(save_dir, exist_ok=True)
         for name, fig in figs:
             fig.savefig(os.path.join(save_dir, f"{name}.png"), dpi=150, bbox_inches="tight")

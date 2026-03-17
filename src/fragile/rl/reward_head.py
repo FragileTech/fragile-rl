@@ -7,7 +7,7 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from fragile.core.layers.gauge import CovariantAttention, GeodesicConfig
+from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
 from fragile.core.layers.primitives import SpectralLinear
 from fragile.rl.action_manifold import LatentTokenizer
 from fragile.vla.covariant_world_model import (
@@ -85,7 +85,9 @@ class RewardHead(nn.Module):
         if exact_covector is None:
             return reward_form_cov, torch.zeros_like(reward_form_cov)
 
-        exact_covector = exact_covector.to(device=reward_form_cov.device, dtype=reward_form_cov.dtype)
+        exact_covector = exact_covector.to(
+            device=reward_form_cov.device, dtype=reward_form_cov.dtype
+        )
         if detach_exact_covector:
             exact_covector = exact_covector.detach()
         # The current latent geometry is conformal: G^{ij}(z) = lambda(z)^{-2} delta^{ij}.

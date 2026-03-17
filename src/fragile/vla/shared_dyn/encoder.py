@@ -42,8 +42,8 @@ class SharedDynAtlasEncoder(PrimitiveAttentiveAtlasEncoder):
             v_local,
             self.codebook,
             router_weights,
-            0.0,   # commitment_beta  — zero; main pass handles training
-            0.0,   # codebook_loss_weight — zero
+            0.0,  # commitment_beta  — zero; main pass handles training
+            0.0,  # codebook_loss_weight — zero
             use_soft_equiv=False,
         )[:4]
 

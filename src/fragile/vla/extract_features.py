@@ -104,7 +104,11 @@ def _build_episode_index(dataset) -> dict[int, list[int]]:
     if hasattr(dataset, "meta") and hasattr(dataset.meta, "episodes"):
         episodes = dataset.meta.episodes
         if episodes is not None:
-            ep_ids = sorted(episodes.keys()) if isinstance(episodes, dict) else list(range(len(episodes)))
+            ep_ids = (
+                sorted(episodes.keys())
+                if isinstance(episodes, dict)
+                else list(range(len(episodes)))
+            )
         else:
             ep_ids = None
     else:
@@ -115,7 +119,7 @@ def _build_episode_index(dataset) -> dict[int, list[int]]:
     ep_col = hf["episode_index"]
 
     if ep_ids is None:
-        ep_ids = sorted(set(int(e) for e in ep_col))
+        ep_ids = sorted({int(e) for e in ep_col})
 
     index: dict[int, list[int]] = {eid: [] for eid in ep_ids}
     for i, eid in enumerate(ep_col):
@@ -257,13 +261,10 @@ def extract_smolvla_features(config: VLAConfig) -> Path:
     # may use different names (e.g. top/wrist for svla_so100_pickplace).
     policy_img_keys = sorted(policy.config.image_features.keys())
     sample0 = dataset[0]
-    dataset_img_keys = sorted(
-        k for k in sample0.keys() if k.startswith("observation.images.")
-    )
+    dataset_img_keys = sorted(k for k in sample0.keys() if k.startswith("observation.images."))
     img_key_map: dict[str, str] = {}
     if set(dataset_img_keys) != set(policy_img_keys):
-        for ds_k, pol_k in zip(dataset_img_keys, policy_img_keys):
-            img_key_map[ds_k] = pol_k
+        img_key_map.update(dict(zip(dataset_img_keys, policy_img_keys)))
         print(f"  Image key remap: {img_key_map}")
 
     # Pre-tokenize unique task descriptions
@@ -271,8 +272,11 @@ def extract_smolvla_features(config: VLAConfig) -> Path:
 
     def _tokenize_task(task_str: str) -> dict[str, torch.Tensor]:
         encoded = tokenizer(
-            task_str, return_tensors="pt", padding="max_length",
-            max_length=64, truncation=True,
+            task_str,
+            return_tensors="pt",
+            padding="max_length",
+            max_length=64,
+            truncation=True,
         )
         return {
             "observation.language.tokens": encoded.input_ids.to(device=device),
@@ -330,8 +334,7 @@ def extract_smolvla_features(config: VLAConfig) -> Path:
                 task_str = sample.get("task", "Pick up the object.")
                 if task_str not in task_tokens_cache:
                     task_tokens_cache[task_str] = _tokenize_task(task_str)
-                for tk, tv in task_tokens_cache[task_str].items():
-                    obs[tk] = tv
+                obs.update(dict(task_tokens_cache[task_str].items()))
 
                 with torch.no_grad(), torch.autocast("cuda", dtype=torch.float16):
                     policy.select_action(obs)
@@ -362,7 +365,9 @@ def extract_smolvla_features(config: VLAConfig) -> Path:
             if state_list:
                 torch.save(torch.stack(state_list), ep_dir / "states.pt")
             if task_idx_list:
-                torch.save(torch.tensor(task_idx_list, dtype=torch.long), ep_dir / "task_indices.pt")
+                torch.save(
+                    torch.tensor(task_idx_list, dtype=torch.long), ep_dir / "task_indices.pt"
+                )
 
             total_frames += len(feat_list)
             print(f"  Episode {ep_id}: {len(feat_list)} frames")
@@ -370,11 +375,11 @@ def extract_smolvla_features(config: VLAConfig) -> Path:
     # Write metadata
     meta = _augment_cache_metadata(
         {
-        "model_id": config.smolvla_model_id,
-        "dataset": config.dataset_name,
-        "feature_dim": config.feature_dim,
-        "pooling": config.pooling,
-        "total_frames": total_frames,
+            "model_id": config.smolvla_model_id,
+            "dataset": config.dataset_name,
+            "feature_dim": config.feature_dim,
+            "pooling": config.pooling,
+            "total_frames": total_frames,
         },
         episode_ids,
         config.held_out_test_episodes,

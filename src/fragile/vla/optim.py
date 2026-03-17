@@ -56,19 +56,15 @@ def build_encoder_param_groups(
     if base_params:
         param_groups.append({"params": base_params, "lr": base_lr})
     if chart_center_params:
-        param_groups.append(
-            {
-                "params": chart_center_params,
-                "lr": base_lr * lr_chart_centers_scale,
-            }
-        )
+        param_groups.append({
+            "params": chart_center_params,
+            "lr": base_lr * lr_chart_centers_scale,
+        })
     if codebook_params:
-        param_groups.append(
-            {
-                "params": codebook_params,
-                "lr": base_lr * lr_codebook_scale,
-            }
-        )
+        param_groups.append({
+            "params": codebook_params,
+            "lr": base_lr * lr_codebook_scale,
+        })
     return param_groups
 
 

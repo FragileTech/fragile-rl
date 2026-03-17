@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import argparse
 import os
-from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
@@ -31,43 +30,74 @@ from fragile.hyperbolic_losses import (
     get_jump_weight_schedule,
 )
 from fragile.vla.config import VLAConfig
+from fragile.vla.extract_features import VLAFeatureDataset
+from fragile.vla.losses import compute_phase1_loss
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
     init_phase1_adaptive_state,
     phase1_effective_weight_scales,
     update_phase1_adaptive_state,
 )
-from fragile.vla.losses import compute_phase1_loss
-from fragile.vla.extract_features import VLAFeatureDataset
+
 
 # ── Tracked loss terms ─────────────────────────────────────────────
 LOSS_KEYS = [
-    "recon", "vq", "entropy", "consistency",
-    "chart_usage", "chart_ot", "uniformity", "radial_cal",
-    "confidence_calibration", "hard_routing_nll", "router_margin",
+    "recon",
+    "vq",
+    "entropy",
+    "consistency",
+    "chart_usage",
+    "chart_ot",
+    "uniformity",
+    "radial_cal",
+    "confidence_calibration",
+    "hard_routing_nll",
+    "router_margin",
     "v_tangent_barrier",
-    "codebook_spread", "codebook_center",
-    "chart_center_mean", "chart_center_radius", "chart_center_sep",
+    "codebook_spread",
+    "codebook_center",
+    "chart_center_mean",
+    "chart_center_radius",
+    "chart_center_sep",
     "code_usage",
-    "window", "jump",
+    "window",
+    "jump",
 ]
 
 # ── Info metrics (7) ───────────────────────────────────────────────
 INFO_KEYS = [
-    "I_XK", "H_K", "H_K_given_X",
-    "ot_target_top1_mean", "ot_plan_col_l1", "ot_plan_row_l1",
-    "H_usage", "usage_perplexity", "usage_active",
-    "H_code_usage", "code_usage_perplexity", "active_code_charts",
-    "top1_prob_mean", "top1_prob_p10", "top1_prob_p90",
-    "top2_prob_mean", "top1_gap_mean",
-    "recon_quality_mean", "vq_quality_mean", "combined_quality_mean",
-    "routing_confidence_mean", "radial_target_mean", "local_radius_mean",
-    "grad_norm", "param_norm", "update_ratio", "lr",
+    "I_XK",
+    "H_K",
+    "H_K_given_X",
+    "ot_target_top1_mean",
+    "ot_plan_col_l1",
+    "ot_plan_row_l1",
+    "H_usage",
+    "usage_perplexity",
+    "usage_active",
+    "H_code_usage",
+    "code_usage_perplexity",
+    "active_code_charts",
+    "top1_prob_mean",
+    "top1_prob_p10",
+    "top1_prob_p90",
+    "top2_prob_mean",
+    "top1_gap_mean",
+    "recon_quality_mean",
+    "vq_quality_mean",
+    "combined_quality_mean",
+    "routing_confidence_mean",
+    "radial_target_mean",
+    "local_radius_mean",
+    "grad_norm",
+    "param_norm",
+    "update_ratio",
+    "lr",
 ]
 
 
 def _init_accumulators() -> dict[str, float]:
-    return {k: 0.0 for k in LOSS_KEYS + INFO_KEYS + ["total"]}
+    return dict.fromkeys(LOSS_KEYS + INFO_KEYS + ["total"], 0.0)
 
 
 def _get_hard_routing_tau(args: argparse.Namespace, epoch: int, total_epochs: int) -> float:
@@ -196,7 +226,9 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
         latent_dim=args.latent_dim,
     ).to(device)
 
-    print(f"Model: {count_parameters(model):,} params | Jump: {count_parameters(jump_op):,} params")
+    print(
+        f"Model: {count_parameters(model):,} params | Jump: {count_parameters(jump_op):,} params"
+    )
 
     # ── Optimizer & scheduler ──────────────────────────────────
     optimizer = torch.optim.Adam(
@@ -244,8 +276,18 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
 
             # ── Encoder forward (split call) ───────────────
             (
-                K_chart, K_code, z_n, z_tex, enc_w, z_geo,
-                vq_loss, indices, z_n_all, c_bar, v_local, _z_q_blended,
+                _K_chart,
+                _K_code,
+                _z_n,
+                _z_tex,
+                enc_w,
+                z_geo,
+                vq_loss,
+                indices,
+                z_n_all,
+                c_bar,
+                v_local,
+                _z_q_blended,
             ) = model.encoder(
                 x,
                 hard_routing=current_hard_routing,
@@ -256,8 +298,9 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
             # When hard routing is on, pass encoder weights to decoder so both
             # use the same one-hot assignment (avoids consistency loss explosion).
             router_override = enc_w if current_hard_routing else None
-            x_recon, dec_w, aux_losses = model.decoder(
-                z_geo, None, chart_index=None,  # z_tex not used by decoder
+            x_recon, dec_w, _aux_losses = model.decoder(
+                z_geo,
+                chart_index=None,
                 router_weights=router_override,
                 hard_routing=current_hard_routing,
                 hard_routing_tau=current_tau,
@@ -287,7 +330,9 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
                 final_weight=args.w_jump,
             )
             jump_loss, _jump_info = compute_jump_consistency_loss(
-                z_n_all, enc_w, jump_op,
+                z_n_all,
+                enc_w,
+                jump_op,
             )
             zn_reg_loss = zn_reg_loss + current_jump_weight * jump_loss
 
@@ -304,11 +349,7 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
             optimizer.step()
 
             current_lr = optimizer.param_groups[0]["lr"]
-            update_ratio = (
-                current_lr * grad_norm / (param_norm + 1e-12)
-                if param_norm > 0
-                else 0.0
-            )
+            update_ratio = current_lr * grad_norm / (param_norm + 1e-12) if param_norm > 0 else 0.0
 
             # ── Accumulate ─────────────────────────────────
             acc["total"] += total.item()
@@ -391,8 +432,12 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
 
         active_chart_mask = usage > 0.01
         if np.any(active_chart_mask):
-            code_entropy_mean_active = float(np.mean(np.array(code_entropy_per_chart)[active_chart_mask]))
-            code_perplexity_mean_active = float(np.mean(np.array(code_perplexity_per_chart)[active_chart_mask]))
+            code_entropy_mean_active = float(
+                np.mean(np.array(code_entropy_per_chart)[active_chart_mask])
+            )
+            code_perplexity_mean_active = float(
+                np.mean(np.array(code_perplexity_per_chart)[active_chart_mask])
+            )
         else:
             code_entropy_mean_active = 0.0
             code_perplexity_mean_active = 1.0
@@ -400,16 +445,9 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
         # ── Logging ────────────────────────────────────────
         should_log = (epoch % args.log_every == 0) or (epoch == args.epochs - 1)
         if should_log:
-            print(
-                f"Epoch {epoch:5d} | Loss: {acc['total']:.4f} "
-                f"| LR: {acc['lr']:.2e}"
-            )
-            print(
-                f"  Hard usage: {np.array2string(usage, precision=2, separator=', ')}"
-            )
-            print(
-                f"  Soft usage: {np.array2string(soft_usage, precision=2, separator=', ')}"
-            )
+            print(f"Epoch {epoch:5d} | Loss: {acc['total']:.4f} | LR: {acc['lr']:.2e}")
+            print(f"  Hard usage: {np.array2string(usage, precision=2, separator=', ')}")
+            print(f"  Soft usage: {np.array2string(soft_usage, precision=2, separator=', ')}")
             print(
                 f"  Core: recon={acc['recon']:.3f} vq={acc['vq']:.3f} "
                 f"entropy={acc['entropy']:.3f} consist={acc['consistency']:.3f} "
@@ -443,10 +481,7 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
                 f"cc_rad={acc['chart_center_radius']:.3f} "
                 f"cc_sep={acc['chart_center_sep']:.3f}"
             )
-            print(
-                f"  Usage: chart={acc['chart_usage']:.4f} "
-                f"code={acc['code_usage']:.4f}"
-            )
+            print(f"  Usage: chart={acc['chart_usage']:.4f} code={acc['code_usage']:.4f}")
             print(
                 f"  OT: loss={acc['chart_ot']:.3f} "
                 f"target_top1={acc['ot_target_top1_mean']:.3f} "
@@ -460,14 +495,8 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
                 f"code_perp={acc['code_usage_perplexity']:.2f}/{args.codes_per_chart} "
                 f"active_code_charts={acc['active_code_charts']:.2f}"
             )
-            print(
-                f"  Window: {acc['window']:.3f} "
-                f"(w={args.w_window:.3f})"
-            )
-            print(
-                f"  Jump: {acc['jump']:.3f} "
-                f"(lambda={current_jump_weight:.3f})"
-            )
+            print(f"  Window: {acc['window']:.3f} (w={args.w_window:.3f})")
+            print(f"  Jump: {acc['jump']:.3f} (lambda={current_jump_weight:.3f})")
             print(
                 f"  Train: grad={acc['grad_norm']:.2e} "
                 f"upd_ratio={acc['update_ratio']:.2e} "
@@ -503,9 +532,7 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
                 f"  Code stats: H={code_entropy_mean_active:.3f} "
                 f"perp={code_perplexity_mean_active:.2f}/{args.codes_per_chart}"
             )
-            print(
-                f"  Code util: {unique_codes_per_chart} / {codes_per_chart} per chart"
-            )
+            print(f"  Code util: {unique_codes_per_chart} / {codes_per_chart} per chart")
             print("-" * 60)
 
         if phase1_state is not None:
@@ -523,10 +550,7 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
             )
 
         # ── Checkpoint ─────────────────────────────────────
-        should_save = (
-            (epoch > 0 and epoch % args.save_every == 0)
-            or epoch == args.epochs - 1
-        )
+        should_save = (epoch > 0 and epoch % args.save_every == 0) or epoch == args.epochs - 1
         if should_save:
             ckpt_path = os.path.join(args.output_dir, f"epoch_{epoch:05d}.pt")
             torch.save(
@@ -535,9 +559,7 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
                     "model": model.state_dict(),
                     "jump_op": jump_op.state_dict(),
                     "optimizer": optimizer.state_dict(),
-                    "scheduler": (
-                        scheduler.state_dict() if scheduler else None
-                    ),
+                    "scheduler": (scheduler.state_dict() if scheduler else None),
                     "args": vars(args),
                 },
                 ckpt_path,
@@ -605,10 +627,18 @@ def main() -> None:
     p.add_argument("--epochs", type=int, default=200)
     p.add_argument("--batch-size", type=int, default=512)
     p.add_argument("--lr", type=float, default=1e-3)
-    p.add_argument("--lr-chart-centers-scale", type=float, default=0.1,
-                   help="LR scale for chart_centers relative to the base encoder LR")
-    p.add_argument("--lr-codebook-scale", type=float, default=0.5,
-                   help="LR scale for codebook parameters relative to the base encoder LR")
+    p.add_argument(
+        "--lr-chart-centers-scale",
+        type=float,
+        default=0.1,
+        help="LR scale for chart_centers relative to the base encoder LR",
+    )
+    p.add_argument(
+        "--lr-codebook-scale",
+        type=float,
+        default=0.5,
+        help="LR scale for codebook parameters relative to the base encoder LR",
+    )
     p.add_argument("--grad-clip", type=float, default=1.0)
     p.add_argument("--use-scheduler", action="store_true")
 
@@ -625,114 +655,297 @@ def main() -> None:
     # Resume / device
     p.add_argument("--resume", default="", help="Checkpoint path to resume from")
     p.add_argument("--device", default="auto")
-    p.add_argument("--hard-routing", action=argparse.BooleanOptionalAction, default=True,
-                   help="Use hard routing by default (one-hot forward, ST gradients)")
-    p.add_argument("--hard-routing-warmup-epochs", type=int, default=5,
-                   help="Epochs of soft partition-of-unity routing before hard ST continuation")
-    p.add_argument("--hard-routing-tau", type=float, default=1.0,
-                   help="Starting temperature for hard routing; positive = Gumbel-softmax, "
-                        "negative = deterministic straight-through argmax (no Gumbel noise)")
-    p.add_argument("--hard-routing-tau-end", type=float, default=0.3,
-                   help="Final tau after annealing (None = no annealing, use constant tau)")
-    p.add_argument("--hard-routing-tau-anneal-epochs", type=int, default=200,
-                   help="Anneal tau linearly over this many epochs (None = total epochs)")
+    p.add_argument(
+        "--hard-routing",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Use hard routing by default (one-hot forward, ST gradients)",
+    )
+    p.add_argument(
+        "--hard-routing-warmup-epochs",
+        type=int,
+        default=5,
+        help="Epochs of soft partition-of-unity routing before hard ST continuation",
+    )
+    p.add_argument(
+        "--hard-routing-tau",
+        type=float,
+        default=1.0,
+        help="Starting temperature for hard routing; positive = Gumbel-softmax, "
+        "negative = deterministic straight-through argmax (no Gumbel noise)",
+    )
+    p.add_argument(
+        "--hard-routing-tau-end",
+        type=float,
+        default=0.3,
+        help="Final tau after annealing (None = no annealing, use constant tau)",
+    )
+    p.add_argument(
+        "--hard-routing-tau-anneal-epochs",
+        type=int,
+        default=200,
+        help="Anneal tau linearly over this many epochs (None = total epochs)",
+    )
 
     # ── Loss weights ───────────────────────────────────────
     p.add_argument("--w-recon", type=float, default=1.0)
     p.add_argument("--w-vq", type=float, default=1.0)
     p.add_argument("--w-entropy", type=float, default=0.3)
     p.add_argument("--w-consistency", type=float, default=0.0)
-    p.add_argument("--w-diversity", type=float, default=1.0,
-                   help="Weight for hard/ST chart-usage entropy band")
-    p.add_argument("--chart-usage-h-low", type=float, default=None,
-                   help="Minimum hard chart-usage entropy (None = auto from num_charts)")
-    p.add_argument("--chart-usage-h-high", type=float, default=None,
-                   help="Optional maximum hard chart-usage entropy")
-    p.add_argument("--w-chart-ot", type=float, default=1.0,
-                   help="Entropic OT chart-balancing auxiliary weight")
-    p.add_argument("--chart-ot-epsilon", type=float, default=0.05,
-                   help="Entropic OT epsilon for chart balancing")
-    p.add_argument("--chart-ot-iters", type=int, default=20,
-                   help="Number of Sinkhorn iterations for chart balancing")
+    p.add_argument(
+        "--w-diversity",
+        type=float,
+        default=1.0,
+        help="Weight for hard/ST chart-usage entropy band",
+    )
+    p.add_argument(
+        "--chart-usage-h-low",
+        type=float,
+        default=None,
+        help="Minimum hard chart-usage entropy (None = auto from num_charts)",
+    )
+    p.add_argument(
+        "--chart-usage-h-high",
+        type=float,
+        default=None,
+        help="Optional maximum hard chart-usage entropy",
+    )
+    p.add_argument(
+        "--w-chart-ot",
+        type=float,
+        default=1.0,
+        help="Entropic OT chart-balancing auxiliary weight",
+    )
+    p.add_argument(
+        "--chart-ot-epsilon",
+        type=float,
+        default=0.05,
+        help="Entropic OT epsilon for chart balancing",
+    )
+    p.add_argument(
+        "--chart-ot-iters",
+        type=int,
+        default=20,
+        help="Number of Sinkhorn iterations for chart balancing",
+    )
     p.add_argument("--w-uniformity", type=float, default=0.05)
     p.add_argument("--w-radial-cal", type=float, default=0.1)
-    p.add_argument("--w-confidence-calibration", type=float, default=0.05,
-                   help="Align router confidence with per-sample reconstruction quality")
-    p.add_argument("--w-hard-routing-nll", type=float, default=0.5,
-                   help="Sharpen the deterministic hard chart partition in score space")
-    p.add_argument("--w-router-margin", type=float, default=2.0,
-                   help="Weight for enforcing a positive hard-routing score margin")
-    p.add_argument("--router-margin-target", type=float, default=0.05,
-                   help="Minimum desired gap between the winning and runner-up chart scores")
-    p.add_argument("--radial-quality-alpha", type=float, default=2.0,
-                   help="Sharpness of the reconstruction-quality target used by radial calibration")
-    p.add_argument("--radial-vq-alpha", type=float, default=1.0,
-                   help="Sharpness of the VQ-quality target used by radial calibration")
-    p.add_argument("--radial-quality-rank-mix", type=float, default=0.75,
-                   help="Blend from absolute error quality (0) to batch-rank quality (1)")
-    p.add_argument("--radial-recon-quality-weight", type=float, default=0.7,
-                   help="Weight of reconstruction quality when combining recon and VQ targets")
-    p.add_argument("--radial-quality-mix", type=float, default=1.0,
-                   help="Blend from confidence-only radial targets (0) to quality-gated targets (1)")
-    p.add_argument("--radial-quality-base-weight", type=float, default=0.0,
-                   help="Optional quality-driven base shell weight (default off for theory-aligned runs)")
-    p.add_argument("--radial-calibration-rho-max", type=float, default=4.0,
-                   help="Maximum hyperbolic radius assigned to confident, low-error samples")
-    p.add_argument("--radial-calibration-band-width", type=float, default=0.75,
-                   help="Half-width of the acceptable local hyperbolic-radius band")
-    p.add_argument("--w-v-tangent-barrier", type=float, default=0.01,
-                   help="Weight for the pre-squash tangent barrier on v_raw")
-    p.add_argument("--v-tangent-barrier-radius", type=float, default=0.9,
-                   help="Projected-radius threshold where the v_raw barrier activates")
+    p.add_argument(
+        "--w-confidence-calibration",
+        type=float,
+        default=0.05,
+        help="Align router confidence with per-sample reconstruction quality",
+    )
+    p.add_argument(
+        "--w-hard-routing-nll",
+        type=float,
+        default=0.5,
+        help="Sharpen the deterministic hard chart partition in score space",
+    )
+    p.add_argument(
+        "--w-router-margin",
+        type=float,
+        default=2.0,
+        help="Weight for enforcing a positive hard-routing score margin",
+    )
+    p.add_argument(
+        "--router-margin-target",
+        type=float,
+        default=0.05,
+        help="Minimum desired gap between the winning and runner-up chart scores",
+    )
+    p.add_argument(
+        "--radial-quality-alpha",
+        type=float,
+        default=2.0,
+        help="Sharpness of the reconstruction-quality target used by radial calibration",
+    )
+    p.add_argument(
+        "--radial-vq-alpha",
+        type=float,
+        default=1.0,
+        help="Sharpness of the VQ-quality target used by radial calibration",
+    )
+    p.add_argument(
+        "--radial-quality-rank-mix",
+        type=float,
+        default=0.75,
+        help="Blend from absolute error quality (0) to batch-rank quality (1)",
+    )
+    p.add_argument(
+        "--radial-recon-quality-weight",
+        type=float,
+        default=0.7,
+        help="Weight of reconstruction quality when combining recon and VQ targets",
+    )
+    p.add_argument(
+        "--radial-quality-mix",
+        type=float,
+        default=1.0,
+        help="Blend from confidence-only radial targets (0) to quality-gated targets (1)",
+    )
+    p.add_argument(
+        "--radial-quality-base-weight",
+        type=float,
+        default=0.0,
+        help="Optional quality-driven base shell weight (default off for theory-aligned runs)",
+    )
+    p.add_argument(
+        "--radial-calibration-rho-max",
+        type=float,
+        default=4.0,
+        help="Maximum hyperbolic radius assigned to confident, low-error samples",
+    )
+    p.add_argument(
+        "--radial-calibration-band-width",
+        type=float,
+        default=0.75,
+        help="Half-width of the acceptable local hyperbolic-radius band",
+    )
+    p.add_argument(
+        "--w-v-tangent-barrier",
+        type=float,
+        default=0.01,
+        help="Weight for the pre-squash tangent barrier on v_raw",
+    )
+    p.add_argument(
+        "--v-tangent-barrier-radius",
+        type=float,
+        default=0.9,
+        help="Projected-radius threshold where the v_raw barrier activates",
+    )
     p.add_argument("--w-codebook-spread", type=float, default=0.05)
     p.add_argument("--w-codebook-center", type=float, default=0.02)
-    p.add_argument("--w-chart-center-mean", type=float, default=0.02,
-                   help="Weight for tangent-space atlas barycenter anchoring")
-    p.add_argument("--w-chart-center-radius", type=float, default=0.05,
-                   help="Weight for hyperbolic safe-harbor radius regularization")
-    p.add_argument("--chart-center-radius-max", type=float, default=2.0,
-                   help="Maximum hyperbolic radius before chart centers are penalized")
-    p.add_argument("--w-chart-center-sep", type=float, default=0.02,
-                   help="Weight for hyperbolic chart-center separation")
-    p.add_argument("--chart-center-sep-margin", type=float, default=1.0,
-                   help="Minimum pairwise hyperbolic separation between chart centers")
-    p.add_argument("--w-chart-collapse", type=float, default=0.0,
-                   help="Deprecated; no longer part of the active Phase 1 stack")
-    p.add_argument("--w-code-collapse", type=float, default=0.5,
-                   help="Weight for hard/ST per-chart code-usage entropy band")
-    p.add_argument("--code-usage-h-low", type=float, default=None,
-                   help="Minimum per-chart code-usage entropy (None = auto from codes_per_chart)")
-    p.add_argument("--code-usage-h-high", type=float, default=None,
-                   help="Optional maximum per-chart code-usage entropy")
-    p.add_argument("--code-usage-temperature", type=float, default=1.0,
-                   help="Soft/ST temperature used for code-usage regularization")
+    p.add_argument(
+        "--w-chart-center-mean",
+        type=float,
+        default=0.02,
+        help="Weight for tangent-space atlas barycenter anchoring",
+    )
+    p.add_argument(
+        "--w-chart-center-radius",
+        type=float,
+        default=0.05,
+        help="Weight for hyperbolic safe-harbor radius regularization",
+    )
+    p.add_argument(
+        "--chart-center-radius-max",
+        type=float,
+        default=2.0,
+        help="Maximum hyperbolic radius before chart centers are penalized",
+    )
+    p.add_argument(
+        "--w-chart-center-sep",
+        type=float,
+        default=0.02,
+        help="Weight for hyperbolic chart-center separation",
+    )
+    p.add_argument(
+        "--chart-center-sep-margin",
+        type=float,
+        default=1.0,
+        help="Minimum pairwise hyperbolic separation between chart centers",
+    )
+    p.add_argument(
+        "--w-chart-collapse",
+        type=float,
+        default=0.0,
+        help="Deprecated; no longer part of the active Phase 1 stack",
+    )
+    p.add_argument(
+        "--w-code-collapse",
+        type=float,
+        default=0.5,
+        help="Weight for hard/ST per-chart code-usage entropy band",
+    )
+    p.add_argument(
+        "--code-usage-h-low",
+        type=float,
+        default=None,
+        help="Minimum per-chart code-usage entropy (None = auto from codes_per_chart)",
+    )
+    p.add_argument(
+        "--code-usage-h-high",
+        type=float,
+        default=None,
+        help="Optional maximum per-chart code-usage entropy",
+    )
+    p.add_argument(
+        "--code-usage-temperature",
+        type=float,
+        default=1.0,
+        help="Soft/ST temperature used for code-usage regularization",
+    )
     p.add_argument("--w-window", type=float, default=0.0)
     p.add_argument("--w-jump", type=float, default=0.0)
     p.add_argument("--w-jump-warmup", type=int, default=20)
     p.add_argument("--w-jump-ramp-end", type=int, default=50)
-    p.add_argument("--phase1-adaptive-multipliers", action=argparse.BooleanOptionalAction,
-                   default=True,
-                   help="Enable adaptive multipliers for Phase 1 routing losses")
-    p.add_argument("--phase1-multiplier-max", type=float, default=8.0,
-                   help="Maximum adaptive multiplier scale in Phase 1")
-    p.add_argument("--phase1-multiplier-decay", type=float, default=0.05,
-                   help="Relaxation rate back toward base weights when constraints are satisfied")
-    p.add_argument("--conf-target-top1", type=float, default=0.55,
-                   help="Target mean soft top-1 routing probability")
-    p.add_argument("--conf-multiplier-lr", type=float, default=1.5,
-                   help="Adaptive multiplier update rate for routing confidence")
-    p.add_argument("--chart-multiplier-lr", type=float, default=1.0,
-                   help="Adaptive multiplier update rate for hard chart usage")
-    p.add_argument("--chart-ot-i-target", type=float, default=0.35,
-                   help="Target soft mutual information for OT balancing pressure")
-    p.add_argument("--chart-ot-multiplier-lr", type=float, default=1.0,
-                   help="Adaptive multiplier update rate for OT chart balancing")
-    p.add_argument("--code-usage-gate-h", type=float, default=1.25,
-                   help="Enable code-usage pressure only after hard chart entropy exceeds this value")
-    p.add_argument("--code-usage-ramp-epochs", type=int, default=50,
-                   help="Epochs to ramp code-usage pressure after the chart gate opens")
-    p.add_argument("--code-multiplier-lr", type=float, default=0.5,
-                   help="Adaptive multiplier update rate for code usage")
+    p.add_argument(
+        "--phase1-adaptive-multipliers",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Enable adaptive multipliers for Phase 1 routing losses",
+    )
+    p.add_argument(
+        "--phase1-multiplier-max",
+        type=float,
+        default=8.0,
+        help="Maximum adaptive multiplier scale in Phase 1",
+    )
+    p.add_argument(
+        "--phase1-multiplier-decay",
+        type=float,
+        default=0.05,
+        help="Relaxation rate back toward base weights when constraints are satisfied",
+    )
+    p.add_argument(
+        "--conf-target-top1",
+        type=float,
+        default=0.55,
+        help="Target mean soft top-1 routing probability",
+    )
+    p.add_argument(
+        "--conf-multiplier-lr",
+        type=float,
+        default=1.5,
+        help="Adaptive multiplier update rate for routing confidence",
+    )
+    p.add_argument(
+        "--chart-multiplier-lr",
+        type=float,
+        default=1.0,
+        help="Adaptive multiplier update rate for hard chart usage",
+    )
+    p.add_argument(
+        "--chart-ot-i-target",
+        type=float,
+        default=0.35,
+        help="Target soft mutual information for OT balancing pressure",
+    )
+    p.add_argument(
+        "--chart-ot-multiplier-lr",
+        type=float,
+        default=1.0,
+        help="Adaptive multiplier update rate for OT chart balancing",
+    )
+    p.add_argument(
+        "--code-usage-gate-h",
+        type=float,
+        default=1.25,
+        help="Enable code-usage pressure only after hard chart entropy exceeds this value",
+    )
+    p.add_argument(
+        "--code-usage-ramp-epochs",
+        type=int,
+        default=50,
+        help="Epochs to ramp code-usage pressure after the chart gate opens",
+    )
+    p.add_argument(
+        "--code-multiplier-lr",
+        type=float,
+        default=0.5,
+        help="Adaptive multiplier update rate for code usage",
+    )
 
     args = p.parse_args()
     train_unsupervised(args)

@@ -1,8 +1,8 @@
 """Covariant geometric world model with geodesic Boris-BAOAB integration on the Poincare ball.
 
 Replaces the MLP-based sub-modules of the original GeometricWorldModel with
-covariant versions that use CovariantAttention from gauge.py, ensuring all
-force computations respect the Poincare geometry.
+hyperbolic covariant attention layers, ensuring all force computations
+respect the Poincare geometry.
 """
 
 from __future__ import annotations
@@ -14,11 +14,10 @@ from torch import nn
 import torch.nn.functional as F
 
 from fragile.core.layers.atlas import _project_to_ball
+from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
 from fragile.core.layers.gauge import (
     christoffel_contraction,
     ConformalMetric,
-    CovariantAttention,
-    GeodesicConfig,
     hyperbolic_distance,
     poincare_exp_map,
 )
@@ -50,7 +49,9 @@ def compute_risk_tensor(
         # F_ik F^k_j
         FF = torch.bmm(curl_tensor, F_up)  # [B, D, D]
         # Trace: F_kl F^kl
-        trace_FF = torch.diagonal(FF, dim1=-2, dim2=-1).sum(dim=-1, keepdim=True).unsqueeze(-1)  # [B, 1, 1]
+        trace_FF = (
+            torch.diagonal(FF, dim1=-2, dim2=-1).sum(dim=-1, keepdim=True).unsqueeze(-1)
+        )  # [B, 1, 1]
         D = force.shape[1]
         eye = torch.eye(D, device=force.device, dtype=force.dtype).unsqueeze(0)
         T_maxwell = FF - 0.25 * trace_FF * eye
@@ -74,7 +75,9 @@ class ActionTokenizer(nn.Module):
         self.pos_embed = nn.Parameter(torch.randn(action_dim, d_model) * 0.02)
 
     def forward(
-        self, action: torch.Tensor, z: torch.Tensor,
+        self,
+        action: torch.Tensor,
+        z: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize action into context tokens.
 
@@ -86,9 +89,8 @@ class ActionTokenizer(nn.Module):
             tokens_x: [B, A, d_model] feature tokens.
             tokens_z: [B, A, D] position tokens (all at z).
         """
-        tokens_x = (
-            action.unsqueeze(-1) * self.weight.unsqueeze(0)
-            + self.pos_embed.unsqueeze(0)
+        tokens_x = action.unsqueeze(-1) * self.weight.unsqueeze(0) + self.pos_embed.unsqueeze(
+            0
         )  # [B, A, d_model]
         tokens_z = z.unsqueeze(1).expand(-1, self.action_dim, -1).contiguous()  # [B, A, D]
         return tokens_x, tokens_z
@@ -106,7 +108,9 @@ class ChartTokenizer(nn.Module):
         self.chart_centers = nn.Parameter(centers)
 
     def forward(
-        self, rw: torch.Tensor, z: torch.Tensor,
+        self,
+        rw: torch.Tensor,
+        z: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Tokenize chart weights into context tokens.
 
@@ -188,7 +192,8 @@ class CovariantPotentialNet(nn.Module):
         self.psi_out = SpectralLinear(d_model, 1)
 
     def _analytic_U_and_grad(
-        self, z: torch.Tensor,
+        self,
+        z: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         r"""Analytic hyperbolic drive and its exact gradient.
 
@@ -204,7 +209,7 @@ class CovariantPotentialNet(nn.Module):
         """
         r = z.norm(dim=-1, keepdim=True).clamp(min=1e-6, max=1.0 - 1e-6)
         U = -2.0 * torch.atanh(r)  # [B, 1]
-        dU_dz = -2.0 * z / (r * (1.0 - r ** 2))  # [B, D]
+        dU_dz = -2.0 * z / (r * (1.0 - r**2))  # [B, D]
         return U, dU_dz
 
     def _value_features(
@@ -316,7 +321,9 @@ class CovariantPotentialNet(nn.Module):
         return self.task_value(z, rw)
 
     def force_and_potential(
-        self, z: torch.Tensor, rw: torch.Tensor,
+        self,
+        z: torch.Tensor,
+        rw: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Direct force prediction + scalar potential (no autograd).
 
@@ -356,7 +363,10 @@ class CovariantControlField(nn.Module):
         self.z_embed = SpectralLinear(latent_dim, d_model)
 
     def forward(
-        self, z: torch.Tensor, action: torch.Tensor, rw: torch.Tensor,
+        self,
+        z: torch.Tensor,
+        action: torch.Tensor,
+        rw: torch.Tensor,
     ) -> torch.Tensor:
         """Compute control force u_pi.
 
@@ -399,10 +409,12 @@ class CovariantValueCurl(nn.Module):
         self.z_embed = SpectralLinear(latent_dim, d_model)
 
         self.register_buffer(
-            "_tri_rows", torch.triu_indices(latent_dim, latent_dim, offset=1)[0],
+            "_tri_rows",
+            torch.triu_indices(latent_dim, latent_dim, offset=1)[0],
         )
         self.register_buffer(
-            "_tri_cols", torch.triu_indices(latent_dim, latent_dim, offset=1)[1],
+            "_tri_cols",
+            torch.triu_indices(latent_dim, latent_dim, offset=1)[1],
         )
 
     def forward(self, z: torch.Tensor, action: torch.Tensor) -> torch.Tensor:
@@ -456,7 +468,10 @@ class CovariantChartTarget(nn.Module):
         self.z_embed = SpectralLinear(latent_dim, d_model)
 
     def forward(
-        self, z: torch.Tensor, action: torch.Tensor, rw: torch.Tensor,
+        self,
+        z: torch.Tensor,
+        action: torch.Tensor,
+        rw: torch.Tensor,
     ) -> torch.Tensor:
         """Predict chart transition logits.
 
@@ -472,19 +487,22 @@ class CovariantChartTarget(nn.Module):
         chart_x, chart_z = self.chart_tok(rw, z)
 
         # Concatenate action + chart context tokens
-        ctx_x = torch.cat([act_x, chart_x], dim=1)   # [B, A+K, d_model]
-        ctx_z = torch.cat([act_z, chart_z], dim=1)    # [B, A+K, D]
+        ctx_x = torch.cat([act_x, chart_x], dim=1)  # [B, A+K, d_model]
+        ctx_z = torch.cat([act_z, chart_z], dim=1)  # [B, A+K, D]
 
         x_q = self.z_embed(z)
         output, _ = self.attn(z, ctx_z, x_q, ctx_x, ctx_x)
-        return self.out(output)                         # [B, K]
+        return self.out(output)  # [B, K]
 
 
 class CovariantJumpRate(nn.Module):
     """Predicts Poisson jump rate lambda(z, K) >= 0 using CovariantAttention."""
 
     def __init__(
-        self, latent_dim: int, num_charts: int, d_model: int,
+        self,
+        latent_dim: int,
+        num_charts: int,
+        d_model: int,
     ) -> None:
         super().__init__()
         self.chart_tok = ChartTokenizer(num_charts, d_model, latent_dim)
@@ -679,14 +697,18 @@ class GeometricWorldModel(nn.Module):
         # Metric
         if risk_metric_alpha > 0:
             from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+
             self.metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=risk_metric_alpha)
         else:
             self.metric = ConformalMetric()
 
         # Covariant sub-modules
         self.potential_net = CovariantPotentialNet(
-            latent_dim, num_charts, d_model,
-            alpha=alpha_potential, gamma_risk=gamma_risk,
+            latent_dim,
+            num_charts,
+            d_model,
+            alpha=alpha_potential,
+            gamma_risk=gamma_risk,
         )
         if self.control_dim == latent_dim:
             self.control_lift: nn.Module = nn.Identity()
@@ -698,7 +720,10 @@ class GeometricWorldModel(nn.Module):
             self.curl_net = None
 
         self.chart_predictor = CovariantChartTarget(
-            latent_dim, self.control_dim, num_charts, d_model,
+            latent_dim,
+            self.control_dim,
+            num_charts,
+            d_model,
         )
 
         # Initial momentum from position
@@ -769,14 +794,14 @@ class GeometricWorldModel(nn.Module):
         F = curl_F if curl_F is not None else self.curl_net(z, action)  # [B, D, D] antisymmetric
         if lambda_inv_sq is None:
             cf = self.metric.conformal_factor(z)  # [B, 1]
-            lambda_inv_sq = 1.0 / (cf ** 2 + self.metric.epsilon)  # [B, 1]
+            lambda_inv_sq = 1.0 / (cf**2 + self.metric.epsilon)  # [B, 1]
         T = (h / 2.0) * self.beta_curl * lambda_inv_sq.unsqueeze(-1) * F  # [B, D, D]
 
         # Boris half-rotation
         t_vec = torch.bmm(T, p_minus.unsqueeze(-1)).squeeze(-1)  # [B, D]
         p_prime = p_minus + t_vec
 
-        t_sq = (T ** 2).sum(dim=(-2, -1), keepdim=False)  # [B] Frobenius norm^2
+        t_sq = (T**2).sum(dim=(-2, -1), keepdim=False)  # [B] Frobenius norm^2
         s_factor = 2.0 / (1.0 + t_sq).unsqueeze(-1)  # [B, 1]
         s_vec = s_factor * torch.bmm(T, p_prime.unsqueeze(-1)).squeeze(-1)  # [B, D]
 
@@ -815,7 +840,7 @@ class GeometricWorldModel(nn.Module):
             hodge_info: Hodge decomposition diagnostics dict (may be empty).
         """
         h = self.dt
-        _use_risk = self.risk_metric_alpha > 0
+        use_risk = self.risk_metric_alpha > 0
 
         # --- B step (first half): momentum kick ---
         # Direct force prediction (cotangent vector, no autograd).
@@ -832,16 +857,14 @@ class GeometricWorldModel(nn.Module):
         # Compute risk tensor for metric adaptation
         risk_T = None
         lis_base = None  # lambda^{-2} at current z (base metric, no risk)
-        if _use_risk:
+        if use_risk:
             cf_base = self.metric.conformal_factor(z)  # [B, 1] -- base ConformalMetric
-            lis_base = 1.0 / (cf_base ** 2 + self.metric.epsilon)  # [B, 1]
+            lis_base = 1.0 / (cf_base**2 + self.metric.epsilon)  # [B, 1]
             risk_T = compute_risk_tensor(force, curl_F, lis_base)
 
         # ψ_F: smooth force squashing (1-Lipschitz, C∞, direction-preserving)
         if self.F_max > 0:
-            kick = self.F_max * kick / (
-                self.F_max + kick.norm(dim=-1, keepdim=True)
-            )
+            kick = self.F_max * kick / (self.F_max + kick.norm(dim=-1, keepdim=True))
 
         p_minus = p - (h / 2.0) * kick
         # pass pre-computed lambda_inv_sq (None in non-risk case, boris computes its own)
@@ -863,24 +886,22 @@ class GeometricWorldModel(nn.Module):
         p = p_plus - (h / 2.0) * kick
 
         # --- A step (first half): geodesic drift ---
-        if _use_risk:
+        if use_risk:
             cf = self.metric.conformal_factor(z, risk_tensor=risk_T)  # [B, 1]
         else:
             cf = self.metric.conformal_factor(z)  # [B, 1]
-        lambda_inv_sq = 1.0 / (cf ** 2 + self.metric.epsilon)  # [B, 1]
+        lambda_inv_sq = 1.0 / (cf**2 + self.metric.epsilon)  # [B, 1]
         v = lambda_inv_sq * p  # [B, D] contravariant velocity
         geo_corr = christoffel_contraction(z, v)
         v_corr = v - (h / 4.0) * geo_corr
         # ψ_v: smooth velocity squashing (V_alg = ℓ_min / Δt)
         if self.V_alg > 0:
-            v_corr = self.V_alg * v_corr / (
-                self.V_alg + v_corr.norm(dim=-1, keepdim=True)
-            )
+            v_corr = self.V_alg * v_corr / (self.V_alg + v_corr.norm(dim=-1, keepdim=True))
         z = poincare_exp_map(z, (h / 2.0) * v_corr)
         z = _project_to_ball(z)
 
         # --- O step: Ornstein-Uhlenbeck thermostat ---
-        if _use_risk:
+        if use_risk:
             cf = self.metric.conformal_factor(z, risk_tensor=risk_T)  # [B, 1]
         else:
             cf = self.metric.conformal_factor(z)  # [B, 1]
@@ -892,18 +913,16 @@ class GeometricWorldModel(nn.Module):
         p = self.c1 * p + self.c2 * cf * xi
 
         # --- A step (second half): geodesic drift ---
-        if _use_risk:
+        if use_risk:
             cf = self.metric.conformal_factor(z, risk_tensor=risk_T)  # [B, 1]
         else:
             cf = self.metric.conformal_factor(z)  # [B, 1]
-        lambda_inv_sq = 1.0 / (cf ** 2 + self.metric.epsilon)  # [B, 1]
+        lambda_inv_sq = 1.0 / (cf**2 + self.metric.epsilon)  # [B, 1]
         v = lambda_inv_sq * p  # [B, D] contravariant velocity
         geo_corr = christoffel_contraction(z, v)
         v_corr = v - (h / 4.0) * geo_corr
         if self.V_alg > 0:
-            v_corr = self.V_alg * v_corr / (
-                self.V_alg + v_corr.norm(dim=-1, keepdim=True)
-            )
+            v_corr = self.V_alg * v_corr / (self.V_alg + v_corr.norm(dim=-1, keepdim=True))
         z = poincare_exp_map(z, (h / 2.0) * v_corr)
         z = _project_to_ball(z)
 
@@ -913,9 +932,7 @@ class GeometricWorldModel(nn.Module):
         kick2 = force2 - u_pi2
 
         if self.F_max > 0:
-            kick2 = self.F_max * kick2 / (
-                self.F_max + kick2.norm(dim=-1, keepdim=True)
-            )
+            kick2 = self.F_max * kick2 / (self.F_max + kick2.norm(dim=-1, keepdim=True))
 
         p = p - (h / 2.0) * kick2
 
@@ -927,7 +944,9 @@ class GeometricWorldModel(nn.Module):
 
     @torch.no_grad()
     def _boltzmann_chart_logits(
-        self, z: torch.Tensor, rw: torch.Tensor,
+        self,
+        z: torch.Tensor,
+        rw: torch.Tensor,
     ) -> torch.Tensor:
         """Value-driven Boltzmann logits for chart selection.
 
@@ -1006,9 +1025,9 @@ class GeometricWorldModel(nn.Module):
         # Boltzmann logits for actual jump decision
         boltz_logits = self._boltzmann_chart_logits(z, rw)
 
-        current_chart = rw.argmax(dim=-1)           # [B]
-        target_chart = boltz_logits.argmax(dim=-1)   # [B]
-        jumped = current_chart != target_chart       # [B]
+        current_chart = rw.argmax(dim=-1)  # [B]
+        target_chart = boltz_logits.argmax(dim=-1)  # [B]
+        jumped = current_chart != target_chart  # [B]
 
         if jumped.any():
             centers = self.chart_predictor.chart_tok.chart_centers  # [K, D]
@@ -1087,8 +1106,8 @@ class GeometricWorldModel(nn.Module):
         self.c2 = orig_c2
 
         return {
-            "z_traj": torch.stack(z_traj, dim=1),      # [B, N+1, D]
-            "p_traj": torch.stack(p_traj, dim=1),      # [B, N+1, D]
+            "z_traj": torch.stack(z_traj, dim=1),  # [B, N+1, D]
+            "p_traj": torch.stack(p_traj, dim=1),  # [B, N+1, D]
             "phi_eff": torch.stack(phi_eff_list, dim=1),  # [B, N, 1]
             "hodge_info": last_hodge_info,
         }
@@ -1122,9 +1141,9 @@ class GeometricWorldModel(nn.Module):
             z, p, phi_eff, hodge_info = self._baoab_step(z, p, action_canonical, rw)
 
             if energy_substeps is not None:
-                r_sq = (z ** 2).sum(dim=-1, keepdim=True)
+                r_sq = (z**2).sum(dim=-1, keepdim=True)
                 g_inv = ((1.0 - r_sq).clamp(min=1e-6) / 2.0) ** 2
-                p_sq = (p ** 2).sum(dim=-1, keepdim=True)
+                p_sq = (p**2).sum(dim=-1, keepdim=True)
                 H_s = phi_eff + 0.5 * g_inv * p_sq
                 energy_substeps[:, s] = H_s.squeeze(-1)
 

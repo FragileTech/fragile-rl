@@ -3,14 +3,12 @@
 from __future__ import annotations
 
 import argparse
-import os
-import sys
 from dataclasses import asdict, fields
+import os
 
 import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
-from tqdm import tqdm
 
 from fragile.core.layers import TopoEncoderPrimitives
 from fragile.core.layers.topology import FactorizedJumpOperator
@@ -20,17 +18,22 @@ from fragile.hyperbolic_losses import (
 )
 
 from .config import VLAConfig
+from .covariant_world_model import GeometricWorldModel
 from .extract_features import VLAFeatureDataset
 from .losses import (
-    compute_phase1_loss, compute_phase2_loss, compute_phase3_loss,
-    compute_phase2_geodesic_diffusion_loss,
+    compute_dyn_transition_loss,
     compute_dynamics_markov_loss,
-    orthogonality_loss, EnclosureProbe, compute_enclosure_loss, grl_alpha_schedule,
+    compute_enclosure_loss,
+    compute_phase1_loss,
+    compute_phase2_geodesic_diffusion_loss,
+    compute_phase2_loss,
+    DynamicsTransitionModel,
+    EnclosureProbe,
+    grl_alpha_schedule,
+    orthogonality_loss,
     zeno_loss,
-    DynamicsTransitionModel, compute_dyn_transition_loss,
 )
 from .optim import build_encoder_param_groups, get_codebook_like_params
-from .covariant_world_model import GeometricWorldModel
 
 
 # ---------------------------------------------------------------------------
@@ -65,19 +68,11 @@ def _save_checkpoint(
             if world_model is not None
             else None
         ),
-        "optimizers": {
-            name: opt.state_dict() for name, opt in optimizers.items()
-        },
+        "optimizers": {name: opt.state_dict() for name, opt in optimizers.items()},
         "probe": (
-            {k: v.cpu() for k, v in probe.state_dict().items()}
-            if probe is not None
-            else None
+            {k: v.cpu() for k, v in probe.state_dict().items()} if probe is not None else None
         ),
-        "probe_optimizer": (
-            probe_optimizer.state_dict()
-            if probe_optimizer is not None
-            else None
-        ),
+        "probe_optimizer": (probe_optimizer.state_dict() if probe_optimizer is not None else None),
         "dyn_trans_model": (
             {k: v.cpu() for k, v in dyn_trans_model.state_dict().items()}
             if dyn_trans_model is not None
@@ -153,19 +148,34 @@ def _run_phase1(
 
             # Forward through encoder
             (
-                x_recon, vq_loss, enc_router_weights, dec_router_weights,
-                K_chart, z_geo, z_n, c_bar, aux_losses,
+                x_recon,
+                vq_loss,
+                enc_router_weights,
+                dec_router_weights,
+                _K_chart,
+                z_geo,
+                _z_n,
+                _c_bar,
+                _aux_losses,
             ) = encoder(x)
             inner_enc = encoder.encoder if hasattr(encoder, "encoder") else encoder
             router_reg_weights = getattr(
-                inner_enc, "_last_soft_router_weights_live", enc_router_weights,
+                inner_enc,
+                "_last_soft_router_weights_live",
+                enc_router_weights,
             )
             v_local = getattr(inner_enc, "_last_v_local", None)
 
             # Phase 1 loss
             base_loss, zn_reg_loss, metrics = compute_phase1_loss(
-                x, x_recon, vq_loss, enc_router_weights, dec_router_weights,
-                z_geo, encoder, config,
+                x,
+                x_recon,
+                vq_loss,
+                enc_router_weights,
+                dec_router_weights,
+                z_geo,
+                encoder,
+                config,
                 router_reg_weights=router_reg_weights,
                 v_local=v_local,
             )
@@ -173,13 +183,15 @@ def _run_phase1(
 
             # Inner encoder call for z_n/z_tex (orthogonality) and jump
             jump_w = get_jump_weight_schedule(
-                epoch, warmup_end=config.w_jump_warmup,
-                ramp_end=config.w_jump_ramp_end, final_weight=config.w_jump,
+                epoch,
+                warmup_end=config.w_jump_warmup,
+                ramp_end=config.w_jump_ramp_end,
+                final_weight=config.w_jump,
             )
             if (config.w_perp > 0 or jump_w > 0) and hasattr(encoder, "encoder"):
                 enc_out = encoder.encoder(x)
-                z_n_enc = enc_out[2]       # z_n
-                z_tex_enc = enc_out[3]     # z_tex
+                z_n_enc = enc_out[2]  # z_n
+                z_tex_enc = enc_out[3]  # z_tex
                 z_n_all_charts = enc_out[8]
 
                 # Orthogonality loss
@@ -191,7 +203,9 @@ def _run_phase1(
                 # Jump consistency loss (with warmup schedule)
                 if jump_w > 0:
                     loss_jump = compute_jump_consistency_loss_hyp(
-                        jump_op, z_n_all_charts, enc_router_weights,
+                        jump_op,
+                        z_n_all_charts,
+                        enc_router_weights,
                     )
                     loss = loss + jump_w * loss_jump
                     metrics["jump"] = loss_jump.item()
@@ -216,11 +230,19 @@ def _run_phase1(
 
         if config.save_every > 0 and epoch % config.save_every == 0:
             ckpt_path = os.path.join(
-                config.output_dir, f"checkpoint_p1_e{epoch:04d}.pt",
+                config.output_dir,
+                f"checkpoint_p1_e{epoch:04d}.pt",
             )
             _save_checkpoint(
-                ckpt_path, encoder, jump_op, None,
-                {"encoder_jump": optimizer}, epoch, 1, config, last_metrics,
+                ckpt_path,
+                encoder,
+                jump_op,
+                None,
+                {"encoder_jump": optimizer},
+                epoch,
+                1,
+                config,
+                last_metrics,
             )
 
     return last_metrics
@@ -250,9 +272,9 @@ def _run_phase2(
         p.requires_grad_(False)
 
     # Dynamics codebook
-    dyn_codes = getattr(config, 'dyn_codes_per_chart', 0)
+    dyn_codes = getattr(config, "dyn_codes_per_chart", 0)
     dyn_trans_model = None
-    inner_enc = encoder.encoder if hasattr(encoder, 'encoder') else encoder
+    inner_enc = encoder.encoder if hasattr(encoder, "encoder") else encoder
     if dyn_codes > 0 and inner_enc is not None and inner_enc.codebook_dyn is not None:
         inner_enc.codebook_dyn.requires_grad_(True)
         dyn_trans_model = DynamicsTransitionModel(
@@ -260,9 +282,9 @@ def _run_phase2(
             action_dim=config.action_dim,
             num_charts=config.num_charts,
             dyn_codes_per_chart=dyn_codes,
-            hidden_dim=getattr(config, 'dyn_transition_hidden_dim', 128),
+            hidden_dim=getattr(config, "dyn_transition_hidden_dim", 128),
         ).to(device)
-        lr_dyn = getattr(config, 'lr_dyn_codebook', 1e-3)
+        lr_dyn = getattr(config, "lr_dyn_codebook", 1e-3)
         optimizer = optim.Adam([
             {"params": world_model.parameters(), "lr": config.lr_wm},
             {"params": [inner_enc.codebook_dyn], "lr": lr_dyn},
@@ -285,7 +307,7 @@ def _run_phase2(
                 features = batch["features"].to(device)  # [B, H, D_feat]
                 actions = batch["actions"].to(device)  # [B, H, A]
 
-                B, H, _ = features.shape
+                _B, H, _ = features.shape
 
                 # Encode all frames with the frozen Phase-1 atlas.
                 with torch.no_grad():
@@ -296,8 +318,15 @@ def _run_phase2(
                     c_bar_list = []
                     for t in range(H):
                         (
-                            _x_recon, _vq_loss, enc_rw, _dec_rw,
-                            K_chart, z_geo, _z_n, c_bar, _aux,
+                            _x_recon,
+                            _vq_loss,
+                            enc_rw,
+                            _dec_rw,
+                            K_chart,
+                            z_geo,
+                            _z_n,
+                            c_bar,
+                            _aux,
                         ) = encoder(features[:, t, :])
                         z_list.append(z_geo)
                         rw_list.append(enc_rw)
@@ -319,7 +348,12 @@ def _run_phase2(
 
                 if getattr(config, "use_geodesic_diffusion", False):
                     loss, metrics = compute_phase2_geodesic_diffusion_loss(
-                        world_model, z_all, rw_all, K_all, actions, config,
+                        world_model,
+                        z_all,
+                        rw_all,
+                        K_all,
+                        actions,
+                        config,
                     )
                 else:
                     pred_actions = actions[:, :-1, :]  # [B, H-1, A]
@@ -327,7 +361,10 @@ def _run_phase2(
                     chart_targets = K_all[:, 1:]  # [B, H-1]
                     wm_output = world_model(z_0, pred_actions, rw_0)
                     loss, metrics = compute_phase2_loss(
-                        wm_output, z_targets, chart_targets, config,
+                        wm_output,
+                        z_targets,
+                        chart_targets,
+                        config,
                     )
 
                 if (
@@ -361,7 +398,7 @@ def _run_phase2(
                 if config.grad_clip > 0:
                     all_params = list(world_model.parameters())
                     if dyn_trans_model is not None:
-                        all_params += [inner_enc.codebook_dyn] + list(dyn_trans_model.parameters())
+                        all_params += [inner_enc.codebook_dyn, *list(dyn_trans_model.parameters())]
                     nn.utils.clip_grad_norm_(all_params, config.grad_clip)
                 optimizer.step()
 
@@ -382,13 +419,22 @@ def _run_phase2(
 
             if config.save_every > 0 and epoch % config.save_every == 0:
                 ckpt_path = os.path.join(
-                    config.output_dir, f"checkpoint_p2_e{epoch:04d}.pt",
+                    config.output_dir,
+                    f"checkpoint_p2_e{epoch:04d}.pt",
                 )
                 _save_checkpoint(
-                    ckpt_path, encoder, FactorizedJumpOperator(
-                        config.num_charts, config.latent_dim,
-                    ), world_model,
-                    {"wm": optimizer}, epoch, 2, config, last_metrics,
+                    ckpt_path,
+                    encoder,
+                    FactorizedJumpOperator(
+                        config.num_charts,
+                        config.latent_dim,
+                    ),
+                    world_model,
+                    {"wm": optimizer},
+                    epoch,
+                    2,
+                    config,
+                    last_metrics,
                     dyn_trans_model=dyn_trans_model,
                 )
     finally:
@@ -425,13 +471,18 @@ def _run_phase3(
         )
     )
     optimizer_wm = optim.Adam(
-        world_model.parameters(), lr=config.lr_joint_wm,
+        world_model.parameters(),
+        lr=config.lr_joint_wm,
     )
 
     # Codebook dynamics optimizer (Option D)
-    w_codebook_dynamics = getattr(config, 'w_codebook_dynamics', 0.0)
+    w_codebook_dynamics = getattr(config, "w_codebook_dynamics", 0.0)
     optimizer_cb = None
-    if w_codebook_dynamics > 0 and hasattr(encoder, 'encoder') and hasattr(encoder.encoder, 'codebook'):
+    if (
+        w_codebook_dynamics > 0
+        and hasattr(encoder, "encoder")
+        and hasattr(encoder.encoder, "codebook")
+    ):
         cb_params = get_codebook_like_params(encoder)
         optimizer_cb = optim.Adam(
             cb_params,
@@ -452,7 +503,8 @@ def _run_phase3(
             alpha=0.0,
         ).to(device)
         probe_optimizer = torch.optim.Adam(
-            probe.parameters(), lr=config.enclosure_probe_lr,
+            probe.parameters(),
+            lr=config.enclosure_probe_lr,
         )
 
     last_metrics: dict[str, float] = {}
@@ -468,7 +520,7 @@ def _run_phase3(
             features = batch["features"].to(device)  # [B, H, D_feat]
             actions = batch["actions"].to(device)  # [B, H, A]
 
-            B, H, D_feat = features.shape
+            _B, H, _D_feat = features.shape
 
             # Encode all frames (with gradients) using inner encoder
             z_list = []
@@ -515,29 +567,38 @@ def _run_phase3(
 
                 if t == 0:
                     # Decoder for reconstruction loss (z_tex not used)
-                    x_recon_0, dec_rw_0, _ = encoder.decoder(z_geo_t, None)
+                    x_recon_0, dec_rw_0, _ = encoder.decoder(z_geo_t)
                     vq_loss_0 = vq_loss_t
                     enc_rw_0 = enc_rw_t
                     z_geo_0 = z_geo_t
                     z_n_0 = z_n_t
                     z_tex_0 = z_tex_t
                     router_reg_w_0 = getattr(
-                        encoder.encoder, "_last_soft_router_weights_live", enc_rw_t,
+                        encoder.encoder,
+                        "_last_soft_router_weights_live",
+                        enc_rw_t,
                     )
                     v_local_0 = v_local_t
 
             z_all = torch.stack(z_list, dim=1)
             K_all = torch.stack(K_list, dim=1)
             Kcode_all = torch.stack(Kcode_list, dim=1)  # [B, H]
-            zn_all = torch.stack(zn_list, dim=1)       # [B, H, D]
-            ztex_all = torch.stack(ztex_list, dim=1)   # [B, H, D]
+            torch.stack(zn_list, dim=1)  # [B, H, D]
+            ztex_all = torch.stack(ztex_list, dim=1)  # [B, H, D]
             c_bar_all = torch.stack(c_bar_list, dim=1)  # [B, H, D]
 
             # Encoder-side losses
             from .losses import compute_phase1_loss as _p1_loss
+
             base_enc, zn_reg, enc_metrics = _p1_loss(
-                features[:, 0, :], x_recon_0, vq_loss_0,
-                enc_rw_0, dec_rw_0, z_geo_0, encoder, config,
+                features[:, 0, :],
+                x_recon_0,
+                vq_loss_0,
+                enc_rw_0,
+                dec_rw_0,
+                z_geo_0,
+                encoder,
+                config,
                 router_reg_weights=router_reg_w_0,
                 v_local=v_local_0,
             )
@@ -557,8 +618,7 @@ def _run_phase3(
                 rw_all = torch.stack(rw_list, dim=1)  # [B, H, N_c]
                 zeno_losses = []
                 for t in range(1, H):
-                    zeno_t = zeno_loss(rw_all[:, t], rw_all[:, t - 1],
-                                       mode=config.zeno_mode)
+                    zeno_t = zeno_loss(rw_all[:, t], rw_all[:, t - 1], mode=config.zeno_mode)
                     zeno_losses.append(zeno_t)
                 L_zeno = torch.stack(zeno_losses).mean()
                 metrics["enc/zeno"] = L_zeno.item()
@@ -575,18 +635,23 @@ def _run_phase3(
             L_encl_probe = None
             if probe is not None:
                 global_step = epoch * len(seq_loader) + n_batches
-                probe.grl.alpha.fill_(grl_alpha_schedule(
-                    global_step,
-                    warmup_steps=config.enclosure_grl_warmup_steps,
-                    max_alpha=config.enclosure_grl_max_alpha,
-                ))
+                probe.grl.alpha.fill_(
+                    grl_alpha_schedule(
+                        global_step,
+                        warmup_steps=config.enclosure_grl_warmup_steps,
+                        max_alpha=config.enclosure_grl_max_alpha,
+                    )
+                )
 
                 encl_enc_losses = []
                 encl_probe_losses = []
                 for t in range(H - 1):
                     le, lp, encl_diag = compute_enclosure_loss(
-                        probe, c_bar_all[:, t], actions[:, t],
-                        ztex_all[:, t], K_all[:, t + 1],
+                        probe,
+                        c_bar_all[:, t],
+                        actions[:, t],
+                        ztex_all[:, t],
+                        K_all[:, t + 1],
                         K_code_t=Kcode_all[:, t],
                         K_code_tp1=Kcode_all[:, t + 1],
                         codes_per_chart=config.codes_per_chart,
@@ -602,10 +667,7 @@ def _run_phase3(
 
             # --- Encoder step (WM frozen) ---
             optimizer_enc.zero_grad()
-            L_enc = (
-                config.phase3_encoder_scale * base_enc
-                + config.phase3_zn_reg_scale * zn_reg
-            )
+            L_enc = config.phase3_encoder_scale * base_enc + config.phase3_zn_reg_scale * zn_reg
             if L_encl_encoder is not None:
                 L_enc = L_enc + config.w_enclosure * L_encl_encoder
             if config.w_perp > 0:
@@ -626,7 +688,12 @@ def _run_phase3(
 
             if getattr(config, "use_geodesic_diffusion", False):
                 dyn_loss, dyn_metrics = compute_phase2_geodesic_diffusion_loss(
-                    world_model, z_all_det, rw_all_det, K_all_det, actions, config,
+                    world_model,
+                    z_all_det,
+                    rw_all_det,
+                    K_all_det,
+                    actions,
+                    config,
                 )
             else:
                 pred_actions = actions[:, :-1, :]
@@ -635,7 +702,10 @@ def _run_phase3(
                 rw_0 = rw_all_det[:, 0]
                 wm_output = world_model(z_all_det[:, 0], pred_actions, rw_0)
                 dyn_loss, dyn_metrics = compute_phase2_loss(
-                    wm_output, z_targets, chart_targets, config,
+                    wm_output,
+                    z_targets,
+                    chart_targets,
+                    config,
                 )
 
             (config.phase3_dynamics_scale * dyn_loss).backward()
@@ -656,10 +726,13 @@ def _run_phase3(
             if optimizer_cb is not None and H > 1:
                 from fragile.core.layers.atlas import _project_to_ball, mobius_add
                 from fragile.core.layers.gauge import hyperbolic_distance as _hyp_dist
+
                 optimizer_cb.zero_grad()
                 zq_blended_all = torch.stack(zq_blended_list, dim=1)  # [B, H, D]
                 c_bar_all_t = torch.stack(c_bar_list, dim=1)  # [B, H, D]
-                z_coarse_0 = _project_to_ball(mobius_add(c_bar_all_t[:, 0].detach(), zq_blended_all[:, 0]))
+                z_coarse_0 = _project_to_ball(
+                    mobius_add(c_bar_all_t[:, 0].detach(), zq_blended_all[:, 0])
+                )
                 rw_0_cb = rw_list[0].detach()
                 with torch.no_grad():
                     for p in world_model.parameters():
@@ -681,7 +754,8 @@ def _run_phase3(
                     K_code_dyn_list_p3 = []
                     for t in range(H):
                         _, K_code_dyn_t, _, vq_dyn_t = encoder.encoder.dynamics_vq(
-                            v_local_all_p3[:, t], rw_all_p3[:, t],
+                            v_local_all_p3[:, t],
+                            rw_all_p3[:, t],
                         )
                         vq_dyn_losses_p3.append(vq_dyn_t)
                         K_code_dyn_list_p3.append(K_code_dyn_t)
@@ -700,7 +774,7 @@ def _run_phase3(
                         )
                         trans_losses_p3.append(t_loss)
                     trans_loss_p3 = torch.stack(trans_losses_p3).mean()
-                    w_dyn_transition = getattr(config, 'w_dyn_transition', 0.5)
+                    w_dyn_transition = getattr(config, "w_dyn_transition", 0.5)
                     L_dyn_cb_extra = vq_dyn_loss_p3 + w_dyn_transition * trans_loss_p3
                     L_dyn_cb_extra.backward()
 
@@ -725,12 +799,21 @@ def _run_phase3(
 
         if config.save_every > 0 and epoch % config.save_every == 0:
             ckpt_path = os.path.join(
-                config.output_dir, f"checkpoint_p3_e{epoch:04d}.pt",
+                config.output_dir,
+                f"checkpoint_p3_e{epoch:04d}.pt",
             )
             _save_checkpoint(
-                ckpt_path, encoder, jump_op, world_model,
-                {"enc": optimizer_enc, "wm": optimizer_wm}, epoch, 3, config, last_metrics,
-                probe=probe, probe_optimizer=probe_optimizer,
+                ckpt_path,
+                encoder,
+                jump_op,
+                world_model,
+                {"enc": optimizer_enc, "wm": optimizer_wm},
+                epoch,
+                3,
+                config,
+                last_metrics,
+                probe=probe,
+                probe_optimizer=probe_optimizer,
                 dyn_trans_model=dyn_trans_model,
             )
 
@@ -828,14 +911,19 @@ def train_vla(config: VLAConfig) -> dict:
     n_enc = sum(p.numel() for p in encoder.parameters())
     n_jump = sum(p.numel() for p in jump_op.parameters())
     n_wm = sum(p.numel() for p in world_model.parameters())
-    print(f"Parameters: encoder={n_enc:,}  jump={n_jump:,}  wm={n_wm:,}  total={n_enc+n_jump+n_wm:,}")
+    print(
+        f"Parameters: encoder={n_enc:,}  jump={n_jump:,}  wm={n_wm:,}  total={n_enc + n_jump + n_wm:,}"
+    )
 
     # --- Data loaders ---
     print(f"Loading features from {config.feature_cache_dir} …")
 
     single_ds = VLAFeatureDataset(config.feature_cache_dir, sequence_length=1, split="train")
     single_loader = DataLoader(
-        single_ds, batch_size=config.batch_size, shuffle=True, drop_last=True,
+        single_ds,
+        batch_size=config.batch_size,
+        shuffle=True,
+        drop_last=True,
     )
 
     seq_ds = VLAFeatureDataset(
@@ -844,7 +932,10 @@ def train_vla(config: VLAConfig) -> dict:
         split="train",
     )
     seq_loader = DataLoader(
-        seq_ds, batch_size=config.batch_size, shuffle=True, drop_last=True,
+        seq_ds,
+        batch_size=config.batch_size,
+        shuffle=True,
+        drop_last=True,
     )
 
     results: dict[str, dict] = {}
@@ -858,7 +949,11 @@ def train_vla(config: VLAConfig) -> dict:
     print("Phase 1: Encoder training")
     print("=" * 60)
     results["phase1"] = _run_phase1(
-        encoder, jump_op, single_loader, config, mlflow_enabled,
+        encoder,
+        jump_op,
+        single_loader,
+        config,
+        mlflow_enabled,
     )
 
     # --- Phase 2: World model training (encoder frozen) ---
@@ -866,7 +961,11 @@ def train_vla(config: VLAConfig) -> dict:
     print("Phase 2: World model training (encoder frozen)")
     print("=" * 60)
     p2_result = _run_phase2(
-        encoder, world_model, seq_loader, config, mlflow_enabled,
+        encoder,
+        world_model,
+        seq_loader,
+        config,
+        mlflow_enabled,
     )
     if isinstance(p2_result, tuple):
         results["phase2"], dyn_trans_model_p2 = p2_result
@@ -878,15 +977,27 @@ def train_vla(config: VLAConfig) -> dict:
     print("Phase 3: Joint fine-tuning")
     print("=" * 60)
     results["phase3"], probe = _run_phase3(
-        encoder, jump_op, world_model, seq_loader, config, mlflow_enabled,
+        encoder,
+        jump_op,
+        world_model,
+        seq_loader,
+        config,
+        mlflow_enabled,
         dyn_trans_model=dyn_trans_model_p2,
     )
 
     # Save final checkpoint
     final_path = os.path.join(config.output_dir, "checkpoint_final.pt")
     _save_checkpoint(
-        final_path, encoder, jump_op, world_model,
-        {}, 0, 3, config, results.get("phase3"),
+        final_path,
+        encoder,
+        jump_op,
+        world_model,
+        {},
+        0,
+        3,
+        config,
+        results.get("phase3"),
         probe=probe,
         dyn_trans_model=dyn_trans_model_p2,
     )
@@ -895,6 +1006,7 @@ def train_vla(config: VLAConfig) -> dict:
     if mlflow_enabled:
         try:
             import mlflow
+
             mlflow.end_run()
         except ImportError:
             pass
@@ -914,13 +1026,13 @@ def main() -> None:
     # Add all VLAConfig fields as CLI arguments
     import dataclasses
 
-    _MISSING = dataclasses.MISSING
+    MISSING = dataclasses.MISSING
     for f in fields(VLAConfig):
-        default = f.default if f.default is not _MISSING else None
+        default = f.default if f.default is not MISSING else None
         if f.type is bool:
             parser.add_argument(
                 f"--{f.name}",
-                type=lambda x: x.lower() in ("true", "1", "yes"),
+                type=lambda x: x.lower() in {"true", "1", "yes"},
                 default=default,
                 help=f"{f.name} (default: {default})",
             )

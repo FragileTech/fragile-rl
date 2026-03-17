@@ -48,7 +48,9 @@ class SequenceReplayBuffer:
             self._total_windows -= int(removed_starts.size)
 
     def sample(
-        self, batch_size: int, device: torch.device | str = "cpu",
+        self,
+        batch_size: int,
+        device: torch.device | str = "cpu",
     ) -> dict[str, torch.Tensor]:
         """Sample a batch of sub-sequences.
 
@@ -113,7 +115,9 @@ class SequenceReplayBuffer:
         action_router_shape, action_router_dtype = _shape_and_dtype("action_router_weights")
         action_chart_shape, action_chart_dtype = _shape_and_dtype("action_charts")
         action_code_shape, action_code_dtype = _shape_and_dtype("action_codes")
-        action_code_latent_shape, action_code_latent_dtype = _shape_and_dtype("action_code_latents")
+        action_code_latent_shape, action_code_latent_dtype = _shape_and_dtype(
+            "action_code_latents"
+        )
 
         action_mean_batch = None
         if action_mean_shape is not None and action_mean_dtype is not None:
@@ -168,7 +172,9 @@ class SequenceReplayBuffer:
             rew_batch[row, :length] = episode["rewards"][sl]
             done_batch[row, :length] = episode["dones"][sl]
             if action_mean_batch is not None:
-                action_mean_batch[row, :length] = episode.get("action_means", episode["actions"])[sl]
+                action_mean_batch[row, :length] = episode.get("action_means", episode["actions"])[
+                    sl
+                ]
             if action_latent_batch is not None and "action_latents" in episode:
                 action_latent_batch[row, :length] = episode["action_latents"][sl]
             if action_router_batch is not None and "action_router_weights" in episode:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import torch
 from torch import nn
 
-from fragile.core.layers.gauge import CovariantAttention, GeodesicConfig
+from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
 from fragile.core.layers.primitives import SpectralLinear
 from fragile.vla.covariant_world_model import ChartTokenizer
 

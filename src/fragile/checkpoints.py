@@ -2,6 +2,7 @@
 
 import math
 import os
+import pathlib
 import tempfile
 
 import numpy as np
@@ -18,16 +19,16 @@ def _atomic_save(obj: object, path: str) -> None:
     try:
         os.close(fd)
         torch.save(obj, tmp_path)
-        size = os.path.getsize(tmp_path)
+        size = pathlib.Path(tmp_path).stat().st_size
         if size == 0:
             raise RuntimeError(
                 f"torch.save produced 0-byte file for {path}. "
                 "Check that all objects in the checkpoint are picklable."
             )
-        os.replace(tmp_path, path)
+        pathlib.Path(tmp_path).replace(path)
     except BaseException:
         if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
+            pathlib.Path(tmp_path).unlink()
         raise
 
 
