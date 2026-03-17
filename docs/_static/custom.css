@@ -1,0 +1,424 @@
+/* =============================================================================
+   Fragile Docs - Expert Mode Toggle Styles
+   =============================================================================
+   This stylesheet provides styling for the Feynman prose blocks and the
+   expert-mode toggle functionality.
+   ============================================================================= */
+
+/* -----------------------------------------------------------------------------
+   Feynman Prose Blocks - Base Styles
+   ----------------------------------------------------------------------------- */
+
+.feynman-prose {
+    padding-left: 1.2em;
+    margin: 1.2em 0;
+}
+
+.feynman-prose p {
+    margin-bottom: 0.8em;
+}
+
+.feynman-prose p:last-child {
+    margin-bottom: 0;
+}
+
+/* -----------------------------------------------------------------------------
+   Light Mode (default)
+   ----------------------------------------------------------------------------- */
+
+html[data-theme="light"] .feynman-prose,
+html:not([data-theme]) .feynman-prose {
+    border-left: 2px solid rgba(120, 120, 120, 0.25);
+    color: #000 !important;
+    background: none;
+}
+
+html[data-theme="light"] .feynman-prose p,
+html[data-theme="light"] .feynman-prose span,
+html[data-theme="light"] .feynman-prose em,
+html[data-theme="light"] .feynman-prose strong,
+html:not([data-theme]) .feynman-prose p,
+html:not([data-theme]) .feynman-prose span,
+html:not([data-theme]) .feynman-prose em,
+html:not([data-theme]) .feynman-prose strong {
+    color: #000 !important;
+}
+
+/* -----------------------------------------------------------------------------
+   Dark Mode
+   ----------------------------------------------------------------------------- */
+
+html[data-theme="dark"] .feynman-prose {
+    border-left: 2px solid rgba(180, 180, 180, 0.3);
+    color: #e0e0e0 !important;
+    background: none;
+}
+
+html[data-theme="dark"] .feynman-prose p,
+html[data-theme="dark"] .feynman-prose span,
+html[data-theme="dark"] .feynman-prose em,
+html[data-theme="dark"] .feynman-prose strong {
+    color: #e0e0e0 !important;
+}
+
+/* Fallback for prefers-color-scheme (if theme attribute not set) */
+@media (prefers-color-scheme: dark) {
+    html:not([data-theme]) .feynman-prose {
+        border-left: 2px solid rgba(180, 180, 180, 0.3);
+        color: #e0e0e0 !important;
+        background: none;
+    }
+
+    html:not([data-theme]) .feynman-prose p,
+    html:not([data-theme]) .feynman-prose span,
+    html:not([data-theme]) .feynman-prose em,
+    html:not([data-theme]) .feynman-prose strong {
+        color: #e0e0e0 !important;
+    }
+}
+
+/* -----------------------------------------------------------------------------
+   Expert Mode - Hide Feynman Prose and Agent-Added Content
+   ----------------------------------------------------------------------------- */
+
+html.expert-mode .feynman-prose,
+html.expert-mode .feynman-added {
+    display: none;
+}
+
+/* -----------------------------------------------------------------------------
+   Agent-Added Content Indicator (subtle marker for transparency)
+   ----------------------------------------------------------------------------- */
+
+.feynman-added {
+    position: relative;
+}
+
+.feynman-added::before {
+    content: "";
+    position: absolute;
+    left: -4px;
+    top: 0;
+    bottom: 0;
+    width: 2px;
+    background: linear-gradient(180deg,
+        rgba(100, 150, 200, 0.3) 0%,
+        rgba(100, 150, 200, 0.1) 100%);
+    border-radius: 1px;
+}
+
+/* -----------------------------------------------------------------------------
+   Expert Mode Toggle Switch
+   ----------------------------------------------------------------------------- */
+
+/* Container for the whole toggle */
+.expert-mode-container {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    margin-right: 1rem;
+    font-size: 0.8rem;
+}
+
+/* Labels on either side of switch */
+.expert-mode-label {
+    color: var(--pst-color-text-muted);
+    font-weight: 400;
+    transition: color 0.2s ease;
+    user-select: none;
+}
+
+.expert-mode-label.active {
+    color: var(--pst-color-text-base);
+    font-weight: 600;
+}
+
+/* The switch container */
+.expert-mode-switch {
+    position: relative;
+    display: inline-block;
+    width: 36px;
+    height: 20px;
+    cursor: pointer;
+}
+
+/* Hide default checkbox */
+.expert-mode-switch input {
+    opacity: 0;
+    width: 0;
+    height: 0;
+}
+
+/* The slider track */
+.expert-mode-slider {
+    position: absolute;
+    top: 0;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    background-color: #ccc;
+    border-radius: 20px;
+    transition: background-color 0.2s ease;
+}
+
+/* The slider knob */
+.expert-mode-slider:before {
+    position: absolute;
+    content: "";
+    height: 14px;
+    width: 14px;
+    left: 3px;
+    bottom: 3px;
+    background-color: white;
+    border-radius: 50%;
+    transition: transform 0.2s ease;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.2);
+}
+
+/* Checked state - move knob right */
+.expert-mode-switch input:checked + .expert-mode-slider {
+    background-color: var(--pst-color-primary, #0969da);
+}
+
+.expert-mode-switch input:checked + .expert-mode-slider:before {
+    transform: translateX(16px);
+}
+
+/* Focus state for accessibility */
+.expert-mode-switch input:focus + .expert-mode-slider {
+    box-shadow: 0 0 0 2px rgba(9, 105, 218, 0.3);
+}
+
+/* Dark mode adjustments */
+html[data-theme="dark"] .expert-mode-slider {
+    background-color: #555;
+}
+
+html[data-theme="dark"] .expert-mode-switch input:checked + .expert-mode-slider {
+    background-color: #58a6ff;
+}
+
+/* -----------------------------------------------------------------------------
+   Prompt Download Menu
+   ----------------------------------------------------------------------------- */
+
+.prompt-download-container {
+    position: relative;
+    display: inline-flex;
+    align-items: center;
+    margin-left: 0.75rem;
+}
+
+.prompt-download-container-fixed {
+    position: fixed;
+    top: 0.75rem;
+    right: 0.75rem;
+    z-index: 2000;
+}
+
+.prompt-download-button {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.4rem;
+    padding: 0.35rem 0.65rem;
+    border: 1px solid var(--pst-color-border, #d0d7de);
+    border-radius: 999px;
+    background: var(--pst-color-surface, #fff);
+    color: var(--pst-color-text-base, #1f2328);
+    font-size: 0.78rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: box-shadow 0.15s ease, border-color 0.15s ease, transform 0.15s ease;
+}
+
+.prompt-download-button:hover {
+    border-color: var(--pst-color-primary, #0969da);
+    box-shadow: 0 6px 16px rgba(15, 23, 42, 0.12);
+    transform: translateY(-1px);
+}
+
+.prompt-download-button:focus-visible {
+    outline: 2px solid rgba(9, 105, 218, 0.35);
+    outline-offset: 2px;
+}
+
+.prompt-download-menu {
+    position: absolute;
+    top: calc(100% + 0.6rem);
+    right: 0;
+    min-width: 240px;
+    padding: 0.75rem;
+    border-radius: 12px;
+    border: 1px solid var(--pst-color-border, #d0d7de);
+    background: var(--pst-color-surface, #fff);
+    box-shadow: 0 18px 40px rgba(15, 23, 42, 0.18);
+    opacity: 0;
+    pointer-events: none;
+    transform: translateY(-4px);
+    transition: opacity 0.15s ease, transform 0.15s ease;
+    z-index: 1000;
+}
+
+.prompt-download-container.is-open .prompt-download-menu {
+    opacity: 1;
+    pointer-events: auto;
+    transform: translateY(0);
+}
+
+.prompt-download-title {
+    font-size: 0.82rem;
+    font-weight: 600;
+    color: var(--pst-color-text-base, #1f2328);
+    margin-bottom: 0.6rem;
+}
+
+.prompt-download-row {
+    display: flex;
+    flex-direction: column;
+    gap: 0.35rem;
+    margin-bottom: 0.6rem;
+}
+
+.prompt-download-row:last-child {
+    margin-bottom: 0;
+}
+
+.prompt-download-label {
+    font-size: 0.72rem;
+    text-transform: uppercase;
+    letter-spacing: 0.04em;
+    color: var(--pst-color-text-muted, #57606a);
+}
+
+.prompt-download-select {
+    width: 100%;
+    border: 1px solid var(--pst-color-border, #d0d7de);
+    border-radius: 8px;
+    padding: 0.35rem 0.5rem;
+    background: var(--pst-color-surface, #fff);
+    color: var(--pst-color-text-base, #1f2328);
+    font-size: 0.78rem;
+}
+
+.prompt-download-toggle {
+    display: flex;
+    gap: 0.4rem;
+}
+
+.prompt-download-toggle-button {
+    flex: 1;
+    border: 1px solid var(--pst-color-border, #d0d7de);
+    border-radius: 8px;
+    padding: 0.3rem 0.4rem;
+    background: var(--pst-color-surface, #fff);
+    color: var(--pst-color-text-base, #1f2328);
+    font-size: 0.72rem;
+    cursor: pointer;
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.prompt-download-toggle-button.is-active {
+    border-color: var(--pst-color-primary, #0969da);
+    background: rgba(9, 105, 218, 0.08);
+    color: var(--pst-color-primary, #0969da);
+}
+
+.prompt-download-formats {
+    display: flex;
+    gap: 0.4rem;
+}
+
+.prompt-download-link {
+    flex: 1;
+    text-align: center;
+    text-decoration: none;
+    border: 1px solid var(--pst-color-border, #d0d7de);
+    border-radius: 8px;
+    padding: 0.35rem 0.45rem;
+    color: var(--pst-color-text-base, #1f2328);
+    font-size: 0.74rem;
+    font-weight: 500;
+    background: var(--pst-color-surface, #fff);
+    transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.prompt-download-link:hover {
+    border-color: var(--pst-color-primary, #0969da);
+    background: rgba(9, 105, 218, 0.08);
+    color: var(--pst-color-primary, #0969da);
+}
+
+@media (max-width: 700px) {
+    .prompt-download-button span {
+        display: none;
+    }
+
+    .prompt-download-button {
+        padding: 0.35rem 0.5rem;
+    }
+}
+
+/* Fallback fixed position if header insertion fails */
+.expert-mode-container-fixed {
+    position: fixed;
+    top: 10px;
+    right: 10px;
+    z-index: 1000;
+    background: var(--pst-color-background, white);
+    padding: 0.5rem 0.75rem;
+    border-radius: 6px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
+    border: 1px solid var(--pst-color-border, #ddd);
+}
+
+/* -----------------------------------------------------------------------------
+   Volume Headers - Multi-Book Navigation Styling
+   ----------------------------------------------------------------------------- */
+
+/* Volume header captions - make them visually distinct */
+.bd-sidebar-primary .caption-text.volume-header {
+    font-size: 0.9em;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.08em;
+    padding: 0.75rem 0 0.5rem 0;
+    margin-top: 1.5rem;
+    border-top: 2px solid var(--pst-color-border, #e0e0e0);
+    color: var(--pst-color-primary, #0969da);
+}
+
+/* First volume header shouldn't have top margin */
+.bd-sidebar-primary .nav-item:first-child .caption-text.volume-header {
+    margin-top: 0;
+    border-top: none;
+}
+
+/* Light mode volume header colors */
+html[data-theme="light"] .bd-sidebar-primary .caption-text.volume-header,
+html:not([data-theme]) .bd-sidebar-primary .caption-text.volume-header {
+    color: #0550ae;
+    border-top-color: #d0d7de;
+}
+
+/* Dark mode volume header colors */
+html[data-theme="dark"] .bd-sidebar-primary .caption-text.volume-header {
+    color: #58a6ff;
+    border-top-color: #30363d;
+}
+
+/* Hide empty chapter lists under volume headers */
+.bd-sidebar-primary .volume-header-section > ul.nav:empty,
+.bd-sidebar-primary .volume-header-section > ul.nav:not(:has(li)) {
+    display: none;
+}
+
+/* Regular part captions - slightly smaller to differentiate */
+.bd-sidebar-primary .caption-text:not(.volume-header) {
+    font-size: 0.8em;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.05em;
+    padding: 0.4rem 0;
+    margin-top: 0.75rem;
+    color: var(--pst-color-text-muted, #57606a);
+}

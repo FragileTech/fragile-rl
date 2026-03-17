@@ -1,0 +1,11 @@
+# Pin to JupyterBook 1.x for Sphinx-based builds
+jupyter-book>=1.0.0,<2.0.0
+sphinx-proof
+sphinxcontrib-mermaid
+sphinxcontrib-bibtex
+sphinx-tippy
+
+# Notebook dependencies
+numpy>=1.24.0
+matplotlib>=3.7.0
+pandas>=2.0.0

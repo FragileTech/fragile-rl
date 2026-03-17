@@ -1,0 +1,83 @@
+format: jb-book
+root: intro
+parts:
+  # ══════════════════════════════════════════════════════════════════════════════
+  # VOLUME 1: FRAGILE MECHANICS
+  # ══════════════════════════════════════════════════════════════════════════════
+
+  - caption: "Vol. 1 · Fragile Mechanics"
+    chapters:
+      - file: source/1_agent/intro_agent
+        title: "Overview"
+      - file: source/1_agent/01_foundations/01_definitions
+        title: "Part I - Foundations"
+        sections:
+          - file: source/1_agent/01_foundations/02_control_loop
+      - file: source/1_agent/02_sieve/01_diagnostics
+        title: "Part II - The Sieve (Runtime Safety)"
+        sections:
+          - file: source/1_agent/02_sieve/02_limits_barriers
+          - file: source/1_agent/02_sieve/03_failures_interventions
+          - file: source/1_agent/02_sieve/04_approximations
+      - file: source/1_agent/03_architecture/00_architecture_at_a_glance
+        title: "Part III - Implementation Architecture"
+        sections:
+          - file: source/1_agent/03_architecture/01_compute_tiers
+          - file: source/1_agent/03_architecture/02_disentangled_vae
+          - file: source/1_agent/03_architecture/03_optimization
+      - file: source/1_agent/04_control/01_exploration
+        title: "Part IV - Control & Belief"
+        sections:
+          - file: source/1_agent/04_control/02_belief_dynamics
+          - file: source/1_agent/04_control/03_coupling_window
+      - file: source/1_agent/05_geometry/01_metric_law
+        title: "Part V - Geometric Dynamics"
+        sections:
+          - file: source/1_agent/05_geometry/02_wfr_geometry
+          - file: source/1_agent/05_geometry/03_holographic_gen
+          - file: source/1_agent/05_geometry/04_equations_motion
+      - file: source/1_agent/06_fields/01_boundary_interface
+        title: "Part VI - Holography & Field Theory"
+        sections:
+          - file: source/1_agent/06_fields/02_reward_field
+          - file: source/1_agent/06_fields/03_info_bound
+      - file: source/1_agent/07_cognition/01_supervised_topo
+        title: "Part VII - Cognitive Extensions"
+        sections:
+          - file: source/1_agent/07_cognition/02_governor
+          - file: source/1_agent/07_cognition/03_memory_retrieval
+          - file: source/1_agent/07_cognition/04_ontology
+          - file: source/1_agent/07_cognition/05_metabolism
+          - file: source/1_agent/07_cognition/06_causality
+          - file: source/1_agent/07_cognition/07_metabolic_transducer
+          - file: source/1_agent/07_cognition/08_intersubjective_metric
+          - file: source/1_agent/07_cognition/09_retrieval_attention
+      - file: source/1_agent/08_multiagent/01_gauge_theory
+        title: "Part VIII - Multi-Agent Gauge Theory"
+        sections:
+          - file: source/1_agent/08_multiagent/02_standard_model
+          - file: source/1_agent/08_multiagent/03_parameter_sieve
+          - file: source/1_agent/08_multiagent/04_dnn_blocks
+          - file: source/1_agent/08_multiagent/05_architecture
+          - file: source/1_agent/08_multiagent/06_full_net
+      - file: source/1_agent/09_economics/01_pomw
+        title: "Part IX - Economics"
+      - file: source/1_agent/10_appendices/01_derivations
+        title: Appendices
+        sections:
+          - file: source/1_agent/10_appendices/02_parameters
+          - file: source/1_agent/10_appendices/03_wfr_tensor
+          - file: source/1_agent/10_appendices/04_faq
+          - file: source/1_agent/10_appendices/05_proofs
+          - file: source/1_agent/10_appendices/06_losses
+          - file: source/1_agent/10_appendices/07_architecture
+      - file: source/1_agent/11_implementation/01_encoder
+        title: "Part XI - Implementation"
+        sections:
+          - file: source/1_agent/11_implementation/02_world_model
+          - file: source/1_agent/11_implementation/03_dreamer
+
+  - caption: "Conclusion"
+    chapters:
+      - file: conclusions
+        title: Conclusion

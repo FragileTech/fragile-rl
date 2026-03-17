@@ -1,0 +1,33 @@
+# MyST configuration for Fragile documentation
+# https://mystmd.org/guide/frontmatter
+
+version: 1
+
+project:
+  title: Fragile Mechanics
+  subtitle: On Geometry, Thermodynamics, and Bounded Intelligence
+  authors:
+    - name: Guillem Duran-Ballester
+      # Spanish naming convention: "Duran Ballester" is the complete surname
+      # (paternal: Duran, maternal: Ballester). Index under "D" for Duran.
+  copyright: "2025"
+  bibliography:
+    - references.bib
+    - source/2_hypostructure/references.bib
+    - source/3_fractal_gas/vol_3_references.bib
+
+  toc:
+    - file: index.md
+      title: Home
+    - title: Chapters
+      children:
+        - file: source/info_sm.md
+          title: "Chapter 34: The Standard Model of Cognition"
+        - file: source/harvesting_loop.md
+          title: "Chapter 36: The Metabolic Transducer"
+        - file: source/language.md
+          title: "Chapter 37: The Inter-Subjective Metric"
+
+site:
+  title: Fragile Documentation
+  template: book-theme

@@ -1,0 +1,308 @@
+import torch
+
+from fragile.core.layers import (
+    PrimitiveAttentiveAtlasEncoder,
+    PrimitiveTopologicalDecoder,
+    TopoEncoderPrimitives,
+)
+
+
+def test_primitive_attentive_atlas_encoder_shapes() -> None:
+    torch.manual_seed(0)
+    encoder = PrimitiveAttentiveAtlasEncoder(
+        input_dim=3,
+        hidden_dim=32,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=5,
+    )
+    x = torch.randn(4, 3)
+    (
+        K_chart,
+        K_code,
+        z_n,
+        z_tex,
+        router_weights,
+        z_geo,
+        vq_loss,
+        indices_stack,
+        z_n_all_charts,
+        c_bar,
+        _v_local,
+        _z_q_blended,
+    ) = encoder(x)
+
+    assert K_chart.shape == (4,)
+    assert K_code.shape == (4,)
+    assert z_n.shape == (4, 2)
+    assert z_tex.shape == (4, 2)
+    assert router_weights.shape == (4, 3)
+    assert z_geo.shape == (4, 2)
+    assert vq_loss.ndim == 0
+    assert indices_stack.shape == (4, 3)
+    assert z_n_all_charts.shape == (4, 3, 2)
+    assert c_bar.shape == (4, 2)
+
+
+def test_primitive_topological_decoder_shapes() -> None:
+    torch.manual_seed(1)
+    decoder = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=3,
+        output_dim=3,
+    )
+    z_geo = torch.randn(4, 2)
+    z_tex = torch.randn(4, 2)
+    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+
+    assert x_hat.shape == (4, 3)
+    assert router_weights.shape == (4, 3)
+    assert torch.allclose(router_weights.sum(dim=-1), torch.ones(4), atol=1e-5)
+    assert isinstance(aux_losses, dict)
+
+
+def test_topoencoder_primitives_forward_and_losses() -> None:
+    torch.manual_seed(2)
+    model = TopoEncoderPrimitives(
+        input_dim=3,
+        hidden_dim=32,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=5,
+    )
+    x = torch.randn(5, 3)
+    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, z_n, c_bar, aux_losses = model(x)
+
+    assert x_recon.shape == (5, 3)
+    assert vq_loss.ndim == 0
+    assert enc_weights.shape == (5, 3)
+    assert dec_weights.shape == (5, 3)
+    assert K_chart.shape == (5,)
+    assert z_geo.shape == (5, 2)
+    assert z_n.shape == (5, 2)
+    assert c_bar.shape == (5, 2)
+    assert isinstance(aux_losses, dict)
+
+    consistency = model.compute_consistency_loss(enc_weights, dec_weights)
+    assert consistency.ndim == 0
+    assert model.compute_perplexity(K_chart) > 0.0
+
+
+def test_decoder_film_conditioning() -> None:
+    """Conv decoder with FiLM conditioning produces correct shapes."""
+    torch.manual_seed(3)
+    decoder = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=5,
+        output_dim=784,
+        conv_backbone=True,
+        img_channels=1,
+        img_size=28,
+        conv_channels=32,
+        film_conditioning=True,
+    )
+    z_geo = torch.randn(4, 2)
+    z_tex = torch.randn(4, 2)
+    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+
+    assert x_hat.shape == (4, 784)
+    assert router_weights.shape == (4, 5)
+    assert isinstance(aux_losses, dict)
+
+
+def test_decoder_conformal_freq_gating() -> None:
+    """Conformal frequency gating produces correct shapes and modifies output."""
+    torch.manual_seed(4)
+    decoder_plain = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=3,
+        output_dim=784,
+        conv_backbone=True,
+        img_channels=1,
+        img_size=28,
+        conv_channels=32,
+        conformal_freq_gating=False,
+    )
+    decoder_gated = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=3,
+        output_dim=784,
+        conv_backbone=True,
+        img_channels=1,
+        img_size=28,
+        conv_channels=32,
+        conformal_freq_gating=True,
+    )
+    # Copy weights for fair comparison
+    decoder_gated.load_state_dict(decoder_plain.state_dict())
+
+    z_geo = torch.randn(4, 2)
+    z_tex = torch.randn(4, 2)
+    x_plain, _, _ = decoder_plain(z_geo, z_tex)
+    x_gated, _, _ = decoder_gated(z_geo, z_tex)
+
+    assert x_gated.shape == (4, 784)
+    # Gating should modify the output
+    assert not torch.allclose(x_plain, x_gated, atol=1e-6)
+
+
+def test_decoder_texture_flow() -> None:
+    """Texture flow produces flow_loss and is invertible."""
+    torch.manual_seed(5)
+    decoder = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=3,
+        output_dim=3,
+        texture_flow=True,
+        texture_flow_layers=4,
+        texture_flow_hidden=32,
+    )
+    z_geo = torch.randn(4, 2)
+    z_tex = torch.randn(4, 2)
+    x_hat, _, aux_losses = decoder(z_geo, z_tex)
+
+    assert x_hat.shape == (4, 3)
+    assert "flow_loss" in aux_losses
+    assert aux_losses["flow_loss"].ndim == 0
+
+    # Test invertibility
+    flow = decoder.texture_flow
+    assert flow is not None
+    u, log_det = flow.forward(z_tex, z_geo)
+    z_tex_recovered = flow.inverse(u, z_geo)
+    assert torch.allclose(z_tex, z_tex_recovered, atol=1e-5)
+
+
+def test_decoder_all_features_combined() -> None:
+    """All three features together produce correct shapes."""
+    torch.manual_seed(6)
+    decoder = PrimitiveTopologicalDecoder(
+        latent_dim=2,
+        hidden_dim=32,
+        num_charts=5,
+        output_dim=784,
+        conv_backbone=True,
+        img_channels=1,
+        img_size=28,
+        conv_channels=32,
+        film_conditioning=True,
+        conformal_freq_gating=True,
+        texture_flow=True,
+        texture_flow_layers=4,
+        texture_flow_hidden=32,
+    )
+    z_geo = torch.randn(4, 2)
+    z_tex = torch.randn(4, 2)
+    x_hat, router_weights, aux_losses = decoder(z_geo, z_tex)
+
+    assert x_hat.shape == (4, 784)
+    assert router_weights.shape == (4, 5)
+    assert "flow_loss" in aux_losses
+    assert aux_losses["flow_loss"].ndim == 0
+
+
+def test_hard_routing_produces_onehot() -> None:
+    """Hard routing produces one-hot encoder weights with correct shapes."""
+    torch.manual_seed(10)
+    model = TopoEncoderPrimitives(
+        input_dim=3,
+        hidden_dim=32,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=5,
+    )
+    x = torch.randn(8, 3)
+    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, z_n, c_bar, aux_losses = model(
+        x, use_hard_routing=True, hard_routing_tau=0.5,
+    )
+
+    # Shapes unchanged
+    assert x_recon.shape == (8, 3)
+    assert enc_weights.shape == (8, 3)
+    assert dec_weights.shape == (8, 3)
+    assert K_chart.shape == (8,)
+    assert z_geo.shape == (8, 2)
+
+    # Encoder weights should be one-hot: max == 1, sum == 1
+    assert torch.allclose(enc_weights.max(dim=-1).values, torch.ones(8), atol=1e-5)
+    assert torch.allclose(enc_weights.sum(dim=-1), torch.ones(8), atol=1e-5)
+
+    # Outputs finite
+    assert torch.isfinite(x_recon).all()
+    assert torch.isfinite(vq_loss)
+
+
+def test_hard_routing_gradients_flow() -> None:
+    """Straight-through gradients flow through hard routing."""
+    torch.manual_seed(11)
+    model = TopoEncoderPrimitives(
+        input_dim=3,
+        hidden_dim=32,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=5,
+    )
+    x = torch.randn(8, 3)
+    x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, z_n, c_bar, aux_losses = model(
+        x, use_hard_routing=True, hard_routing_tau=0.5,
+    )
+
+    loss = torch.nn.functional.mse_loss(x_recon, x) + vq_loss
+    loss.backward()
+
+    # Encoder parameters should receive gradients via straight-through estimator
+    has_grad = False
+    for p in model.encoder.parameters():
+        if p.grad is not None and p.grad.abs().sum() > 0:
+            has_grad = True
+            break
+    assert has_grad, "No gradients flowed to encoder parameters through hard routing"
+
+
+def test_hard_routing_straight_through_argmax() -> None:
+    """Negative tau triggers deterministic ST argmax (no Gumbel noise).
+
+    Two forward passes with the same input should produce identical one-hot
+    weights (deterministic), unlike Gumbel-softmax which is stochastic.
+    Gradients should still flow.
+    """
+    torch.manual_seed(12)
+    model = TopoEncoderPrimitives(
+        input_dim=3,
+        hidden_dim=32,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=5,
+    )
+    x = torch.randn(8, 3)
+
+    # Two forward passes in eval mode — deterministic ST argmax should match
+    model.eval()
+    out1 = model(x, use_hard_routing=True, hard_routing_tau=-1.0)
+    out2 = model(x, use_hard_routing=True, hard_routing_tau=-1.0)
+    model.train()
+    enc_w1, enc_w2 = out1[2], out2[2]
+
+    # Deterministic: both passes produce the same one-hot weights
+    assert torch.equal(enc_w1, enc_w2), "ST argmax should be deterministic"
+
+    # Still one-hot
+    assert torch.allclose(enc_w1.max(dim=-1).values, torch.ones(8), atol=1e-5)
+    assert torch.allclose(enc_w1.sum(dim=-1), torch.ones(8), atol=1e-5)
+
+    # Gradients flow
+    x_recon, vq_loss = out1[0], out1[1]
+    loss = torch.nn.functional.mse_loss(x_recon, x) + vq_loss
+    loss.backward()
+
+    has_grad = False
+    for p in model.encoder.parameters():
+        if p.grad is not None and p.grad.abs().sum() > 0:
+            has_grad = True
+            break
+    assert has_grad, "No gradients through ST argmax path"

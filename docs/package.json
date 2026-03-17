@@ -1,0 +1,14 @@
+{
+  "name": "fragile-docs",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "build": "myst build",
+    "start": "myst start",
+    "serve": "myst start --port 8000",
+    "clean": "rm -rf _build"
+  },
+  "dependencies": {
+    "mystmd": "^1.3.0"
+  }
+}

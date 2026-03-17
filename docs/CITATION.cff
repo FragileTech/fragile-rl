@@ -1,0 +1,62 @@
+# This CITATION.cff file was generated to ensure proper citation of this work.
+# For Spanish naming conventions: "Duran Ballester" is the complete surname
+# (paternal + maternal). Please index under "D" for Duran.
+
+cff-version: 1.2.0
+message: "If you use this theory or software, please cite it as below."
+
+title: "Lectures on Algorithmic Geometrodynamics"
+abstract: >-
+  A unified theoretical framework deriving cognitive architecture from
+  first principles of bounded rationality. Connects information theory,
+  control theory, differential geometry, and gauge theory to explain
+  how agents with finite resources can act intelligently under uncertainty.
+
+authors:
+  - family-names: "Duran Ballester"
+    given-names: "Guillem"
+    orcid: "https://orcid.org/0000-0000-0000-0000"  # TODO: Add your ORCID
+    affiliation: "FragileTech"
+
+keywords:
+  - bounded rationality
+  - gauge theory
+  - differential geometry
+  - information theory
+  - cognitive architecture
+  - reinforcement learning
+
+license: MIT
+url: "https://fragiletech.github.io/fragile/intro.html"
+repository-code: "https://github.com/FragileTech/fragile"
+
+# Versioning
+version: "0.2.0"
+date-released: "2025-01-13"
+
+# Preferred citation format
+preferred-citation:
+  type: book
+  authors:
+    - family-names: "Duran Ballester"
+      given-names: "Guillem"
+  title: "Lectures on Algorithmic Geometrodynamics"
+  year: 2025
+  url: "https://fragiletech.github.io/fragile/intro.html"
+
+# Note on naming convention
+# -------------------------
+# The author's full name follows Spanish naming conventions:
+#   Given name:  Guillem
+#   Surnames:    Duran (paternal) Ballester (maternal)
+#
+# Correct citations:
+#   - Duran Ballester, G. (2025)
+#   - G. Duran Ballester
+#   - Duran-Ballester, G. (hyphenated form for English contexts)
+#
+# Incorrect citations:
+#   - Ballester, G. (drops paternal surname)
+#   - G. Ballester
+#
+# Please index under "D" for Duran, not "B" for Ballester.
