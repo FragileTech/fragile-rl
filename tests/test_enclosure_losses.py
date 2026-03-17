@@ -5,21 +5,23 @@ import torch
 import torch.nn.functional as F
 
 from fragile.core.layers.gauge import hyperbolic_distance, poincare_exp_map
-from fragile.vla.losses import (
+from fragile.losses.encoder import orthogonality_loss
+from fragile.losses.macro import (
     compute_dynamics_markov_loss,
     compute_enclosure_loss,
-    compute_momentum_targets,
-    compute_supervised_wm_loss,
     DynamicsTransitionModel,
     EnclosureProbe,
-    endpoint_loss,
-    geodesic_interpolation,
     GradientReversalLayer,
     grl_alpha_schedule,
-    momentum_loss,
-    orthogonality_loss,
-    position_loss,
     zeno_loss,
+)
+from fragile.losses.world_model import (
+    compute_momentum_targets,
+    compute_supervised_wm_loss,
+    endpoint_loss,
+    geodesic_interpolation,
+    momentum_loss,
+    position_loss,
 )
 
 

@@ -7,7 +7,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.gauge import ConformalMetric
+from fragile.layers.gauge import ConformalMetric
 
 
 def _as_query_tokens(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, bool]:

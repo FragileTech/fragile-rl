@@ -11,9 +11,9 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
-from fragile.core.layers.gauge import ConformalMetric
-from fragile.core.layers.primitives import SpectralLinear
+from fragile.layers.attention import CovariantAttention, GeodesicConfig
+from fragile.layers.gauge import ConformalMetric
+from fragile.layers.primitives import SpectralLinear
 from fragile.vla.covariant_world_model import ActionTokenizer, ChartTokenizer
 
 

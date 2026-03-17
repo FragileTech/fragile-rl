@@ -422,7 +422,7 @@ class TestGeometricInvariants:
 class TestMomentumRegularization:
     def test_metric_aware(self):
         """Metric-aware reg should differ from Euclidean."""
-        from fragile.vla.losses import compute_momentum_regularization
+        from fragile.losses.world_model import compute_momentum_regularization
 
         momenta = torch.randn(B, H, D)
         z_traj = torch.randn(B, H, D) * 0.3
@@ -432,7 +432,7 @@ class TestMomentumRegularization:
 
     def test_higher_at_boundary(self):
         """Kinetic energy should be lower near boundary (smaller g_inv_factor)."""
-        from fragile.vla.losses import compute_momentum_regularization
+        from fragile.losses.world_model import compute_momentum_regularization
 
         p = torch.ones(1, 1, D)
         z_center = torch.zeros(1, 1, D)
@@ -643,7 +643,7 @@ class TestHyperbolicLaplacian:
 
     def test_output_shape(self):
         """Laplacian should return ([B, 1], [B, 1])."""
-        from fragile.vla.losses import hyperbolic_laplacian
+        from fragile.losses.world_model import hyperbolic_laplacian
 
         def V_func(z):
             return (z**2).sum(dim=-1, keepdim=True)
@@ -655,7 +655,7 @@ class TestHyperbolicLaplacian:
 
     def test_finite(self):
         """Laplacian should be finite inside the ball."""
-        from fragile.vla.losses import hyperbolic_laplacian
+        from fragile.losses.world_model import hyperbolic_laplacian
 
         def V_func(z):
             return (z**2).sum(dim=-1, keepdim=True)
@@ -670,7 +670,7 @@ class TestHyperbolicLaplacian:
         We implement the constant as 0*z.sum() + 5 so autograd can
         still build a graph (pure constants have no grad_fn).
         """
-        from fragile.vla.losses import hyperbolic_laplacian
+        from fragile.losses.world_model import hyperbolic_laplacian
 
         def V_const(z):
             return 0.0 * z.sum(dim=-1, keepdim=True) + 5.0
@@ -683,7 +683,7 @@ class TestHyperbolicLaplacian:
 
     def test_quadratic_function_known_laplacian(self):
         """For f(z) = |z|^2, Delta_E f = 2D. Check Poincare correction is applied."""
-        from fragile.vla.losses import hyperbolic_laplacian
+        from fragile.losses.world_model import hyperbolic_laplacian
 
         def V_quadratic(z):
             return (z**2).sum(dim=-1, keepdim=True)
@@ -696,7 +696,7 @@ class TestHyperbolicLaplacian:
 
     def test_gradients_flow(self):
         """Autograd graph should be connected through the Laplacian."""
-        from fragile.vla.losses import hyperbolic_laplacian
+        from fragile.losses.world_model import hyperbolic_laplacian
 
         W = torch.randn(D, 1, requires_grad=True)
 
@@ -716,8 +716,8 @@ class TestScreenedPoissonLoss:
 
     def test_output_scalar(self):
         """Loss should be a scalar > 0."""
+        from fragile.losses.world_model import compute_screened_poisson_loss
         from fragile.vla.covariant_world_model import CovariantPotentialNet
-        from fragile.vla.losses import compute_screened_poisson_loss
 
         net = CovariantPotentialNet(D, K, D_MODEL)
         z_traj = torch.randn(B, H, D) * 0.3
@@ -730,8 +730,8 @@ class TestScreenedPoissonLoss:
 
     def test_subsampling(self):
         """With max_samples < B*H, should subsample without error."""
+        from fragile.losses.world_model import compute_screened_poisson_loss
         from fragile.vla.covariant_world_model import CovariantPotentialNet
-        from fragile.vla.losses import compute_screened_poisson_loss
 
         net = CovariantPotentialNet(D, K, D_MODEL)
         z_traj = torch.randn(B, H, D) * 0.3
@@ -751,8 +751,8 @@ class TestScreenedPoissonLoss:
 
     def test_gradients_flow_to_potential_net(self):
         """Screened Poisson loss must provide gradients to the critic head."""
+        from fragile.losses.world_model import compute_screened_poisson_loss
         from fragile.vla.covariant_world_model import CovariantPotentialNet
-        from fragile.vla.losses import compute_screened_poisson_loss
 
         net = CovariantPotentialNet(D, K, D_MODEL)
         z_traj = torch.randn(B, H, D) * 0.3
@@ -858,7 +858,7 @@ class TestHodgeConsistencyLoss:
 
     def test_output_scalar(self):
         """Loss should be a non-negative scalar."""
-        from fragile.vla.losses import compute_hodge_consistency_loss
+        from fragile.losses.world_model import compute_hodge_consistency_loss
 
         harmonic = torch.randn(B, H, D)
         loss = compute_hodge_consistency_loss(harmonic)
@@ -867,7 +867,7 @@ class TestHodgeConsistencyLoss:
 
     def test_zero_harmonic_zero_loss(self):
         """Zero harmonic forces should give zero loss."""
-        from fragile.vla.losses import compute_hodge_consistency_loss
+        from fragile.losses.world_model import compute_hodge_consistency_loss
 
         harmonic = torch.zeros(B, H, D)
         loss = compute_hodge_consistency_loss(harmonic)
@@ -875,7 +875,7 @@ class TestHodgeConsistencyLoss:
 
     def test_larger_harmonic_larger_loss(self):
         """Larger harmonic residual should give larger loss."""
-        from fragile.vla.losses import compute_hodge_consistency_loss
+        from fragile.losses.world_model import compute_hodge_consistency_loss
 
         harmonic_small = torch.randn(B, H, D) * 0.1
         harmonic_large = torch.randn(B, H, D) * 10.0
@@ -973,11 +973,11 @@ class TestAllFeaturesIntegration:
 
     def test_full_model_backward(self, device):
         """All losses should produce gradients with all features enabled."""
-        from fragile.vla.covariant_world_model import GeometricWorldModel
-        from fragile.vla.losses import (
+        from fragile.losses.world_model import (
             compute_hodge_consistency_loss,
             compute_screened_poisson_loss,
         )
+        from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
             latent_dim=D,
@@ -1013,9 +1013,9 @@ class TestAllFeaturesIntegration:
 
     def test_phase2_loss_with_new_features(self, device):
         """compute_phase2_loss should handle all new loss terms."""
+        from fragile.losses.world_model import compute_phase2_loss
         from fragile.vla.config import VLAConfig
         from fragile.vla.covariant_world_model import GeometricWorldModel
-        from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
             latent_dim=D,
@@ -1504,9 +1504,9 @@ class TestWFRPhase2Loss:
 
     def test_loss_with_energy_var(self, device):
         """compute_phase2_loss should use energy_var when present."""
+        from fragile.losses.world_model import compute_phase2_loss
         from fragile.vla.config import VLAConfig
         from fragile.vla.covariant_world_model import GeometricWorldModel
-        from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
             latent_dim=D,
@@ -1537,9 +1537,9 @@ class TestWFRPhase2Loss:
 
     def test_no_jump_dynamics_key(self, device):
         """jump_dynamics should NOT be in metrics (removed loss)."""
+        from fragile.losses.world_model import compute_phase2_loss
         from fragile.vla.config import VLAConfig
         from fragile.vla.covariant_world_model import GeometricWorldModel
-        from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(latent_dim=D, action_dim=A, num_charts=K)
 
@@ -1562,9 +1562,9 @@ class TestWFRPhase2Loss:
 
     def test_backward_through_phase2_loss(self, device):
         """Full backward through compute_phase2_loss with all features."""
+        from fragile.losses.world_model import compute_phase2_loss
         from fragile.vla.config import VLAConfig
         from fragile.vla.covariant_world_model import GeometricWorldModel
-        from fragile.vla.losses import compute_phase2_loss
 
         config = VLAConfig(
             latent_dim=D,

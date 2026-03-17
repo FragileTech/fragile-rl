@@ -30,12 +30,12 @@ from fragile.checkpoints import (
     compute_param_norm,
     count_parameters,
 )
-from fragile.core.layers import FactorizedJumpOperator
-from fragile.vla.extract_features import VLAFeatureDataset
-from fragile.vla.losses import (
+from fragile.layers import FactorizedJumpOperator
+from fragile.losses.macro import (
     compute_dynamics_markov_loss,
     DynamicsTransitionModel,
 )
+from fragile.vla.extract_features import VLAFeatureDataset
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
     init_phase1_adaptive_state,

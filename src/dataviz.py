@@ -17,7 +17,7 @@ import matplotlib.pyplot as plt
 
 
 if TYPE_CHECKING:
-    from fragile.core.layers import FactorizedJumpOperator, TopoEncoder
+    from fragile.layers import FactorizedJumpOperator, TopoEncoder
 
 
 def visualize_latent(

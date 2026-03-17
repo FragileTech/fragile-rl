@@ -26,7 +26,7 @@ import panel as pn
 import torch
 import torch.nn.functional as F
 
-from fragile.core.layers import FactorizedJumpOperator, TopoEncoder
+from fragile.layers import FactorizedJumpOperator, TopoEncoder
 from fragile.vla.extract_features import load_feature_cache_metadata
 from fragile.vla.plots import (
     _to_numpy,
@@ -207,7 +207,7 @@ def load_vla_checkpoint(ckpt_path: str) -> VLALoaded:
     probe_state = ckpt.get("probe")
     if probe_state is not None:
         try:
-            from fragile.vla.losses import EnclosureProbe
+            from fragile.losses.macro import EnclosureProbe
 
             probe = EnclosureProbe(
                 chart_dim=enc_kwargs["latent_dim"],

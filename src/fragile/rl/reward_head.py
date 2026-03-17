@@ -7,8 +7,8 @@ from collections.abc import Callable
 import torch
 from torch import nn
 
-from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
-from fragile.core.layers.primitives import SpectralLinear
+from fragile.layers.attention import CovariantAttention, GeodesicConfig
+from fragile.layers.primitives import SpectralLinear
 from fragile.rl.action_manifold import LatentTokenizer
 from fragile.vla.covariant_world_model import (
     ChartTokenizer,

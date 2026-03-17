@@ -4,8 +4,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers import IsotropicBlock, NormGatedGELU, SoftEquivariantLayer, SpectralLinear
-from fragile.core.layers.gauge import (
+from fragile.layers import IsotropicBlock, NormGatedGELU, SoftEquivariantLayer, SpectralLinear
+from fragile.layers.gauge import (
     exp_map_zero,
     log_map_zero,
     mobius_add,
@@ -14,13 +14,13 @@ from fragile.core.layers.gauge import (
     project_to_ball,
     smooth_tangent_to_ball,
 )
-from fragile.core.layers.initialization import (
+from fragile.layers.initialization import (
     init_soft_equiv_layers,
     resolve_bundle_params,
     spread_codebook,
     spread_directions,
 )
-from fragile.core.layers.router import CovariantChartRouter
+from fragile.layers.router import CovariantChartRouter
 
 
 class AttentiveAtlasEncoder(nn.Module):

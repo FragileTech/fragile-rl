@@ -23,10 +23,10 @@ from .primitives import (
     IsotropicBlock,
     NormGate,
     NormGatedGELU,
-    SpectralLinear,
     SoftEquivariantLayer,
+    SpectralLinear,
 )
-from .topoencoder import AttentiveAtlasEncoder, TopologicalDecoder, TopoEncoder
+from .topoencoder import AttentiveAtlasEncoder, TopoEncoder, TopologicalDecoder
 from .topology import (
     class_modulated_jump_rate,
     compute_jump_consistency_loss,
@@ -61,19 +61,18 @@ __all__ = [
     "LorentzianMetric",
     "NormGate",
     "NormGatedGELU",
-    "AttentiveAtlasEncoder",
-    "TopoEncoderAttachments",
-    "TopoEncoderPrimitives",
-    "TopologicalDecoder",
     "SoftEquivariantLayer",
     "SpectralLinear",
     "SupervisedTopologyLoss",
     "TemporalChristoffelQuery",
+    "TopoEncoder",
+    "TopoEncoderAttachments",
+    "TopoEncoderPrimitives",
+    "TopologicalDecoder",
     "WilsonLineApprox",
     "class_modulated_jump_rate",
     "compute_jump_consistency_loss",
     "compute_orthogonality_loss",
     "compute_separation_loss",
     "compute_topology_loss",
-    "TopoEncoder",
 ]

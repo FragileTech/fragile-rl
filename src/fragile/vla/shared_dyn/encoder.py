@@ -8,7 +8,7 @@ simultaneously good for both decoding and Markov-transition prediction.
 
 from __future__ import annotations
 
-from fragile.core.layers.atlas import (
+from fragile.layers.__atlas import (
     PrimitiveAttentiveAtlasEncoder,
     TopoEncoderPrimitives,
 )

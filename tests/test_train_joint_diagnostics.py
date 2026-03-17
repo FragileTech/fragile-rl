@@ -10,10 +10,10 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from fragile.core.layers import TopoEncoderPrimitives
+from fragile.core.layers.topoencoder import TopoEncoder
 from fragile.core.layers.topology import FactorizedJumpOperator
+from fragile.losses.encoder import compute_phase1_loss
 from fragile.vla.config import VLAConfig
-from fragile.vla.losses import compute_phase1_loss
 from fragile.vla.train_joint import _compute_encoder_losses, _eval_pass, _get_hard_routing_tau
 
 
@@ -34,13 +34,14 @@ class _FeatureDataset(Dataset):
 def test_eval_pass_reports_router_and_geometry_diagnostics() -> None:
     """Eval diagnostics should expose raw-geometry and router-score health."""
     torch.manual_seed(5)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=16,
         latent_dim=2,
         num_charts=4,
         codes_per_chart=5,
         soft_equiv_metric=True,
+        film_conditioning=True,
     )
     loader = DataLoader(_FeatureDataset(torch.randn(12, 3)), batch_size=4, shuffle=False)
 
@@ -96,23 +97,21 @@ def test_eval_pass_uses_deterministic_hard_routing_for_phase1_diagnostics(
 ) -> None:
     """Phase-1 eval should log deterministic hard-routing preferences, not Gumbel noise."""
     torch.manual_seed(11)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=16,
         latent_dim=2,
         num_charts=4,
         codes_per_chart=5,
         soft_equiv_metric=True,
+        film_conditioning=True,
     )
     loader = DataLoader(_FeatureDataset(torch.randn(8, 3)), batch_size=4, shuffle=False)
-    calls: list[tuple[bool, float]] = []
+    calls: list[float] = []
     original_forward = model.encoder.forward
 
     def _wrapped_forward(*args, **kwargs):
-        calls.append((
-            bool(kwargs.get("hard_routing")),
-            float(kwargs.get("hard_routing_tau", 0.0)),
-        ))
+        calls.append(float(kwargs.get("routing_tau", 0.0)))
         return original_forward(*args, **kwargs)
 
     monkeypatch.setattr(model.encoder, "forward", _wrapped_forward)
@@ -127,8 +126,7 @@ def test_eval_pass_uses_deterministic_hard_routing_for_phase1_diagnostics(
     )
 
     assert calls
-    assert all(hard for hard, _ in calls)
-    assert all(tau == -1.0 for _, tau in calls)
+    assert all(tau == -1.0 for tau in calls)
 
 
 def test_negative_hard_routing_tau_stays_deterministic() -> None:
@@ -145,13 +143,14 @@ def test_negative_hard_routing_tau_stays_deterministic() -> None:
 def test_phase1_loss_chart_usage_follows_deterministic_usage_weights() -> None:
     """Utilization loss should penalize deterministic preference collapse, not sampled balance."""
     torch.manual_seed(13)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=16,
         latent_dim=2,
         num_charts=4,
         codes_per_chart=3,
         soft_equiv_metric=True,
+        film_conditioning=True,
     )
     config = VLAConfig(
         input_dim=3,
@@ -196,6 +195,7 @@ def test_phase1_loss_chart_usage_follows_deterministic_usage_weights() -> None:
         z_geo,
         model,
         config,
+        router_reg_weights=enc_router_weights,
         usage_router_weights=balanced_usage,
     )
     _, _, collapsed_metrics = compute_phase1_loss(
@@ -207,6 +207,7 @@ def test_phase1_loss_chart_usage_follows_deterministic_usage_weights() -> None:
         z_geo,
         model,
         config,
+        router_reg_weights=enc_router_weights,
         usage_router_weights=collapsed_usage,
     )
 
@@ -216,13 +217,14 @@ def test_phase1_loss_chart_usage_follows_deterministic_usage_weights() -> None:
 def test_covariant_router_temperature_scales_with_latent_geometry() -> None:
     """Hyperbolic router temperature should use latent, not hidden, dimension."""
     torch.manual_seed(19)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=16,
         latent_dim=2,
         num_charts=4,
         codes_per_chart=3,
         soft_equiv_metric=True,
+        film_conditioning=True,
     )
     z = torch.tensor([[0.1, 0.2], [0.3, 0.0]], dtype=torch.float32)
     tau = model.encoder.cov_router._temperature(z)
@@ -237,13 +239,14 @@ def test_covariant_router_temperature_scales_with_latent_geometry() -> None:
 def test_phase1_loss_skips_jump_consistency_when_weight_is_zero(monkeypatch) -> None:
     """Zero jump weight should bypass the expensive overlap-consistency path."""
     torch.manual_seed(7)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=16,
         latent_dim=2,
         num_charts=4,
         codes_per_chart=3,
         soft_equiv_metric=True,
+        film_conditioning=True,
     )
     jump_op = FactorizedJumpOperator(num_charts=4, latent_dim=2)
     x = torch.randn(8, 3)

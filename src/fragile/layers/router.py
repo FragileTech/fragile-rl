@@ -4,7 +4,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers import SpectralLinear
+from fragile.layers import SpectralLinear
 
 
 def routing_weights(scores: torch.Tensor, routing_tau: float) -> torch.Tensor:

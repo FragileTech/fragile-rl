@@ -12,8 +12,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.atlas import _project_to_ball
-from fragile.core.layers.primitives import SpectralLinear
+from fragile.layers.__atlas import _project_to_ball
+from fragile.layers.primitives import SpectralLinear
 from fragile.rl.action_manifold import _state_index, compose_structured_state_with_atlas
 
 

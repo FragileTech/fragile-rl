@@ -22,16 +22,16 @@ from fragile.checkpoints import (
     compute_param_norm,
     count_parameters,
 )
-from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
-from fragile.core.layers.topology import compute_jump_consistency_loss
-from fragile.hyperbolic_losses import (
+from fragile.layers import FactorizedJumpOperator, TopoEncoderPrimitives
+from fragile.layers.topology import compute_jump_consistency_loss
+from fragile.losses.encoder import (
+    compute_phase1_loss,
     compute_router_information_metrics,
     compute_router_sharpness_metrics,
     get_jump_weight_schedule,
 )
 from fragile.vla.config import VLAConfig
 from fragile.vla.extract_features import VLAFeatureDataset
-from fragile.vla.losses import compute_phase1_loss
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
     init_phase1_adaptive_state,

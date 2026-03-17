@@ -17,27 +17,25 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from fragile.checkpoints import compute_grad_norm, compute_param_norm, count_parameters
-from fragile.core.layers import FactorizedJumpOperator
-from fragile.core.layers.topology import compute_jump_consistency_loss
-from fragile.core.layers.topoencoder import TopoEncoder
-from fragile.hyperbolic_losses import (
+from fragile.layers import FactorizedJumpOperator
+from fragile.layers.topoencoder import TopoEncoder
+from fragile.layers.topology import compute_jump_consistency_loss
+from fragile.losses.encoder import (
+    _deterministic_st_router_weights,
+    compute_phase1_loss,
     compute_router_information_metrics,
     compute_router_score_metrics,
     compute_router_sharpness_metrics,
     get_jump_weight_schedule,
+    orthogonality_loss,
 )
 from fragile.vla.config import VLAConfig
 from fragile.vla.extract_features import VLAFeatureDataset
-from fragile.vla.losses import (
-    _deterministic_st_router_weights,
-    compute_phase1_loss,
-    orthogonality_loss,
-)
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
-    Phase1AdaptiveState,
     init_phase1_adaptive_state,
     phase1_effective_weight_scales,
+    Phase1AdaptiveState,
     update_phase1_adaptive_state,
 )
 
@@ -437,7 +435,7 @@ def _eval_pass(
     hard_routing: bool = False,
     hard_routing_tau: float = 1.0,
 ) -> tuple[np.ndarray, float, int, np.ndarray, float, int, float, dict[str, float | list[int]]]:
-    from fragile.core.layers.gauge import project_to_ball
+    from fragile.layers.gauge import project_to_ball
 
     model.eval()
     all_charts: list[torch.Tensor] = []
@@ -494,7 +492,9 @@ def _eval_pass(
             if z_geo_raw_norms is not None:
                 all_z_geo_raw_norms.append(z_geo_raw_norms.cpu())
             if hasattr(model.encoder, "soft_equiv_log_ratio_loss"):
-                all_soft_equiv.append(float(model.encoder.soft_equiv_log_ratio_loss().detach().item()))
+                all_soft_equiv.append(
+                    float(model.encoder.soft_equiv_log_ratio_loss().detach().item())
+                )
 
             codebook = project_to_ball(model.encoder.codebook)
             v_exp = v_local.unsqueeze(1).unsqueeze(2)
@@ -526,7 +526,9 @@ def _eval_pass(
     hard_entropy = float(-np.sum(usage * np.log(usage + 1e-8)))
     perplexity = float(np.exp(-np.sum(usage * np.log(usage + 1e-8))))
     active = int((usage > 0.01).sum())
-    soft_usage, soft_perplexity, soft_active = _chart_stats_from_probs(router_weights_t, num_charts)
+    soft_usage, soft_perplexity, soft_active = _chart_stats_from_probs(
+        router_weights_t, num_charts
+    )
     soft_info = compute_router_information_metrics(router_weights_t)
     soft_sharpness = compute_router_sharpness_metrics(router_weights_t)
     if router_scores_t is not None:
@@ -900,7 +902,9 @@ def train_phase_1(args: argparse.Namespace) -> None:  # noqa: C901
             extra = {}
 
         if should_log:
-            print(f"P1 E{epoch:5d} | Loss: {acc['total']:.4f} | LR: {acc['lr']:.2e} | tau: {current_tau:.3f}")
+            print(
+                f"P1 E{epoch:5d} | Loss: {acc['total']:.4f} | LR: {acc['lr']:.2e} | tau: {current_tau:.3f}"
+            )
             print(f"  Hard usage: {np.array2string(hard_usage, precision=2, separator=', ')}")
             print(f"  Soft usage: {np.array2string(soft_usage, precision=2, separator=', ')}")
             print(
@@ -954,7 +958,9 @@ def train_phase_1(args: argparse.Namespace) -> None:  # noqa: C901
             )
             print(f"  Ortho: {acc['ortho']:.4f} (w={getattr(args, 'w_perp', 0.01):.3f})")
             print(f"  Window: {acc['window']:.3f} (w={args.w_window:.3f})")
-            print(f"  Jump: {acc['jump']:.3f} (lambda={last_batch_metrics.get('jump_weight', 0.0):.3f})")
+            print(
+                f"  Jump: {acc['jump']:.3f} (lambda={last_batch_metrics.get('jump_weight', 0.0):.3f})"
+            )
             print(
                 f"  Train: grad={acc['grad_norm']:.2e} upd_ratio={acc['update_ratio']:.2e} "
                 f"lr={acc['lr']:.2e}"

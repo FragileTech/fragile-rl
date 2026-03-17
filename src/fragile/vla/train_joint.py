@@ -26,33 +26,35 @@ from fragile.checkpoints import (
     compute_param_norm,
     count_parameters,
 )
-from fragile.core.layers import FactorizedJumpOperator
-from fragile.core.layers.gauge import hyperbolic_distance, mobius_add, project_to_ball
-from fragile.core.layers.topology import compute_jump_consistency_loss
-from fragile.core.layers.topoencoder import TopoEncoder
-from fragile.hyperbolic_losses import (
+from fragile.layers import FactorizedJumpOperator
+from fragile.layers.gauge import hyperbolic_distance, mobius_add, project_to_ball
+from fragile.layers.topoencoder import TopoEncoder
+from fragile.layers.topology import compute_jump_consistency_loss
+from fragile.losses.encoder import (
+    _deterministic_st_router_weights,
+    compute_phase1_loss,
     compute_router_information_metrics,
     compute_router_score_metrics,
     compute_router_sharpness_metrics,
     get_jump_weight_schedule,
+    orthogonality_loss,
+)
+from fragile.losses.macro import (
+    compute_dyn_transition_loss,
+    compute_dynamics_markov_loss,
+    compute_enclosure_loss,
+    DynamicsTransitionModel,
+    EnclosureProbe,
+    grl_alpha_schedule,
+    zeno_loss,
+)
+from fragile.losses.world_model import (
+    compute_phase2_geodesic_diffusion_loss,
+    compute_phase2_loss,
 )
 from fragile.vla.config import VLAConfig
 from fragile.vla.covariant_world_model import GeometricWorldModel
 from fragile.vla.extract_features import VLAFeatureDataset
-from fragile.vla.losses import (
-    _deterministic_st_router_weights,
-    compute_dyn_transition_loss,
-    compute_dynamics_markov_loss,
-    compute_enclosure_loss,
-    compute_phase1_loss,
-    compute_phase2_geodesic_diffusion_loss,
-    compute_phase2_loss,
-    DynamicsTransitionModel,
-    EnclosureProbe,
-    grl_alpha_schedule,
-    orthogonality_loss,
-    zeno_loss,
-)
 from fragile.vla.optim import (
     build_encoder_param_groups,
     get_codebook_like_params,
@@ -2142,7 +2144,6 @@ def _run_phase3(
             # WM weights frozen; c_bar detached so router doesn't get dynamics grads.
             L_cb_dyn = torch.tensor(0.0, device=device)
             if optimizer_cb is not None and H > 1:
-
                 optimizer_cb.zero_grad()
                 # Build coarse latent from detached c_bar + live codebook codes
                 z_coarse_0 = project_to_ball(

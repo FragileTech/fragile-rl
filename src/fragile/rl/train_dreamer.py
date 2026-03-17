@@ -33,20 +33,22 @@ import torch.nn.functional as F
 from fragile.core.layers import FactorizedJumpOperator
 from fragile.core.layers.atlas import _project_to_ball, TopoEncoderPrimitives
 from fragile.core.layers.gauge import hyperbolic_distance, poincare_log_map
-from fragile.vla.config import VLAConfig
-from fragile.vla.covariant_world_model import GeometricWorldModel
-from fragile.vla.losses import (
-    compute_dynamics_chart_loss,
-    compute_dynamics_geodesic_loss,
+from fragile.losses.macro import (
     compute_enclosure_loss,
-    compute_energy_conservation_loss,
-    compute_hodge_consistency_loss,
-    compute_momentum_regularization,
-    compute_screened_poisson_loss,
     EnclosureProbe,
     grl_alpha_schedule,
     zeno_loss,
 )
+from fragile.losses.world_model import (
+    compute_dynamics_chart_loss,
+    compute_dynamics_geodesic_loss,
+    compute_energy_conservation_loss,
+    compute_hodge_consistency_loss,
+    compute_momentum_regularization,
+    compute_screened_poisson_loss,
+)
+from fragile.vla.config import VLAConfig
+from fragile.vla.covariant_world_model import GeometricWorldModel
 from fragile.vla.optim import build_encoder_param_groups
 from fragile.vla.phase1_control import (
     init_phase1_adaptive_state,

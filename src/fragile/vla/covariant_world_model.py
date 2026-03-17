@@ -13,15 +13,16 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.gauge import project_to_ball
-from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
-from fragile.core.layers.gauge import (
+from fragile.layers.attention import CovariantAttention, GeodesicConfig
+from fragile.layers.gauge import (
     christoffel_contraction,
     ConformalMetric,
     hyperbolic_distance,
     poincare_exp_map,
+    project_to_ball,
+    RiskAdaptiveConformalMetric,
 )
-from fragile.core.layers.primitives import SpectralLinear
+from fragile.layers.primitives import SpectralLinear
 
 
 def compute_risk_tensor(
@@ -696,8 +697,6 @@ class GeometricWorldModel(nn.Module):
 
         # Metric
         if risk_metric_alpha > 0:
-            from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
-
             self.metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=risk_metric_alpha)
         else:
             self.metric = ConformalMetric()

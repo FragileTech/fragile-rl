@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from fragile.hyperbolic_losses import compute_sinkhorn_balanced_chart_loss
+from fragile.losses.encoder import compute_sinkhorn_balanced_chart_loss
 from fragile.vla.phase1_control import (
     init_phase1_adaptive_state,
     update_phase1_adaptive_state,

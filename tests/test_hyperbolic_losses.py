@@ -7,7 +7,7 @@ from torch import nn
 
 from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
 from fragile.core.layers.atlas import _smooth_tangent_to_ball
-from fragile.hyperbolic_losses import (
+from fragile.losses.encoder import (
     combine_quality_targets,
     compute_chart_center_mean_loss,
     compute_chart_center_radius_loss,
@@ -17,6 +17,7 @@ from fragile.hyperbolic_losses import (
     compute_confidence_calibration_loss,
     compute_error_quality_targets,
     compute_hard_routing_nll,
+    compute_phase1_loss,
     compute_radial_calibration_loss,
     compute_rank_quality_targets,
     compute_router_margin_loss,
@@ -25,7 +26,6 @@ from fragile.hyperbolic_losses import (
     mix_quality_targets,
 )
 from fragile.vla.config import VLAConfig
-from fragile.vla.losses import compute_phase1_loss
 from fragile.vla.optim import build_encoder_param_groups
 
 

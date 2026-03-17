@@ -6,7 +6,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.atlas import (
+from fragile.layers.__atlas import (
     _poincare_hyperbolic_score,
     _poincare_temperature,
     _poincare_weighted_mean,
@@ -14,8 +14,8 @@ from fragile.core.layers.atlas import (
     _project_to_ball,
     _routing_weights,
 )
-from fragile.core.layers.gauge import exp_map_zero, log_map_zero, mobius_add
-from fragile.core.layers.primitives import SpectralLinear
+from fragile.layers.gauge import exp_map_zero, log_map_zero, mobius_add
+from fragile.layers.primitives import SpectralLinear
 
 
 class LatentTokenizer(nn.Module):
