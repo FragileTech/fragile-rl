@@ -2,7 +2,7 @@ import math
 
 import torch
 from torch import nn
-import torch.functional as F
+import torch.nn.functional as F
 
 from fragile.core.layers import IsotropicBlock, NormGatedGELU, SoftEquivariantLayer, SpectralLinear
 from fragile.core.layers.gauge import (
@@ -271,8 +271,7 @@ class AttentiveAtlasEncoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        hard_routing: bool = False,
-        hard_routing_tau: float = 1.0,
+        routing_tau: float = 1.0,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -297,8 +296,7 @@ class AttentiveAtlasEncoder(nn.Module):
             v,
             features=features,
             chart_tokens=chart_centers,
-            hard_routing=hard_routing,
-            hard_routing_tau=hard_routing_tau,
+            routing_tau=routing_tau,
         )
         self._last_soft_router_weights = self.cov_router._last_soft_router_weights
         self._last_soft_router_weights_live = self.cov_router._last_soft_router_weights_live
@@ -441,8 +439,7 @@ class TopologicalDecoder(nn.Module):
         z_geo: torch.Tensor,
         chart_index: torch.Tensor | None = None,
         router_weights: torch.Tensor | None = None,
-        hard_routing: bool = False,
-        hard_routing_tau: float = 1.0,
+        routing_tau: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
         """Decode from latent geometry.
 
@@ -469,8 +466,7 @@ class TopologicalDecoder(nn.Module):
             router_weights, _ = self.cov_router(
                 z_geo,
                 chart_tokens=chart_centers,
-                hard_routing=hard_routing,
-                hard_routing_tau=hard_routing_tau,
+                routing_tau=routing_tau,
             )
 
         # Chart-specific projections + gauge-covariant gating.
@@ -559,8 +555,7 @@ class TopoEncoder(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        use_hard_routing: bool = False,
-        hard_routing_tau: float = 1.0,
+        routing_tau: float = 1.0,
     ) -> tuple[
         torch.Tensor,
         torch.Tensor,
@@ -587,17 +582,15 @@ class TopoEncoder(nn.Module):
             _z_q_blended,
         ) = self.encoder(
             x,
-            hard_routing=use_hard_routing,
-            hard_routing_tau=hard_routing_tau,
+            routing_tau=routing_tau,
         )
 
-        router_override = enc_router_weights if use_hard_routing else None
+        router_override = enc_router_weights
         x_recon, dec_router_weights, aux_losses = self.decoder(
             z_geo,
             chart_index=None,
             router_weights=router_override,
-            hard_routing=use_hard_routing,
-            hard_routing_tau=hard_routing_tau,
+            routing_tau=routing_tau,
         )
 
         return (

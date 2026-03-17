@@ -26,9 +26,10 @@ from fragile.checkpoints import (
     compute_param_norm,
     count_parameters,
 )
-from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
-from fragile.core.layers.gauge import hyperbolic_distance
+from fragile.core.layers import FactorizedJumpOperator
+from fragile.core.layers.gauge import hyperbolic_distance, mobius_add, project_to_ball
 from fragile.core.layers.topology import compute_jump_consistency_loss
+from fragile.core.layers.topoencoder import TopoEncoder
 from fragile.hyperbolic_losses import (
     compute_router_information_metrics,
     compute_router_score_metrics,
@@ -241,7 +242,7 @@ def _safe_grad_norm(params: list[torch.nn.Parameter]) -> float:
     return float(torch.sqrt(total).item())
 
 
-def _phase1_grad_breakdown(model: TopoEncoderPrimitives) -> dict[str, float]:
+def _phase1_grad_breakdown(model: TopoEncoder) -> dict[str, float]:
     encoder = model.encoder
     router_params: list[torch.nn.Parameter] = []
     if getattr(encoder, "cov_router", None) is not None:
@@ -268,7 +269,7 @@ def _phase1_grad_breakdown(model: TopoEncoderPrimitives) -> dict[str, float]:
     }
 
 
-def _phase1_debug_metrics(model: TopoEncoderPrimitives) -> dict[str, float]:
+def _phase1_debug_metrics(model: TopoEncoder) -> dict[str, float]:
     encoder = model.encoder
     router_scores = getattr(encoder, "_last_router_scores_live", None)
     if router_scores is not None:
@@ -367,7 +368,7 @@ def _wm_diagnostics(wm_output: dict[str, torch.Tensor]) -> dict[str, float]:
 
 
 def _bind_world_model_to_encoder_atlas(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     world_model: GeometricWorldModel,
 ) -> None:
     """Bind the Phase-2 world model to the frozen Phase-1 chart atlas."""
@@ -499,12 +500,11 @@ def _phase1_config_from_args(
 
 def _compute_encoder_losses(
     x: torch.Tensor,
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
     args: argparse.Namespace,
     epoch: int,
-    hard_routing: bool = False,
-    hard_routing_tau: float = 1.0,
+    routing_tau: float = 1.0,
     phase1_config: VLAConfig | None = None,
 ) -> tuple[
     torch.Tensor,
@@ -539,27 +539,25 @@ def _compute_encoder_losses(
         c_bar,
         v_local,
         z_q_blended,
-    ) = model.encoder(x, hard_routing=hard_routing, hard_routing_tau=hard_routing_tau)
+    ) = model.encoder(x, routing_tau=routing_tau)
 
     # When hard routing is on, pass encoder weights to decoder so both use the
-    # same one-hot assignment (matching TopoEncoderPrimitives.forward).  Without
+    # same one-hot assignment (matching TopoEncoder.forward).  Without
     # this the decoder draws an independent Gumbel sample, consistency loss
     # explodes, and training diverges.
-    router_override = enc_w if hard_routing else None
+    router_override = enc_w
     x_recon, dec_w, _aux_losses = model.decoder(
         z_geo,
         chart_index=None,
         router_weights=router_override,
-        hard_routing=hard_routing,
-        hard_routing_tau=hard_routing_tau,
+        routing_tau=routing_tau,
     )
     usage_router_weights = enc_w
-    if hard_routing:
-        router_scores_live = getattr(model.encoder, "_last_router_scores_live", None)
-        if router_scores_live is not None:
-            # Utilization losses should see the router's deterministic hard
-            # preference; a single Gumbel draw can look balanced by noise.
-            usage_router_weights = _deterministic_st_router_weights(router_scores_live)
+    router_scores_live = getattr(model.encoder, "_last_router_scores_live", None)
+    if router_scores_live is not None:
+        # Utilization losses should see the router's deterministic hard
+        # preference; a single Gumbel draw can look balanced by noise.
+        usage_router_weights = _deterministic_st_router_weights(router_scores_live)
 
     phase1_config = phase1_config or _phase1_config_from_args(args)
     base_loss, zn_reg_loss, metrics = compute_phase1_loss(
@@ -621,7 +619,7 @@ def _compute_encoder_losses(
 
 
 def _eval_pass(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     loader: DataLoader,
     K: int,
     device: torch.device,
@@ -630,8 +628,6 @@ def _eval_pass(
     hard_routing_tau: float = 1.0,
 ) -> tuple[np.ndarray, float, int, np.ndarray, float, int, float, dict]:
     """Compute hard/soft chart stats, mean radius, and extra diagnostics."""
-    from fragile.core.layers.atlas import _project_to_ball
-
     model.eval()
     all_charts: list[torch.Tensor] = []
     all_soft_router_weights: list[torch.Tensor] = []
@@ -663,8 +659,7 @@ def _eval_pass(
                 _,
             ) = model.encoder(
                 x,
-                hard_routing=hard_routing,
-                hard_routing_tau=eval_tau,
+                routing_tau=eval_tau,
             )
             all_charts.append(K_ch.cpu())
             soft_router_weights = getattr(model.encoder, "_last_soft_router_weights_live", None)
@@ -692,7 +687,7 @@ def _eval_pass(
                     float(model.encoder.soft_equiv_log_ratio_loss().detach().cpu().item())
                 )
             # Compute per-sample VQ distance (nearest code distance)
-            codebook = _project_to_ball(model.encoder.codebook)  # [N_c, K_codes, D]
+            codebook = project_to_ball(model.encoder.codebook)  # [N_c, K_codes, D]
             v_exp = v_local.unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
             cb_exp = codebook.unsqueeze(0)  # [1, N_c, K_codes, D]
             diff = v_exp - cb_exp  # Euclidean approx for diagnostics
@@ -747,11 +742,11 @@ def _eval_pass(
 
     # Extra diagnostics
     codebook_raw_cpu = model.encoder.codebook.detach().cpu()
-    codebook_cpu = _project_to_ball(model.encoder.codebook).detach().cpu()
+    codebook_cpu = project_to_ball(model.encoder.codebook).detach().cpu()
     cb_radii = codebook_cpu.norm(dim=-1)  # [N_c, K_codes]
     cb_raw_radii = codebook_raw_cpu.norm(dim=-1)
     chart_centers_raw_cpu = model.encoder.chart_centers.detach().cpu()
-    chart_centers_cpu = _project_to_ball(model.encoder.chart_centers).detach().cpu()
+    chart_centers_cpu = project_to_ball(model.encoder.chart_centers).detach().cpu()
     cc_radii = chart_centers_cpu.norm(dim=-1)  # [N_c]
     cc_raw_radii = chart_centers_raw_cpu.norm(dim=-1)
 
@@ -844,7 +839,7 @@ def _eval_pass(
 
 @torch.no_grad()
 def _measure_min_length(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     seq_loader: DataLoader,
     device: torch.device,
     max_batches: int = 50,
@@ -908,7 +903,7 @@ def _update_world_model_min_length(
 
 
 def _run_phase1(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
     single_loader: DataLoader,
     args: argparse.Namespace,
@@ -1191,8 +1186,7 @@ def _run_phase1(
                         jump_op,
                         args,
                         epoch,
-                        hard_routing=current_hard_routing,
-                        hard_routing_tau=current_tau,
+                        routing_tau=current_tau,
                         phase1_config=phase1_config,
                     )
                 )
@@ -1461,7 +1455,7 @@ def _run_phase1(
 
 
 def _run_phase2(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
     world_model: GeometricWorldModel,
     seq_loader: DataLoader,
@@ -1806,7 +1800,7 @@ def _run_phase2(
 
 
 def _run_phase3(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
     world_model: GeometricWorldModel,
     seq_loader: DataLoader,
@@ -2148,11 +2142,10 @@ def _run_phase3(
             # WM weights frozen; c_bar detached so router doesn't get dynamics grads.
             L_cb_dyn = torch.tensor(0.0, device=device)
             if optimizer_cb is not None and H > 1:
-                from fragile.core.layers.atlas import _project_to_ball, mobius_add
 
                 optimizer_cb.zero_grad()
                 # Build coarse latent from detached c_bar + live codebook codes
-                z_coarse_0 = _project_to_ball(
+                z_coarse_0 = project_to_ball(
                     mobius_add(c_bar_all[:, 0].detach(), zq_blended_all[:, 0])
                 )
                 rw_0_cb = rw_all[:, 0].detach()
@@ -2429,7 +2422,7 @@ def _run_phase3(
 
 def _save_checkpoint(
     args: argparse.Namespace,
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
     world_model: GeometricWorldModel | None,
     optimizer: torch.optim.Optimizer,
@@ -2470,7 +2463,7 @@ def _save_checkpoint(
 
 
 def _run_diagnostics(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     single_loader: DataLoader,
     args: argparse.Namespace,
     device: torch.device,
@@ -2589,22 +2582,16 @@ def train_joint(args: argparse.Namespace) -> None:  # noqa: C901
 
     # ── Models ────────────────────────────────────────────────
     K = args.num_charts
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
         latent_dim=args.latent_dim,
         num_charts=K,
         codes_per_chart=args.codes_per_chart,
-        covariant_attn=True,
-        covariant_attn_tensorization="full",
         soft_equiv_metric=True,
-        conv_backbone=False,
         film_conditioning=True,
         commitment_beta=getattr(args, "commitment_beta", 0.25),
         codebook_loss_weight=getattr(args, "codebook_loss_weight", 1.0),
-        dyn_codes_per_chart=getattr(args, "dyn_codes_per_chart", 0),
-        dyn_commitment_beta=getattr(args, "dyn_commitment_beta", 0.25),
-        dyn_codebook_loss_weight=getattr(args, "dyn_codebook_loss_weight", 1.0),
     ).to(device)
 
     jump_op = FactorizedJumpOperator(

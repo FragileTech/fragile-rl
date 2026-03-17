@@ -1,6 +1,7 @@
 import math
 
 import torch
+from torch import nn
 
 
 # ---------------------------------------------------------------------------
@@ -31,7 +32,7 @@ def spread_directions(n: int, dim: int) -> torch.Tensor:
     directions and iteratively repels them (simple Lloyd-like relaxation).
     """
     if dim == 3:
-        return _fibonacci_sphere(n)
+        return fibonacci_sphere(n)
 
     # Random init + greedy repulsion (5 iterations suffice for init quality)
     pts = torch.randn(n, dim)
@@ -62,7 +63,7 @@ def spread_codebook(
     """
     cb = torch.zeros(num_charts, codes_per_chart, dim)
     for c in range(num_charts):
-        dirs = _spread_directions(codes_per_chart, dim)
+        dirs = spread_directions(codes_per_chart, dim)
         # Uniform radii in [radius/2, radius] so codes aren't on a thin shell
         r = torch.rand(codes_per_chart, 1) * (radius / 2) + (radius / 2)
         cb[c] = dirs * r

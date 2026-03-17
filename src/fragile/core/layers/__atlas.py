@@ -7,9 +7,8 @@ from torch import nn
 import torch.nn.functional as F
 
 from .gauge import exp_map_zero, log_map_zero, mobius_add
-from .primitives import IsotropicBlock, NormGatedGELU, SpectralLinear
+from .primitives import IsotropicBlock, NormGatedGELU, SpectralLinear, SoftEquivariantLayer
 from .topology import FactorizedJumpOperator, InvariantChartClassifier
-from .ugn import SoftEquivariantLayer
 
 
 # ---------------------------------------------------------------------------

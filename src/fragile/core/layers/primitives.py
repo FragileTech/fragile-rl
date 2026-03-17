@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from typing import Callable
+from typing import Callable, Sequence
 
 import torch
 from torch import nn
@@ -260,3 +260,195 @@ class IsotropicBlock(nn.Module):
             f"in_dim={self.in_dim}, out_dim={self.out_dim}, bundle_size={self.bundle_size}, "
             f"exact={self.exact}"
         )
+
+
+class SoftEquivariantLayer(nn.Module):
+    """Soft equivariant latent dynamics layer."""
+
+    def __init__(
+        self,
+        n_bundles: int | None = None,
+        bundle_dim: int | None = None,
+        bundle_dims: Sequence[int] | None = None,
+        hidden_dim: int = 64,
+        use_spectral_norm: bool = True,
+        zero_self_mixing: bool = False,
+    ) -> None:
+        super().__init__()
+        if bundle_dims is None:
+            if n_bundles is None or bundle_dim is None:
+                msg = "Provide bundle_dims or (n_bundles, bundle_dim)."
+                raise ValueError(msg)
+            bundle_dims = [bundle_dim] * n_bundles
+        else:
+            bundle_dims = list(bundle_dims)
+            if n_bundles is not None and n_bundles != len(bundle_dims):
+                msg = "n_bundles does not match bundle_dims length."
+                raise ValueError(msg)
+            if bundle_dim is not None and any(dim != bundle_dim for dim in bundle_dims):
+                msg = "bundle_dim provided but bundle_dims are heterogeneous."
+                raise ValueError(msg)
+
+        if len(bundle_dims) == 0 or any(dim <= 0 for dim in bundle_dims):
+            msg = "bundle_dims must contain positive dimensions."
+            raise ValueError(msg)
+        if hidden_dim <= 0:
+            msg = "hidden_dim must be positive."
+            raise ValueError(msg)
+
+        self.bundle_dims = list(bundle_dims)
+        self.n_bundles = len(self.bundle_dims)
+        self.total_dim = sum(self.bundle_dims)
+        self.hidden_dim = hidden_dim
+        self.zero_self_mixing = zero_self_mixing
+        dims = set(self.bundle_dims)
+        self.bundle_dim = self.bundle_dims[0] if len(dims) == 1 else None
+
+        LinearLayer = SpectralLinear if use_spectral_norm else nn.Linear
+        self.norm_mlp = nn.Sequential(
+            LinearLayer(self.n_bundles, hidden_dim, bias=True),
+            nn.GELU(),
+            LinearLayer(hidden_dim, hidden_dim, bias=True),
+            nn.GELU(),
+            LinearLayer(hidden_dim, self.n_bundles, bias=False),
+        )
+
+        if self.bundle_dim is not None:
+            self.mixing_weights = nn.Parameter(
+                torch.randn(self.n_bundles, self.n_bundles, self.bundle_dim, self.bundle_dim)
+                * 0.01
+            )
+        else:
+            self.mixing_weights = nn.ParameterList([
+                nn.ParameterList([
+                    nn.Parameter(torch.randn(self.bundle_dims[i], self.bundle_dims[j]) * 0.01)
+                    for j in range(self.n_bundles)
+                ])
+                for i in range(self.n_bundles)
+            ])
+        if self.zero_self_mixing and self.bundle_dim is not None:
+            mask = torch.ones(self.n_bundles, self.n_bundles)
+            mask.fill_diagonal_(0.0)
+            self.register_buffer("_mixing_mask", mask)
+        else:
+            self.register_buffer("_mixing_mask", None)
+
+        self.gate_bias = nn.Parameter(torch.zeros(self.n_bundles))
+
+    def _split_bundles(self, z: torch.Tensor) -> tuple[list[torch.Tensor], bool]:
+        if z.dim() == 3:
+            if z.shape[1] != self.n_bundles:
+                msg = "Expected input shape [B, n_bundles, bundle_dim]."
+                raise ValueError(msg)
+            if any(dim != z.shape[2] for dim in self.bundle_dims):
+                msg = "Bundle dimensions are heterogeneous; expected flattened input."
+                raise ValueError(msg)
+            return [z[:, i, :] for i in range(self.n_bundles)], True
+        if z.dim() == 2:
+            if z.shape[1] != self.total_dim:
+                msg = "Expected input shape [B, sum(bundle_dims)]."
+                raise ValueError(msg)
+            bundles = []
+            offset = 0
+            for dim in self.bundle_dims:
+                bundles.append(z[:, offset : offset + dim])
+                offset += dim
+            return bundles, False
+        msg = "Expected input with shape [B, D] or [B, n_bundles, d_b]."
+        raise ValueError(msg)
+
+    def _bundle_view(self, z: torch.Tensor) -> tuple[torch.Tensor, bool]:
+        if self.bundle_dim is None:
+            msg = "Bundle dimensions are heterogeneous; expected list-based access."
+            raise ValueError(msg)
+        if z.dim() == 3:
+            if z.shape[1] != self.n_bundles or z.shape[2] != self.bundle_dim:
+                msg = "Expected input shape [B, n_bundles, bundle_dim]."
+                raise ValueError(msg)
+            return z, True
+        if z.dim() == 2:
+            if z.shape[1] != self.total_dim:
+                msg = "Expected input shape [B, sum(bundle_dims)]."
+                raise ValueError(msg)
+            return z.view(z.shape[0], self.n_bundles, self.bundle_dim), False
+        msg = "Expected input with shape [B, D] or [B, n_bundles, d_b]."
+        raise ValueError(msg)
+
+    def split_bundles(self, z: torch.Tensor) -> list[torch.Tensor]:
+        bundles, _ = self._split_bundles(z)
+        return bundles
+
+    def cat_bundles(self, bundles: list[torch.Tensor]) -> torch.Tensor:
+        return torch.cat(bundles, dim=-1)
+
+    def _cat_bundles(self, bundles: list[torch.Tensor], stacked: bool) -> torch.Tensor:
+        if stacked:
+            return torch.stack(bundles, dim=1)
+        return torch.cat(bundles, dim=-1)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        if self.bundle_dim is not None:
+            bundled, was_stacked = self._bundle_view(z)
+            # Norm-based scaling is SO(d_b)-equivariant within each bundle.
+            norms = torch.norm(bundled, dim=-1) + 1e-8
+            scales = F.softplus(self.norm_mlp(norms))
+            equivariant = bundled * scales.unsqueeze(-1)
+
+            # Mixing injects cross-bundle texture interactions.
+            weights = self.mixing_weights
+            if self.zero_self_mixing:
+                weights = weights * self._mixing_mask[:, :, None, None]
+            mixing = torch.einsum("bjd,ijkd->bik", bundled, weights)
+            gates = torch.sigmoid(self.gate_bias).view(1, -1, 1)
+            combined = equivariant + gates * mixing
+            z_out = bundled + combined  # Residual keeps dynamics near identity.
+            if was_stacked:
+                return z_out
+            return z_out.reshape(z.shape[0], -1)
+
+        bundles, stacked = self._split_bundles(z)
+
+        # Per-bundle norms drive equivariant scaling for heterogeneous bundles.
+        norms = torch.stack([torch.norm(v, dim=-1) + 1e-8 for v in bundles], dim=-1)
+        scales = F.softplus(self.norm_mlp(norms))
+        equivariant_outputs = [bundles[i] * scales[:, i : i + 1] for i in range(self.n_bundles)]
+
+        # Cross-bundle mixing models texture coupling across gauge fibers.
+        mixing_outputs = []
+        for i in range(self.n_bundles):
+            mixed = None
+            for j in range(self.n_bundles):
+                if self.zero_self_mixing and i == j:
+                    continue
+                term = F.linear(bundles[j], self.mixing_weights[i][j])
+                mixed = term if mixed is None else mixed + term
+            if mixed is None:
+                mixed = torch.zeros_like(bundles[i])
+            mixing_outputs.append(mixed)
+
+        gates = torch.sigmoid(self.gate_bias)
+        combined = [  # Gate controls how much mixing leaks into each bundle.
+            equivariant_outputs[i] + gates[i] * mixing_outputs[i] for i in range(self.n_bundles)
+        ]
+        z_out = self._cat_bundles(combined, stacked)
+        return z + z_out
+
+    def l1_loss(self) -> torch.Tensor:
+        if isinstance(self.mixing_weights, torch.Tensor):
+            return torch.sum(torch.abs(self.mixing_weights))
+        return sum(
+            torch.sum(torch.abs(self.mixing_weights[i][j]))
+            for i in range(self.n_bundles)
+            for j in range(self.n_bundles)
+        )
+
+    def mixing_strength(self) -> float:
+        if isinstance(self.mixing_weights, torch.Tensor):
+            total_norm_sq = torch.sum(self.mixing_weights**2)
+            return torch.sqrt(total_norm_sq).item()
+        total_norm_sq = sum(
+            torch.sum(self.mixing_weights[i][j] ** 2)
+            for i in range(self.n_bundles)
+            for j in range(self.n_bundles)
+        )
+        return torch.sqrt(total_norm_sq).item()

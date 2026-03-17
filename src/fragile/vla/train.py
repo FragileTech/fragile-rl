@@ -10,7 +10,7 @@ import torch
 from torch import nn, optim
 from torch.utils.data import DataLoader
 
-from fragile.core.layers import TopoEncoderPrimitives
+from fragile.core.layers import TopoEncoder
 from fragile.core.layers.topology import FactorizedJumpOperator
 from fragile.hyperbolic_losses import (
     compute_jump_consistency_loss as compute_jump_consistency_loss_hyp,
@@ -855,7 +855,7 @@ def train_vla(config: VLAConfig) -> dict:
 
     # --- Instantiate models ---
     print("Building encoder …")
-    encoder = TopoEncoderPrimitives(
+    encoder = TopoEncoder(
         input_dim=config.input_dim,
         hidden_dim=config.hidden_dim,
         latent_dim=config.latent_dim,

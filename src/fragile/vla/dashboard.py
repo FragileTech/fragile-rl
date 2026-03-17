@@ -26,7 +26,7 @@ import panel as pn
 import torch
 import torch.nn.functional as F
 
-from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
+from fragile.core.layers import FactorizedJumpOperator, TopoEncoder
 from fragile.vla.extract_features import load_feature_cache_metadata
 from fragile.vla.plots import (
     _to_numpy,
@@ -50,7 +50,7 @@ __all__ = ["create_app"]
 # p{phase}_epoch_{epoch}.pt  OR  epoch_{epoch}.pt  OR  checkpoint_final.pt
 _CKPT_RE = re.compile(r"(?:p(\d+)_)?(?:epoch_(\d+)|checkpoint_final)\.pt$")
 
-# Keys forwarded to TopoEncoderPrimitives.__init__ from checkpoint args dict
+# Keys forwarded to TopoEncoder.__init__ from checkpoint args dict
 _ENCODER_INIT_KEYS = {
     "input_dim",
     "hidden_dim",
@@ -87,7 +87,7 @@ class VLACheckpointInfo:
 class VLALoaded:
     """Loaded VLA checkpoint data ready for inference."""
 
-    encoder: TopoEncoderPrimitives
+    encoder: TopoEncoder
     jump_op: FactorizedJumpOperator
     world_model: object | None  # GeometricWorldModel or None
     probe: object | None  # EnclosureProbe or None
@@ -151,7 +151,7 @@ def load_vla_checkpoint(ckpt_path: str) -> VLALoaded:
     enc_kwargs.setdefault("soft_equiv_metric", True)
     enc_kwargs.setdefault("conv_backbone", False)
 
-    encoder = TopoEncoderPrimitives(film_conditioning=True, **enc_kwargs)
+    encoder = TopoEncoder(film_conditioning=True, **enc_kwargs)
     result = encoder.load_state_dict(enc_state, strict=False)
     if result.missing_keys:
         logger.warning("Encoder: %d missing keys", len(result.missing_keys))

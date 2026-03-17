@@ -76,6 +76,29 @@ def vla_unsup(args):
 
 
 @run.command(
+    "vla-phase1",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def vla_phase1(args):
+    """Standalone Phase 1 encoder training.
+
+    All arguments after 'vla-phase1' are forwarded to the training script.
+    Run `uv run fragile vla-phase1 -- --help` for all training options.
+    """
+    import sys
+
+    from fragile.vla.train_phase_1 import main
+
+    original_argv = sys.argv
+    sys.argv = ["fragile-vla-phase1", *args]
+    try:
+        main()
+    finally:
+        sys.argv = original_argv
+
+
+@run.command(
     "dataset",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )

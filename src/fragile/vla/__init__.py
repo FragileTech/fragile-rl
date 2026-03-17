@@ -7,6 +7,7 @@ from .dashboard import create_app
 from .extract_features import extract_smolvla_features, VLAFeatureDataset
 from .train import train_vla
 from .train_joint import train_joint
+from .train_phase_1 import train_phase_1
 from .train_unsupervised import train_unsupervised
 
 
@@ -18,6 +19,7 @@ __all__ = [
     "create_latent_dataset_cli",
     "extract_smolvla_features",
     "train_joint",
+    "train_phase_1",
     "train_unsupervised",
     "train_vla",
 ]

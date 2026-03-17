@@ -6,14 +6,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from .layers import FactorizedJumpOperator
-from .layers.gauge import exp_map_zero, hyperbolic_distance, log_map_zero
-
-
-def _project_to_ball(z: torch.Tensor, max_norm: float = 0.99, eps: float = 1e-6) -> torch.Tensor:
-    """Project points to interior of the Poincare ball."""
-    norm = z.norm(dim=-1, keepdim=True).clamp(min=eps)
-    scale = (max_norm / norm).clamp(max=1.0)
-    return z * scale
+from .layers.gauge import exp_map_zero, hyperbolic_distance, log_map_zero, project_to_ball
 
 
 class SupervisedTopologyLoss(nn.Module):
@@ -146,7 +139,7 @@ def compute_codebook_centering_loss(codebook: torch.Tensor) -> torch.Tensor:
     Args:
         codebook: [N_c, K, D] codebook deltas
     """
-    codebook = _project_to_ball(codebook)
+    codebook = project_to_ball(codebook)
     centers_tan = log_map_zero(codebook).mean(dim=1)  # [N_c, D]
     return (centers_tan**2).sum(dim=1).mean()
 
@@ -155,7 +148,7 @@ def _as_tangent(z: torch.Tensor, assume_tangent: bool) -> torch.Tensor:
     """Return tangent vectors; map from ball if needed."""
     if assume_tangent:
         return z
-    return log_map_zero(_project_to_ball(z))
+    return log_map_zero(project_to_ball(z))
 
 
 def compute_variance_loss(
@@ -169,7 +162,7 @@ def compute_variance_loss(
     Uses per-bundle or global energy in the tangent space to avoid fixing a basis.
     """
     batch, dim = z.shape
-    z_tan = log_map_zero(_project_to_ball(z))
+    z_tan = log_map_zero(project_to_ball(z))
     z_centered = z_tan - z_tan.mean(dim=0, keepdim=True)
 
     if bundle_size is not None and bundle_size > 0 and dim % bundle_size == 0:
@@ -198,7 +191,7 @@ def compute_separation_loss(
     Overhead: ~1% (O(K^2) pairwise distances).
     """
     device = z_geo.device
-    z_geo = _project_to_ball(z_geo)
+    z_geo = project_to_ball(z_geo)
     z_geo_tan = log_map_zero(z_geo)
 
     centers = []
@@ -232,7 +225,7 @@ def compute_chart_center_separation_loss(
     Uses hinge loss on pairwise distances between chart centers.
     """
     device = chart_centers.device
-    chart_centers = _project_to_ball(chart_centers)
+    chart_centers = project_to_ball(chart_centers)
     loss_sep = torch.tensor(0.0, device=device)
     n_pairs = 0
     for i in range(chart_centers.shape[0]):
@@ -263,7 +256,7 @@ def compute_disentangle_loss(
     L = ||Cov(q(K|x), ||log_0(z)||)||^2_F (global or per-bundle norms).
     """
     device = z_geo.device
-    z_tan = log_map_zero(_project_to_ball(z_geo))
+    z_tan = log_map_zero(project_to_ball(z_geo))
     batch, dim = z_tan.shape
 
     if batch < 2:
@@ -544,8 +537,8 @@ def compute_jump_consistency_loss(
     z_pred_flat = jump_op(flat_src, flat_src_idx, flat_tgt_idx)  # [B*A, D]
 
     # Hyperbolic distance (vectorized)
-    z_pred_flat = _project_to_ball(z_pred_flat)
-    z_target_flat = _project_to_ball(z_targets.reshape(B * A, D))
+    z_pred_flat = project_to_ball(z_pred_flat)
+    z_target_flat = project_to_ball(z_targets.reshape(B * A, D))
     error_flat = hyperbolic_distance(z_pred_flat, z_target_flat).pow(2)  # [B*A]
 
     # Reshape and compute per-pair weighted loss

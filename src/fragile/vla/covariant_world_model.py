@@ -13,7 +13,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers.atlas import _project_to_ball
+from fragile.core.layers.gauge import project_to_ball
 from fragile.core.layers.attention import CovariantAttention, GeodesicConfig
 from fragile.core.layers.gauge import (
     christoffel_contraction,
@@ -125,7 +125,7 @@ class ChartTokenizer(nn.Module):
         B = rw.shape[0]
         tokens_x = rw.unsqueeze(-1) * self.chart_embeddings.unsqueeze(0)  # [B, K, d_model]
         # Project chart centers to stay inside the Poincare ball
-        safe_centers = _project_to_ball(self.chart_centers)  # [K, D]
+        safe_centers = project_to_ball(self.chart_centers)  # [K, D]
         tokens_z = safe_centers.unsqueeze(0).expand(B, -1, -1).contiguous()  # [B, K, D]
         return tokens_x, tokens_z
 
@@ -751,7 +751,7 @@ class GeometricWorldModel(nn.Module):
         of that geometry. The world model should therefore consume the same
         chart centers instead of inventing its own atlas.
         """
-        safe_centers = _project_to_ball(chart_centers.detach())
+        safe_centers = project_to_ball(chart_centers.detach())
         for tok in self._chart_tokenizers():
             tok.chart_centers.copy_(
                 safe_centers.to(device=tok.chart_centers.device, dtype=tok.chart_centers.dtype)
@@ -898,7 +898,7 @@ class GeometricWorldModel(nn.Module):
         if self.V_alg > 0:
             v_corr = self.V_alg * v_corr / (self.V_alg + v_corr.norm(dim=-1, keepdim=True))
         z = poincare_exp_map(z, (h / 2.0) * v_corr)
-        z = _project_to_ball(z)
+        z = project_to_ball(z)
 
         # --- O step: Ornstein-Uhlenbeck thermostat ---
         if use_risk:
@@ -924,7 +924,7 @@ class GeometricWorldModel(nn.Module):
         if self.V_alg > 0:
             v_corr = self.V_alg * v_corr / (self.V_alg + v_corr.norm(dim=-1, keepdim=True))
         z = poincare_exp_map(z, (h / 2.0) * v_corr)
-        z = _project_to_ball(z)
+        z = project_to_ball(z)
 
         # --- B step (second half): momentum kick ---
         force2, phi_eff = self.potential_net.force_and_potential(z, rw)
@@ -1034,7 +1034,7 @@ class GeometricWorldModel(nn.Module):
             target_centers = centers[target_chart]  # [B, D]
 
             # Teleport to chart center
-            z_jumped = _project_to_ball(target_centers)
+            z_jumped = project_to_ball(target_centers)
             z = torch.where(jumped.unsqueeze(-1), z_jumped, z)
 
             # Reset momentum at new position
