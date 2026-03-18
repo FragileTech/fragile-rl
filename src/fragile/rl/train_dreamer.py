@@ -32,11 +32,11 @@ import torch.nn.functional as F
 
 from fragile.layers import FactorizedJumpOperator, TopoEncoder
 from fragile.layers.gauge import hyperbolic_distance, poincare_log_map, project_to_ball
-from fragile.losses.macro import (
+from fragile.losses.macro import zeno_loss
+from fragile.losses.old_macro import (
     compute_enclosure_loss,
     EnclosureProbe,
     grl_alpha_schedule,
-    zeno_loss,
 )
 from fragile.losses.world_model import (
     compute_dynamics_chart_loss,

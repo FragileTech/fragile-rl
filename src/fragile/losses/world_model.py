@@ -798,10 +798,10 @@ def _world_model_closure_losses(
     zeno_mode: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
     """Measure closure and router smoothness from the observation Markov model."""
-    from fragile.losses.macro import (
+    from fragile.losses.macro import zeno_loss
+    from fragile.losses.old_macro import (
         compute_enclosure_loss,
         grl_alpha_schedule,
-        zeno_loss,
     )
 
     zero = z_0.new_zeros(())

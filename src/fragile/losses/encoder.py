@@ -302,7 +302,6 @@ def compute_chart_center_separation_loss(
 
 def compute_window_loss(
     router_weights: Tensor,
-    num_charts: int,
     eps_ground: float = 0.1,
     eps: float = 1e-6,
 ) -> tuple[Tensor, dict]:
@@ -1138,7 +1137,6 @@ def compute_phase1_loss(
     if config.w_window > 0:
         loss_window, _ = compute_window_loss(
             router_reg_weights,
-            config.num_charts,
             eps_ground=config.w_window_eps_ground,
         )
         base_loss = base_loss + config.w_window * loss_window

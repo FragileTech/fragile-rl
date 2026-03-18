@@ -247,7 +247,7 @@ class TestChartBalancing:
         assert metrics["active_code_charts"] == 4
 
     def test_window_loss(self, t):
-        loss, metrics = compute_window_loss(t.router_weights, K)
+        loss, metrics = compute_window_loss(t.router_weights)
         torch.testing.assert_close(loss, torch.tensor(0.0), atol=1e-6, rtol=0)
         assert abs(metrics["I_XK"] - 0.2621574401855469) < 1e-6
 

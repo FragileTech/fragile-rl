@@ -6,7 +6,7 @@ import torch.nn.functional as F
 
 from fragile.layers.gauge import hyperbolic_distance, poincare_exp_map
 from fragile.losses.encoder import orthogonality_loss
-from fragile.losses.macro import (
+from fragile.losses.old_macro import (
     compute_dynamics_markov_loss,
     compute_enclosure_loss,
     DynamicsTransitionModel,

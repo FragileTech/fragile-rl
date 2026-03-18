@@ -99,6 +99,29 @@ def vla_phase1(args):
 
 
 @run.command(
+    "vla-geometry",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def vla_geometry(args):
+    """Train the new sequence-based geometry stack on cached VLA windows.
+
+    All arguments after 'vla-geometry' are forwarded to the command module.
+    Run `uv run fragile vla-geometry -- --help` for all training options.
+    """
+    import sys
+
+    from fragile.commands.train_geometry import main
+
+    original_argv = sys.argv
+    sys.argv = ["fragile-vla-geometry", *args]
+    try:
+        main()
+    finally:
+        sys.argv = original_argv
+
+
+@run.command(
     "dataset",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )

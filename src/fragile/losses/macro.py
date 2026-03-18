@@ -1,7 +1,14 @@
-"""Macro / closure / symbolic transition losses.
+"""Alternative macro / enclosure losses using absolute structured states.
 
-Enclosure probe, dynamics transition model, gradient reversal, zeno
-smoothness, and symbolic (chart+code) Markov losses.
+This module implements the "absolute-state" enclosure probe discussed in the
+Dreamer notes:
+
+- observation and action symbols live in different Poincare balls,
+- hard routing selects one chart and one code per manifold,
+- the probe conditions on the absolute structured state
+  ``u = c_K ⊕ q_{K,k} ⊕ exp_0(z_n)``,
+- observation and action textures are tested separately and jointly for
+  dynamics leakage.
 """
 
 from __future__ import annotations
@@ -10,316 +17,351 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-
-# ---------------------------------------------------------------------------
-# Gradient Reversal
-# ---------------------------------------------------------------------------
+from fragile.layers.gauge import exp_map_zero, mobius_add, project_to_ball
+from fragile.losses.old_macro import GradientReversalLayer
 
 
-class GradientReversalFunction(torch.autograd.Function):
-    """Identity forward, negates gradients backward with alpha scaling."""
-
-    @staticmethod
-    def forward(ctx, x, alpha):
-        ctx.save_for_backward(alpha)
-        return x.clone()
-
-    @staticmethod
-    def backward(ctx, grad_output):
-        (alpha,) = ctx.saved_tensors
-        return -alpha * grad_output, None
+def _state_index(
+    chart_idx: torch.Tensor,
+    code_idx: torch.Tensor,
+    codes_per_chart: int,
+) -> torch.Tensor:
+    """Flatten ``(chart, code)`` into one symbolic-state class index."""
+    return chart_idx.long() * int(codes_per_chart) + code_idx.long()
 
 
-class GradientReversalLayer(nn.Module):
-    """Wraps GradientReversalFunction as an nn.Module."""
+def _validate_hard_symbol_inputs(
+    chart_centers: torch.Tensor,
+    codebook: torch.Tensor,
+    chart_idx: torch.Tensor,
+    code_idx: torch.Tensor,
+    z_n: torch.Tensor | None = None,
+) -> None:
+    """Check that chart/code tensors describe hard-routed symbolic states."""
+    if chart_centers.dim() != 2:
+        msg = "chart_centers must have shape [N_c, D]."
+        raise ValueError(msg)
+    if codebook.dim() != 3:
+        msg = "codebook must have shape [N_c, K, D]."
+        raise ValueError(msg)
+    if codebook.shape[0] != chart_centers.shape[0] or codebook.shape[-1] != chart_centers.shape[-1]:
+        msg = "codebook must agree with chart_centers on chart count and latent dimension."
+        raise ValueError(msg)
+    if chart_idx.dim() != 1 or code_idx.dim() != 1:
+        msg = "chart_idx and code_idx must both have shape [B]."
+        raise ValueError(msg)
+    if chart_idx.shape[0] != code_idx.shape[0]:
+        msg = "chart_idx and code_idx must have the same batch size."
+        raise ValueError(msg)
+    if z_n is not None:
+        if z_n.dim() != 2:
+            msg = "z_n must have shape [B, D]."
+            raise ValueError(msg)
+        if z_n.shape[0] != chart_idx.shape[0] or z_n.shape[1] != chart_centers.shape[1]:
+            msg = "z_n must match the batch size and latent dimension implied by chart_centers."
+            raise ValueError(msg)
 
-    def __init__(self, alpha: float = 1.0):
-        super().__init__()
-        self.register_buffer("alpha", torch.tensor(alpha))
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return GradientReversalFunction.apply(x, self.alpha)
-
-
-# ---------------------------------------------------------------------------
-# Enclosure Probe
-# ---------------------------------------------------------------------------
-
-
-class EnclosureProbe(nn.Module):
-    """Adversarial probe enforcing that z_tex carries no dynamics information.
-
-    z_tex is the high-frequency texture residual used only by the decoder.
-    It must not leak (chart, symbol) transition information — all dynamics
-    should live in z_q (codes) and z_n (continuous refinement for the world
-    model).
-
-    Two probes share the same architecture:
-      - full_probe:     chart_embed + code_embed + action + GRL(z_tex) -> logits [B, S]
-      - baseline_probe: chart_embed + code_embed + action              -> logits [B, S]
-
-    where S = num_charts * codes_per_chart is the flat (chart, symbol) state
-    count.  The GRL reverses gradients into the encoder so that the structure
-    filter learns to keep dynamics out of z_tex.
+def compose_absolute_macro_state(
+    chart_centers: torch.Tensor,
+    codebook: torch.Tensor,
+    chart_idx: torch.Tensor,
+    code_idx: torch.Tensor,
+) -> torch.Tensor:
+    """Compose the hard-routed absolute macro symbol ``c_K ⊕ q_{K,k}``.
 
     Args:
-        chart_dim: Dimension of chart embedding (c_bar).
-        action_dim: Dimension of action vector.
-        ztex_dim: Dimension of z_tex.
-        num_charts: Number of chart classes.
-        codes_per_chart: Number of VQ codes per chart.
-        hidden_dim: Hidden layer width.
-        alpha: Initial GRL alpha.
+        chart_centers: Chart centers in absolute manifold coordinates
+            with shape ``[num_charts, latent_dim]``.
+        codebook: Chart-local code centers with shape
+            ``[num_charts, codes_per_chart, latent_dim]``.
+        chart_idx: Hard chart assignments of shape ``[batch]``.
+        code_idx: Hard code assignments of shape ``[batch]``.
+
+    Returns:
+        Absolute macro symbols with shape ``[batch, latent_dim]``.
+    """
+    _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, code_idx)
+
+    device = chart_idx.device
+    chart_centers_proj = project_to_ball(chart_centers).to(device=device)
+    codebook_proj = project_to_ball(codebook).to(device=device)
+
+    chart_idx_long = chart_idx.long()
+    code_idx_long = code_idx.long()
+    selected_chart = chart_centers_proj[chart_idx_long]
+    selected_code = codebook_proj[chart_idx_long, code_idx_long]
+    return project_to_ball(mobius_add(selected_chart, selected_code))
+
+
+def compose_absolute_structured_state(
+    chart_centers: torch.Tensor,
+    codebook: torch.Tensor,
+    chart_idx: torch.Tensor,
+    code_idx: torch.Tensor,
+    z_n: torch.Tensor,
+) -> torch.Tensor:
+    """Compose the no-texture structured state ``c_K ⊕ (q_{K,k} ⊕ exp_0(z_n))``.
+
+    This matches the encoder-side composition more closely than a raw
+    ``(chart, code)`` tuple because it converts the hard-routed local symbol and
+    nuisance coordinate into one absolute point in that manifold's Poincare
+    ball.
+
+    Args:
+        chart_centers: Chart centers in absolute manifold coordinates
+            with shape ``[num_charts, latent_dim]``.
+        codebook: Chart-local code centers with shape
+            ``[num_charts, codes_per_chart, latent_dim]``.
+        chart_idx: Hard chart assignments of shape ``[batch]``.
+        code_idx: Hard code assignments of shape ``[batch]``.
+        z_n: Tangent nuisance coordinates with shape ``[batch, latent_dim]``.
+
+    Returns:
+        Absolute structured states with shape ``[batch, latent_dim]``.
+    """
+    _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, code_idx, z_n=z_n)
+
+    device = z_n.device
+    dtype = z_n.dtype
+    chart_centers_proj = project_to_ball(chart_centers).to(device=device, dtype=dtype)
+    codebook_proj = project_to_ball(codebook).to(device=device, dtype=dtype)
+
+    chart_idx_long = chart_idx.long().to(device=device)
+    code_idx_long = code_idx.long().to(device=device)
+    selected_chart = chart_centers_proj[chart_idx_long]
+    selected_code = codebook_proj[chart_idx_long, code_idx_long]
+
+    # z_n is stored in the encoder as a tangent-space coordinate, so we map it
+    # to the ball before composing it with the hard-routed code center.
+    local_state = mobius_add(selected_code, exp_map_zero(z_n))
+    return project_to_ball(mobius_add(selected_chart, local_state))
+
+
+def _make_probe_mlp(input_dim: int, hidden_dim: int, output_dim: int, dropout: float) -> nn.Module:
+    """Build the small MLP used by each enclosure-probe head."""
+    return nn.Sequential(
+        nn.Linear(input_dim, hidden_dim),
+        nn.ReLU(),
+        nn.Dropout(dropout),
+        nn.Linear(hidden_dim, output_dim),
+    )
+
+
+class AbsoluteEnclosureProbe(nn.Module):
+    """Adversarial probe using absolute structured states from both manifolds.
+
+    The probe predicts the next observation symbolic state from the current
+    observation/action structured states. Three texture-bearing heads are used:
+
+    - ``obs_texture_probe``: baseline plus observation texture,
+    - ``act_texture_probe``: baseline plus action texture,
+    - ``joint_texture_probe``: baseline plus both textures.
+
+    Comparing those heads against the baseline quantifies how much extra
+    transition information each texture channel contains beyond the intended
+    structured state.
     """
 
     def __init__(
         self,
-        chart_dim: int = 16,
-        action_dim: int = 6,
-        ztex_dim: int = 16,
-        num_charts: int = 8,
-        codes_per_chart: int = 32,
+        obs_struct_dim: int,
+        act_struct_dim: int,
+        obs_tex_dim: int,
+        act_tex_dim: int,
+        num_obs_charts: int,
+        obs_codes_per_chart: int,
         hidden_dim: int = 128,
         alpha: float = 1.0,
-    ):
+        dropout: float = 0.1,
+    ) -> None:
         super().__init__()
-        self.grl = GradientReversalLayer(alpha=alpha)
-        self.num_states = num_charts * codes_per_chart
-        self.codes_per_chart = codes_per_chart
+        self.obs_codes_per_chart = obs_codes_per_chart
+        self.num_obs_states = num_obs_charts * obs_codes_per_chart
 
-        self.code_embed = nn.Embedding(codes_per_chart, chart_dim)
+        self.obs_grl = GradientReversalLayer(alpha=alpha)
+        self.act_grl = GradientReversalLayer(alpha=alpha)
 
-        full_in = chart_dim + chart_dim + action_dim + ztex_dim
-        self.full_probe = nn.Sequential(
-            nn.Linear(full_in, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, self.num_states),
+        baseline_dim = obs_struct_dim + act_struct_dim
+        self.baseline_probe = _make_probe_mlp(
+            baseline_dim,
+            hidden_dim,
+            self.num_obs_states,
+            dropout,
         )
-
-        base_in = chart_dim + chart_dim + action_dim
-        self.baseline_probe = nn.Sequential(
-            nn.Linear(base_in, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, self.num_states),
+        self.obs_texture_probe = _make_probe_mlp(
+            baseline_dim + obs_tex_dim,
+            hidden_dim,
+            self.num_obs_states,
+            dropout,
+        )
+        self.act_texture_probe = _make_probe_mlp(
+            baseline_dim + act_tex_dim,
+            hidden_dim,
+            self.num_obs_states,
+            dropout,
+        )
+        self.joint_texture_probe = _make_probe_mlp(
+            baseline_dim + obs_tex_dim + act_tex_dim,
+            hidden_dim,
+            self.num_obs_states,
+            dropout,
         )
 
     def forward(
         self,
-        chart_embed: torch.Tensor,
-        action: torch.Tensor,
-        z_tex: torch.Tensor,
-        code_idx: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Forward pass.
+        u_obs: torch.Tensor,
+        u_act: torch.Tensor,
+        obs_z_tex: torch.Tensor,
+        act_z_tex: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        """Run the baseline and texture-bearing enclosure heads.
 
         Args:
-            chart_embed: [B, chart_dim] e.g. c_bar.
-            action: [B, action_dim].
-            z_tex: [B, ztex_dim] texture residual.
-            code_idx: [B] long tensor of current VQ code indices.
+            u_obs: Observation structured states of shape ``[batch, obs_struct_dim]``.
+            u_act: Action structured states of shape ``[batch, act_struct_dim]``.
+            obs_z_tex: Observation texture residuals of shape ``[batch, obs_tex_dim]``.
+            act_z_tex: Action texture residuals of shape ``[batch, act_tex_dim]``.
 
         Returns:
-            (logits_full, logits_baseline) each [B, num_states].
+            A dictionary containing logits for the baseline, observation-texture,
+            action-texture, and joint-texture heads.
         """
-        code_e = self.code_embed(code_idx)
-        ztex_rev = self.grl(z_tex)
-        full_input = torch.cat([chart_embed, code_e, action, ztex_rev], dim=-1)
-        base_input = torch.cat([chart_embed, code_e, action], dim=-1)
-        return self.full_probe(full_input), self.baseline_probe(base_input)
+        if u_obs.dim() != 2 or u_act.dim() != 2 or obs_z_tex.dim() != 2 or act_z_tex.dim() != 2:
+            msg = "All probe inputs must have shape [B, D]."
+            raise ValueError(msg)
+        batch_size = u_obs.shape[0]
+        if (
+            u_act.shape[0] != batch_size
+            or obs_z_tex.shape[0] != batch_size
+            or act_z_tex.shape[0] != batch_size
+        ):
+            msg = "All probe inputs must share the same batch size."
+            raise ValueError(msg)
+
+        baseline_input = torch.cat([u_obs, u_act], dim=-1)
+        obs_tex_rev = self.obs_grl(obs_z_tex)
+        act_tex_rev = self.act_grl(act_z_tex)
+
+        return {
+            "baseline": self.baseline_probe(baseline_input),
+            "obs": self.obs_texture_probe(torch.cat([baseline_input, obs_tex_rev], dim=-1)),
+            "act": self.act_texture_probe(torch.cat([baseline_input, act_tex_rev], dim=-1)),
+            "both": self.joint_texture_probe(
+                torch.cat([baseline_input, obs_tex_rev, act_tex_rev], dim=-1),
+            ),
+        }
 
 
-def compute_enclosure_loss(
-    probe: EnclosureProbe,
-    chart_embed_t: torch.Tensor,
-    action_t: torch.Tensor,
-    ztex_t: torch.Tensor,
-    K_chart_tp1: torch.Tensor,
-    K_code_t: torch.Tensor | None = None,
-    K_code_tp1: torch.Tensor | None = None,
-    codes_per_chart: int | None = None,
+def compute_absolute_enclosure_loss(
+    probe: AbsoluteEnclosureProbe,
+    *,
+    obs_chart_centers: torch.Tensor,
+    obs_codebook: torch.Tensor,
+    obs_chart_t: torch.Tensor,
+    obs_code_t: torch.Tensor,
+    obs_z_n_t: torch.Tensor,
+    obs_z_tex_t: torch.Tensor,
+    act_chart_centers: torch.Tensor,
+    act_codebook: torch.Tensor,
+    act_chart_t: torch.Tensor,
+    act_code_t: torch.Tensor,
+    act_z_n_t: torch.Tensor,
+    act_z_tex_t: torch.Tensor,
+    obs_chart_tp1: torch.Tensor,
+    obs_code_tp1: torch.Tensor,
+    obs_codes_per_chart: int | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Compute enclosure probe losses and diagnostics.
+    """Compute enclosure losses using absolute observation/action structured states.
 
-    The probe checks whether z_tex leaks dynamics (chart, code) transition
-    information.  Gradient reversal pushes the structure filter to keep
-    dynamics out of z_tex — all dynamics should live in z_q and z_n.
+    The predicted target is the next observation symbolic state. The encoder-side
+    adversarial loss averages the three texture-bearing heads; the detached probe
+    loss averages the baseline plus those same three heads.
 
     Args:
-        probe: The EnclosureProbe module.
-        chart_embed_t: [B, D] chart embedding at time t (e.g. c_bar).
-        action_t: [B, action_dim] action at time t.
-        ztex_t: [B, ztex_dim] texture residual at time t.
-        K_chart_tp1: [B] ground-truth chart index at t+1.
-        K_code_t: [B] current VQ code index (defaults to zeros).
-        K_code_tp1: [B] next VQ code index (defaults to zeros).
-        codes_per_chart: Number of VQ codes per chart.
+        probe: The absolute-state enclosure probe.
+        obs_chart_centers: Observation chart centers ``[N_obs, D_obs]``.
+        obs_codebook: Observation codebook ``[N_obs, K_obs, D_obs]``.
+        obs_chart_t: Current observation hard chart ids ``[B]``.
+        obs_code_t: Current observation hard code ids ``[B]``.
+        obs_z_n_t: Current observation nuisance tangent ``[B, D_obs]``.
+        obs_z_tex_t: Current observation texture residual ``[B, D_obs_tex]``.
+        act_chart_centers: Action chart centers ``[N_act, D_act]``.
+        act_codebook: Action codebook ``[N_act, K_act, D_act]``.
+        act_chart_t: Current action hard chart ids ``[B]``.
+        act_code_t: Current action hard code ids ``[B]``.
+        act_z_n_t: Current action nuisance tangent ``[B, D_act]``.
+        act_z_tex_t: Current action texture residual ``[B, D_act_tex]``.
+        obs_chart_tp1: Next observation hard chart ids ``[B]``.
+        obs_code_tp1: Next observation hard code ids ``[B]``.
+        obs_codes_per_chart: Optional override for the observation symbol count.
 
     Returns:
-        loss_encoder: CE on full probe (GRL reverses gradient into encoder).
-        loss_probe: CE on detached inputs for both probes (trains probe only).
-        diagnostics: dict with acc_full, acc_base, defect_acc, defect_ce,
-                     ce_full, ce_base.
+        ``(loss_encoder, loss_probe, diagnostics)``.
     """
-    B = K_chart_tp1.shape[0]
-    device = K_chart_tp1.device
+    if obs_codes_per_chart is None:
+        obs_codes_per_chart = probe.obs_codes_per_chart
 
-    if codes_per_chart is None:
-        codes_per_chart = probe.codes_per_chart
-
-    if K_code_t is None:
-        K_code_t = torch.zeros(B, dtype=torch.long, device=device)
-    if K_code_tp1 is None:
-        K_code_tp1 = torch.zeros(B, dtype=torch.long, device=device)
-
-    # Flat (chart, code) target
-    target = K_chart_tp1.long() * codes_per_chart + K_code_tp1.long()
-
-    # -- Encoder loss: gradients flow through GRL into structure filter --
-    logits_full, _ = probe(chart_embed_t, action_t, ztex_t, K_code_t)
-    ce_full = F.cross_entropy(logits_full, target)
-    loss_encoder = ce_full
-
-    # -- Probe loss: train probe on detached inputs --
-    logits_full_det, logits_base_det = probe(
-        chart_embed_t.detach(),
-        action_t.detach(),
-        ztex_t.detach(),
-        K_code_t.detach(),
+    target = _state_index(obs_chart_tp1, obs_code_tp1, obs_codes_per_chart)
+    u_obs = compose_absolute_structured_state(
+        obs_chart_centers,
+        obs_codebook,
+        obs_chart_t,
+        obs_code_t,
+        obs_z_n_t,
     )
-    ce_full_det = F.cross_entropy(logits_full_det, target)
-    ce_base_det = F.cross_entropy(logits_base_det, target)
-    loss_probe = ce_full_det + ce_base_det
+    u_act = compose_absolute_structured_state(
+        act_chart_centers,
+        act_codebook,
+        act_chart_t,
+        act_code_t,
+        act_z_n_t,
+    )
 
-    # -- Diagnostics --
+    logits_live = probe(u_obs, u_act, obs_z_tex_t, act_z_tex_t)
+    ce_obs = F.cross_entropy(logits_live["obs"], target)
+    ce_act = F.cross_entropy(logits_live["act"], target)
+    ce_both = F.cross_entropy(logits_live["both"], target)
+    loss_encoder = (ce_obs + ce_act + ce_both) / 3.0
+
+    logits_det = probe(
+        u_obs.detach(),
+        u_act.detach(),
+        obs_z_tex_t.detach(),
+        act_z_tex_t.detach(),
+    )
+    ce_base_det = F.cross_entropy(logits_det["baseline"], target)
+    ce_obs_det = F.cross_entropy(logits_det["obs"], target)
+    ce_act_det = F.cross_entropy(logits_det["act"], target)
+    ce_both_det = F.cross_entropy(logits_det["both"], target)
+    loss_probe = (ce_base_det + ce_obs_det + ce_act_det + ce_both_det) / 4.0
+
     with torch.no_grad():
-        acc_full = (logits_full_det.argmax(dim=-1) == target).float().mean().item()
-        acc_base = (logits_base_det.argmax(dim=-1) == target).float().mean().item()
-        defect_acc = acc_full - acc_base
-        defect_ce = ce_base_det.item() - ce_full_det.item()
+        acc_base = (logits_det["baseline"].argmax(dim=-1) == target).float().mean().item()
+        acc_obs = (logits_det["obs"].argmax(dim=-1) == target).float().mean().item()
+        acc_act = (logits_det["act"].argmax(dim=-1) == target).float().mean().item()
+        acc_both = (logits_det["both"].argmax(dim=-1) == target).float().mean().item()
 
     diagnostics = {
-        "acc_full": acc_full,
         "acc_base": acc_base,
-        "defect_acc": defect_acc,
-        "defect_ce": defect_ce,
-        "ce_full": ce_full_det.item(),
-        "ce_base": ce_base_det.item(),
+        "acc_obs": acc_obs,
+        "acc_act": acc_act,
+        "acc_both": acc_both,
+        "defect_acc_obs": acc_obs - acc_base,
+        "defect_acc_act": acc_act - acc_base,
+        "defect_acc_both": acc_both - acc_base,
+        "ce_base": float(ce_base_det.detach()),
+        "ce_obs": float(ce_obs_det.detach()),
+        "ce_act": float(ce_act_det.detach()),
+        "ce_both": float(ce_both_det.detach()),
+        "defect_ce_obs": float((ce_base_det - ce_obs_det).detach()),
+        "defect_ce_act": float((ce_base_det - ce_act_det).detach()),
+        "defect_ce_both": float((ce_base_det - ce_both_det).detach()),
+        "loss_encoder": float(loss_encoder.detach()),
+        "loss_probe": float(loss_probe.detach()),
     }
 
     return loss_encoder, loss_probe, diagnostics
-
-
-def grl_alpha_schedule(
-    step: int,
-    warmup_steps: int = 5000,
-    max_alpha: float = 1.0,
-) -> float:
-    """Linear warmup schedule for GRL alpha.
-
-    Args:
-        step: Current training step.
-        warmup_steps: Number of steps to linearly ramp alpha.
-        max_alpha: Maximum alpha value after warmup.
-
-    Returns:
-        Alpha value for the current step.
-    """
-    if step >= warmup_steps:
-        return max_alpha
-    return max_alpha * step / warmup_steps
-
-
-# ---------------------------------------------------------------------------
-# Dynamics Transition Model
-# ---------------------------------------------------------------------------
-
-
-class DynamicsTransitionModel(nn.Module):
-    """Coarse Markov model: P(c_{t+1}, k_{t+1} | c_bar_t, k_t, a_t).
-
-    Same architecture as EnclosureProbe but without GRL. The transition
-    operates over the code symbols used by the encoder, which in the
-    shared-codebook setting are the same symbols used for reconstruction.
-    """
-
-    def __init__(
-        self,
-        chart_dim: int,
-        action_dim: int,
-        num_charts: int,
-        codes_per_chart: int | None = None,
-        dyn_codes_per_chart: int | None = None,
-        hidden_dim: int = 128,
-    ):
-        super().__init__()
-        if codes_per_chart is None:
-            if dyn_codes_per_chart is None:
-                msg = "DynamicsTransitionModel requires codes_per_chart."
-                raise ValueError(msg)
-            codes_per_chart = dyn_codes_per_chart
-        elif dyn_codes_per_chart is not None and dyn_codes_per_chart != codes_per_chart:
-            msg = "codes_per_chart and dyn_codes_per_chart must match when both are set."
-            raise ValueError(msg)
-
-        self.num_states = num_charts * codes_per_chart
-        self.codes_per_chart = codes_per_chart
-        # Backward-compatible alias for older call sites and checkpoints.
-        self.dyn_codes_per_chart = codes_per_chart
-        self.code_embed = nn.Embedding(codes_per_chart, chart_dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(chart_dim + chart_dim + action_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(0.1),
-            nn.Linear(hidden_dim, self.num_states),
-        )
-
-    def forward(
-        self,
-        chart_embed: torch.Tensor,
-        action: torch.Tensor,
-        code_idx: torch.Tensor | None = None,
-        code_features: torch.Tensor | None = None,
-    ) -> torch.Tensor:
-        """Returns logits [B, num_states]."""
-        if code_features is None:
-            if code_idx is None:
-                msg = "Either code_idx or code_features must be provided."
-                raise ValueError(msg)
-            code_e = self.code_embed(code_idx)
-        else:
-            code_e = code_features
-        inp = torch.cat([chart_embed, code_e, action], dim=-1)
-        return self.mlp(inp)
-
-
-def compute_dyn_transition_loss(
-    model: DynamicsTransitionModel,
-    chart_embed_t: torch.Tensor,
-    action_t: torch.Tensor,
-    K_code_dyn_t: torch.Tensor,
-    K_chart_tp1: torch.Tensor,
-    K_code_dyn_tp1: torch.Tensor,
-    code_features_t: torch.Tensor | None = None,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    """CE loss + accuracy metric for dynamics transition prediction."""
-    target = K_chart_tp1.long() * model.codes_per_chart + K_code_dyn_tp1.long()
-    logits = model(
-        chart_embed_t,
-        action_t,
-        K_code_dyn_t,
-        code_features=code_features_t,
-    )
-    loss = F.cross_entropy(logits, target)
-    with torch.no_grad():
-        acc = (logits.argmax(dim=-1) == target).float().mean().item()
-    return loss, {"dyn_trans_ce": loss.item(), "dyn_trans_acc": acc}
-
-
-# ---------------------------------------------------------------------------
-# Markov / Zeno losses
-# ---------------------------------------------------------------------------
 
 
 def zeno_loss(
@@ -352,201 +394,10 @@ def zeno_loss(
         return (0.5 * kl_t + 0.5 * kl_prev).mean()
     raise ValueError(f"Unknown zeno_loss mode: {mode}")
 
-
-def compute_dynamics_markov_loss(
-    atlas_encoder: torch.nn.Module,
-    dyn_trans_model: DynamicsTransitionModel | None,
-    v_local_all: torch.Tensor,
-    router_weights_all: torch.Tensor,
-    chart_embed_all: torch.Tensor,
-    chart_targets_all: torch.Tensor,
-    actions: torch.Tensor,
-    *,
-    transition_weight: float = 0.5,
-    zeno_weight: float = 0.0,
-    zeno_mode: str = "jsd",
-) -> tuple[torch.Tensor, dict[str, float], torch.Tensor | None]:
-    """Auxiliary macro-Markov losses for Phase 2/3 dynamics symbols.
-
-    The Phase 1 atlas stays frozen while a separate dynamics codebook learns
-    symbols on the same chart-local latent. The simple Markov model operates on
-    the frozen macro geometry ``c_bar_t`` plus the trainable dynamics symbol.
-    This makes the closure signal trainable without changing the Phase 1 atlas.
-
-    Returns:
-        total_loss: VQ + weighted transition CE + optional zeno smoothness.
-        metrics: Logged diagnostics for the dynamics-symbol auxiliary.
-        K_code_dyn_all: [B, H] hard dynamics-code assignments, or None.
-    """
-    zero = v_local_all.new_tensor(0.0)
-    metrics = {
-        "dyn_vq": 0.0,
-        "dyn_trans_ce": 0.0,
-        "dyn_trans_acc": 0.0,
-        "dyn_zeno": 0.0,
-        "dyn_state_flip_rate": 0.0,
-        "dyn_state_entropy": 0.0,
-        "dyn_state_max_prob": 0.0,
-        "dyn_code_flip_rate": 0.0,
-    }
-    if dyn_trans_model is None or v_local_all.shape[1] < 2:
-        return zero, metrics, None
-
-    B, H, D = v_local_all.shape
-    chart_dim = chart_embed_all.shape[-1]
-    action_dim = actions.shape[-1]
-
-    z_q_dyn_flat, K_code_dyn_flat, _, vq_dyn_loss = atlas_encoder.dynamics_vq(
-        v_local_all.reshape(B * H, D),
-        router_weights_all.reshape(B * H, router_weights_all.shape[-1]),
-    )
-    z_q_dyn_all = z_q_dyn_flat.reshape(B, H, D)
-    K_code_dyn_all = K_code_dyn_flat.reshape(B, H)
-
-    n_transitions = min(H - 1, actions.shape[1])
-    if n_transitions < 1:
-        metrics["dyn_vq"] = vq_dyn_loss.item()
-        return vq_dyn_loss, metrics, K_code_dyn_all
-
-    trans_logits = dyn_trans_model(
-        chart_embed_all[:, :n_transitions].reshape(B * n_transitions, chart_dim),
-        actions[:, :n_transitions].reshape(B * n_transitions, action_dim),
-        K_code_dyn_all[:, :n_transitions].reshape(B * n_transitions),
-        code_features=z_q_dyn_all[:, :n_transitions].reshape(B * n_transitions, D),
-    )
-    trans_target = (
-        chart_targets_all[:, 1 : n_transitions + 1].long() * dyn_trans_model.codes_per_chart
-        + K_code_dyn_all[:, 1 : n_transitions + 1].long()
-    ).reshape(B * n_transitions)
-    trans_loss = F.cross_entropy(trans_logits, trans_target)
-    total = vq_dyn_loss + transition_weight * trans_loss
-
-    metrics["dyn_vq"] = vq_dyn_loss.item()
-    metrics["dyn_trans_ce"] = trans_loss.item()
-    metrics["dyn_trans_acc"] = float((trans_logits.argmax(dim=-1) == trans_target).float().mean())
-
-    code_flips = (
-        (K_code_dyn_all[:, 1 : n_transitions + 1] != K_code_dyn_all[:, :n_transitions])
-        .float()
-        .mean()
-    )
-    metrics["dyn_code_flip_rate"] = code_flips.item()
-
-    if n_transitions > 1:
-        probs = F.softmax(trans_logits, dim=-1).reshape(B, n_transitions, -1)
-        pred_states = probs.argmax(dim=-1)
-        state_entropy = -(probs * probs.clamp(min=1e-8).log()).sum(dim=-1).mean()
-        metrics["dyn_state_entropy"] = state_entropy.item()
-        metrics["dyn_state_max_prob"] = probs.max(dim=-1).values.mean().item()
-        metrics["dyn_state_flip_rate"] = (
-            (pred_states[:, 1:] != pred_states[:, :-1]).float().mean().item()
-        )
-        if zeno_weight > 0:
-            dyn_zeno = zeno_loss(
-                probs[:, 1:].reshape(-1, probs.shape[-1]),
-                probs[:, :-1].reshape(-1, probs.shape[-1]),
-                mode=zeno_mode,
-            )
-            total = total + zeno_weight * dyn_zeno
-            metrics["dyn_zeno"] = dyn_zeno.item()
-
-    return total, metrics, K_code_dyn_all
-
-
-# ---------------------------------------------------------------------------
-# Symbolic transition (from train_dreamer.py)
-# ---------------------------------------------------------------------------
-
-
-def _state_index(
-    chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int
-) -> torch.Tensor:
-    """Flatten `(chart, code)` symbolic state indices."""
-    return chart_idx.long() * int(codes_per_chart) + code_idx.long()
-
-
-def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Mean over entries where ``mask`` is one."""
-    denom = mask.sum().clamp(min=1.0)
-    return (values * mask).sum() / denom
-
-
-def _symbolic_transition_supervision_losses(
-    *,
-    state_probs: torch.Tensor,
-    code_probs: torch.Tensor,
-    target_charts: torch.Tensor,
-    target_codes: torch.Tensor,
-    valid_mask: torch.Tensor,
-    codes_per_chart: int,
-    metric_prefix: str,
-) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Return replay-supervised code and full-symbol losses for a symbolic transition."""
-    flat_state_probs = state_probs.reshape(-1, state_probs.shape[-1])
-    flat_code_probs = code_probs.reshape(-1, code_probs.shape[-2], code_probs.shape[-1])
-    flat_target_charts = target_charts.reshape(-1).long()
-    flat_target_codes = target_codes.reshape(-1).long()
-    flat_target_state = _state_index(flat_target_charts, flat_target_codes, codes_per_chart)
-    flat_valid = valid_mask.reshape(-1).to(flat_state_probs)
-    batch_idx = torch.arange(flat_target_state.shape[0], device=flat_state_probs.device)
-
-    target_chart_code_probs = flat_code_probs[batch_idx, flat_target_charts]
-    target_code_log_prob = (
-        target_chart_code_probs
-        .gather(
-            1,
-            flat_target_codes.unsqueeze(-1),
-        )
-        .squeeze(-1)
-        .clamp(min=1e-8)
-        .log()
-    )
-    target_state_log_prob = (
-        flat_state_probs
-        .gather(
-            1,
-            flat_target_state.unsqueeze(-1),
-        )
-        .squeeze(-1)
-        .clamp(min=1e-8)
-        .log()
-    )
-
-    L_code = _masked_mean(-target_code_log_prob, flat_valid)
-    L_symbol = _masked_mean(-target_state_log_prob, flat_valid)
-
-    code_pred_target_chart = target_chart_code_probs.argmax(dim=-1)
-    symbol_pred = flat_state_probs.argmax(dim=-1)
-    symbol_pred_chart = torch.div(symbol_pred, codes_per_chart, rounding_mode="floor")
-    symbol_pred_code = symbol_pred.remainder(codes_per_chart)
-
-    symbol_entropy = -(flat_state_probs * flat_state_probs.clamp(min=1e-8).log()).sum(dim=-1)
-    metrics = {
-        f"{metric_prefix}/L_code": float(L_code.detach()),
-        f"{metric_prefix}/L_symbol": float(L_symbol.detach()),
-        f"{metric_prefix}/code_nll": float(L_code.detach()),
-        f"{metric_prefix}/symbol_nll": float(L_symbol.detach()),
-        f"{metric_prefix}/code_acc": float(
-            _masked_mean(
-                (code_pred_target_chart == flat_target_codes).to(flat_state_probs.dtype),
-                flat_valid,
-            ).detach(),
-        ),
-        f"{metric_prefix}/chart_acc_from_symbol": float(
-            _masked_mean(
-                (symbol_pred_chart == flat_target_charts).to(flat_state_probs.dtype), flat_valid
-            ).detach(),
-        ),
-        f"{metric_prefix}/symbol_acc": float(
-            _masked_mean(
-                (symbol_pred == flat_target_state).to(flat_state_probs.dtype), flat_valid
-            ).detach(),
-        ),
-        f"{metric_prefix}/symbol_code_acc": float(
-            _masked_mean(
-                (symbol_pred_code == flat_target_codes).to(flat_state_probs.dtype), flat_valid
-            ).detach(),
-        ),
-        f"{metric_prefix}/state_entropy": float(_masked_mean(symbol_entropy, flat_valid).detach()),
-    }
-    return L_code, L_symbol, metrics
+__all__ = [
+    "AbsoluteEnclosureProbe",
+    "compose_absolute_macro_state",
+    "compose_absolute_structured_state",
+    "compute_absolute_enclosure_loss",
+    "zeno_loss",
+]

@@ -39,7 +39,7 @@ from fragile.losses.encoder import (
     get_jump_weight_schedule,
     orthogonality_loss,
 )
-from fragile.losses.macro import (
+from fragile.losses.old_macro import (
     compute_dyn_transition_loss,
     compute_dynamics_markov_loss,
     compute_enclosure_loss,

@@ -359,7 +359,7 @@ def reward_head(world_model):
 
 @pytest.fixture
 def enclosure_probe():
-    from fragile.losses.macro import EnclosureProbe
+    from fragile.losses.old_macro import EnclosureProbe
 
     return EnclosureProbe(
         chart_dim=D,
