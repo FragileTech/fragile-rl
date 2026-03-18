@@ -46,6 +46,9 @@ class VLAConfig:
     soft_equiv_zero_self_mixing: bool = False
     soft_equiv_soft_assign: bool = True
     soft_equiv_temperature: float = 1.0
+    input_affine_enabled: bool = False
+    input_affine_learnable: bool = False
+    input_affine_min_scale: float = 1e-3
 
     # --- World model ---
     action_dim: int = 6  # SO100: 6 joints (shoulder_pan/lift, elbow, wrist_flex/roll, gripper)

@@ -242,3 +242,28 @@ def test_forward_outputs_valid_and_gradients_flow() -> None:
             has_grad = True
             break
     assert has_grad, "No gradients through forward path"
+
+
+def test_topoencoder_optional_affine_map_is_invertible() -> None:
+    torch.manual_seed(13)
+    model = TopoEncoder(
+        input_dim=3,
+        hidden_dim=16,
+        latent_dim=2,
+        num_charts=3,
+        codes_per_chart=4,
+        input_affine_enabled=True,
+    )
+    mean = torch.tensor([10.0, -5.0, 2.0])
+    std = torch.tensor([2.0, 4.0, 0.5])
+    model.set_io_affine_stats(mean, std)
+
+    x = torch.tensor([[12.0, -1.0, 2.5], [8.0, -9.0, 1.5]])
+    x_norm = model.normalize_input(x)
+    x_roundtrip = model.denormalize_output(x_norm)
+    x_loss, x_recon_loss = model.loss_space_pair(x, x_roundtrip)
+
+    expected = torch.tensor([[1.0, 1.0, 1.0], [-1.0, -1.0, -1.0]])
+    torch.testing.assert_close(x_norm, expected)
+    torch.testing.assert_close(x_roundtrip, x)
+    torch.testing.assert_close(x_loss, x_recon_loss)

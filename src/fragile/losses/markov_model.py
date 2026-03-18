@@ -1,26 +1,31 @@
-"""Differentiable coarse Markov model on atlas macro symbols.
+"""Differentiable geometry-aware coarse Markov model on atlas macro symbols.
 
-This module is the standalone symbolic planner discussed for Dreamer:
+This module keeps the atlas symbols as the actual macro state:
 
 - observations and actions are softly mapped to chart/code symbol
   distributions in their own Poincare balls,
-- each flattened symbolic state has an absolute point
-  ``c_k ⊕ q_{k,c}`` attached to it,
-- ``MacroTransitionModel`` learns a stochastic coarse transition
-  ``p(s_{t+1} | s_t, a_t)``,
-- helper losses let the coarse model fit replay transitions, shape the
-  symbolic atlas, and supervise the micro world model later on.
-
-The code here does not touch the current trainer yet. It only provides the
-pieces needed to wire the symbolic Markov path in a later step.
+- each flattened symbolic state has an absolute point ``c_k ⊕ q_{k,c}``,
+- the coarse transition model reads the observation/action symbol geometry,
+  predicts the next observation chart first, then the next code within that
+  chart,
+- helper losses fit the factorized model, shape the symbolic atlas, and can
+  later supervise the micro world model.
 """
 
 from __future__ import annotations
+
+from typing import Any
 
 import torch
 from torch import nn
 import torch.nn.functional as F
 
+from fragile.layers import (
+    BeliefGeometryEncoder,
+    ChartTransitionRouter,
+    ConditionalCodeRouter,
+    NextStateQueryPredictor,
+)
 from fragile.layers.gauge import (
     hyperbolic_distance,
     log_map_zero,
@@ -75,6 +80,53 @@ def _reshape_leading_dims(x: torch.Tensor, leading_shape: torch.Size) -> torch.T
     return x.reshape(*leading_shape, *x.shape[1:])
 
 
+def _state_chart_code_view(
+    state_probs: torch.Tensor,
+    num_charts: int,
+    codes_per_chart: int,
+) -> torch.Tensor:
+    """View a flattened state distribution as ``[..., chart, code]``."""
+    if state_probs.shape[-1] != num_charts * codes_per_chart:
+        msg = "state_probs does not match the requested chart/code factorization."
+        raise ValueError(msg)
+    return state_probs.reshape(*state_probs.shape[:-1], num_charts, codes_per_chart)
+
+
+def _state_probs_to_chart_probs(
+    state_probs: torch.Tensor,
+    num_charts: int,
+    codes_per_chart: int,
+) -> torch.Tensor:
+    """Marginalize flattened state probabilities down to chart probabilities."""
+    return _state_chart_code_view(state_probs, num_charts, codes_per_chart).sum(dim=-1)
+
+
+def _state_probs_to_code_conditionals(
+    state_probs: torch.Tensor,
+    num_charts: int,
+    codes_per_chart: int,
+    *,
+    eps: float = 1e-8,
+) -> torch.Tensor:
+    """Convert flattened state probabilities into per-chart code conditionals."""
+    view = _state_chart_code_view(state_probs, num_charts, codes_per_chart)
+    chart_probs = view.sum(dim=-1, keepdim=True)
+    code_probs = view / chart_probs.clamp(min=eps)
+    uniform = code_probs.new_full(code_probs.shape, 1.0 / float(codes_per_chart))
+    return torch.where(chart_probs <= eps, uniform, code_probs)
+
+
+def _flatten_chart_code_probs(
+    chart_probs: torch.Tensor,
+    code_probs: torch.Tensor,
+) -> torch.Tensor:
+    """Flatten factorized chart/code probabilities back into one state axis."""
+    if chart_probs.shape != code_probs.shape[:-1]:
+        msg = "chart_probs and code_probs must agree on leading chart dimensions."
+        raise ValueError(msg)
+    return (chart_probs.unsqueeze(-1) * code_probs).reshape(*chart_probs.shape[:-1], -1)
+
+
 def compose_absolute_macro_dictionary(
     chart_centers: torch.Tensor,
     codebook: torch.Tensor,
@@ -84,37 +136,19 @@ def compose_absolute_macro_dictionary(
     The resulting dictionary lives in one manifold only. Use the observation
     chart/code tensors to build the observation symbol dictionary and the action
     tensors to build the action symbol dictionary.
-
-    Args:
-        chart_centers: Absolute chart centers with shape ``[num_charts, latent_dim]``.
-        codebook: Chart-local code centers with shape
-            ``[num_charts, codes_per_chart, latent_dim]``.
-
-    Returns:
-        A dictionary with:
-        - ``state_points``: absolute macro points ``c_k ⊕ q_{k,c}``, shape ``[S, D]``.
-        - ``state_tangent_points``: origin-tangent coordinates of those points, shape ``[S, D]``.
-        - ``chart_idx``: chart index attached to each flattened state, shape ``[S]``.
-        - ``code_idx``: code index attached to each flattened state, shape ``[S]``.
     """
     _validate_macro_geometry(chart_centers, codebook)
 
-    # Put both chart centers and chart-local code centers inside the valid
-    # Poincare ball before composing them into absolute symbolic coordinates.
     chart_centers_proj = project_to_ball(chart_centers)
     codebook_proj = project_to_ball(codebook).to(
         device=chart_centers_proj.device,
         dtype=chart_centers_proj.dtype,
     )
 
-    # Each flattened symbolic state is represented by the absolute point reached
-    # by starting at a chart center and applying that chart's local code offset.
     state_points = project_to_ball(mobius_add(chart_centers_proj[:, None, :], codebook_proj))
     num_charts, codes_per_chart, latent_dim = codebook_proj.shape
     device = codebook_proj.device
 
-    # Keep the original chart/code ids attached to the flattened state order so
-    # later code can move freely between table indices and symbolic tuples.
     chart_idx = (
         torch.arange(num_charts, device=device)
         .unsqueeze(1)
@@ -143,12 +177,7 @@ def expected_macro_state(
     *,
     eps: float = 1e-8,
 ) -> torch.Tensor:
-    """Map a soft symbolic state to one barycentric point in the same manifold.
-
-    This is a summary of the symbolic distribution, not the actual state used
-    by the coarse planner. The coarse model should still reason in terms of the
-    full distribution over symbols.
-    """
+    """Map a soft symbolic state to one barycentric point in the same manifold."""
     if state_points.dim() != 2:
         msg = "state_points must have shape [S, D]."
         raise ValueError(msg)
@@ -156,8 +185,6 @@ def expected_macro_state(
         msg = "state_probs and state_points must agree on the number of symbols."
         raise ValueError(msg)
 
-    # Collapse any batch/time axes, compute the hyperbolic barycenter of the
-    # symbolic support points, then restore the original leading dimensions.
     leading_shape = state_probs.shape[:-1]
     flat_probs = _normalize_probs(state_probs.reshape(-1, state_probs.shape[-1]), eps=eps)
     flat_points = project_to_ball(state_points).to(device=flat_probs.device, dtype=flat_probs.dtype)
@@ -174,34 +201,7 @@ def soft_macro_state_distribution(
     code_tau: float = 1.0,
     eps: float = 1e-8,
 ) -> dict[str, torch.Tensor]:
-    """Attach a differentiable coarse symbolic state to a manifold point.
-
-    The symbolizer mirrors the atlas factorization instead of snapping directly
-    to one absolute macro point:
-
-    1. score charts from the latent point,
-    2. form the soft chart barycenter ``c_bar``,
-    3. move the latent into chart-local coordinates,
-    4. score chart-local codes,
-    5. flatten ``chart_probs * code_probs`` into one symbolic distribution.
-
-    Because the entire path is soft, gradients can flow back into the chart
-    centers, codebook, and the latent that is being symbolized.
-
-    Args:
-        z_latent: Manifold points with shape ``[..., latent_dim]``.
-        chart_centers: Absolute chart centers with shape ``[num_charts, latent_dim]``.
-        codebook: Chart-local code centers with shape
-            ``[num_charts, codes_per_chart, latent_dim]``.
-        chart_tau: Temperature for the chart softmax.
-        code_tau: Temperature for the code softmax inside each chart.
-        eps: Numerical floor used when normalizing or taking logs.
-
-    Returns:
-        A dictionary containing soft chart/code/state distributions, hard
-        argmax indices derived from the joint symbolic state, the absolute macro
-        dictionary, and a barycentric ``macro_state_mean`` summary.
-    """
+    """Attach a differentiable coarse symbolic state to a manifold point."""
     _validate_macro_geometry(chart_centers, codebook)
     if z_latent.dim() < 2:
         msg = "z_latent must have shape [..., D]."
@@ -218,41 +218,27 @@ def soft_macro_state_distribution(
     chart_tau = max(float(chart_tau), eps)
     code_tau = max(float(code_tau), eps)
 
-    # First decide which charts are plausible for each latent point. This keeps
-    # the symbolic state soft and differentiable instead of hard-routing early.
     chart_dist = hyperbolic_distance(flat_z.unsqueeze(1), chart_centers_proj.unsqueeze(0))
     chart_logits = -chart_dist / chart_tau
     chart_log_probs = F.log_softmax(chart_logits, dim=-1)
     chart_probs = chart_log_probs.exp()
 
-    # Translate the latent point into the soft chart frame defined by the
-    # chart barycenter. Codes are scored in these local coordinates.
     c_bar = poincare_weighted_mean(chart_centers_proj, chart_probs, eps=eps)
     v_local = project_to_ball(mobius_add(-c_bar, flat_z))
 
-    # Within each chart, score the chart-local code centers against the local
-    # latent coordinates. This yields a per-chart categorical code distribution.
     code_dist = hyperbolic_distance(v_local[:, None, None, :], codebook_proj[None, :, :, :])
     code_logits = -code_dist / code_tau
     code_log_probs = F.log_softmax(code_logits, dim=-1)
     code_probs = code_log_probs.exp()
 
-    # Combine the chart and per-chart code probabilities into one flattened
-    # symbolic state distribution over all `(chart, code)` pairs.
-    state_log_probs = (chart_log_probs.unsqueeze(-1) + code_log_probs).reshape(
-        flat_z.shape[0], -1
-    )
+    state_log_probs = (chart_log_probs.unsqueeze(-1) + code_log_probs).reshape(flat_z.shape[0], -1)
     state_probs = state_log_probs.exp()
 
-    # Decode the most likely symbolic state only for diagnostics/convenience.
-    # The coarse model itself should still use the full soft distribution.
     codes_per_chart = codebook_proj.shape[1]
     state_idx = state_probs.argmax(dim=-1)
     chart_idx = torch.div(state_idx, codes_per_chart, rounding_mode="floor")
     code_idx = state_idx.remainder(codes_per_chart)
 
-    # Build reusable absolute coordinates for every symbol, then expose both
-    # the hard selected point and the soft barycentric summary of the state.
     symbol_dict = compose_absolute_macro_dictionary(chart_centers_proj, codebook_proj)
     hard_state_point = symbol_dict["state_points"][state_idx]
     macro_state_mean = expected_macro_state(state_probs, symbol_dict["state_points"], eps=eps)
@@ -278,40 +264,79 @@ def soft_macro_state_distribution(
         "chart_entropy": _reshape_leading_dims(chart_entropy, leading_shape),
         "macro_state_mean": _reshape_leading_dims(macro_state_mean, leading_shape),
         "hard_state_point": _reshape_leading_dims(hard_state_point, leading_shape),
+        "chart_centers": chart_centers_proj,
+        "chart_tangent_points": log_map_zero(chart_centers_proj),
+        "codebook": codebook_proj,
+        "code_tangent_points": log_map_zero(codebook_proj),
         **symbol_dict,
     }
 
 
 class MacroTransitionModel(nn.Module):
-    """Full stochastic symbolic dynamics model ``p(s_{t+1} | s_t, a_t)``.
+    """Geometry-aware stochastic symbolic dynamics model ``p(s_{t+1} | s_t, a_t)``.
 
-    The model learns a dense transition tensor over observation symbols and
-    action symbols. Planning stays cheap because rollouts operate directly on
-    probability vectors instead of decoding the full micro latent.
+    The model keeps the atlas symbols as the state space, but parameterizes the
+    transition via the observation/action symbol geometry:
 
-    The class can also carry a coarse reward table and a continuation table so
-    symbolic rollouts already expose the signals a planner usually needs.
+    1. summarize the current observation and action beliefs using their symbol
+       tangent coordinates,
+    2. fuse both summaries into a next-observation query point,
+    3. score the next chart against the observation chart centers,
+    4. score the next code inside each chart against that chart's local codebook.
     """
 
     def __init__(
         self,
-        num_states: int,
-        num_actions: int,
+        obs_latent_dim: int,
+        act_latent_dim: int,
+        num_obs_charts: int,
+        obs_codes_per_chart: int,
+        num_act_charts: int,
+        act_codes_per_chart: int,
         *,
+        hidden_dim: int = 128,
+        feature_scale: float = 0.1,
+        use_residual_transition: bool = True,
+        residual_scale: float = 1.0,
         learn_reward: bool = True,
         learn_continuation: bool = True,
         initial_continuation: float = 0.99,
     ) -> None:
         super().__init__()
-        self.num_states = int(num_states)
-        self.num_actions = int(num_actions)
+        self.obs_latent_dim = int(obs_latent_dim)
+        self.act_latent_dim = int(act_latent_dim)
+        self.num_obs_charts = int(num_obs_charts)
+        self.obs_codes_per_chart = int(obs_codes_per_chart)
+        self.num_act_charts = int(num_act_charts)
+        self.act_codes_per_chart = int(act_codes_per_chart)
+        self.num_states = self.num_obs_charts * self.obs_codes_per_chart
+        self.num_actions = self.num_act_charts * self.act_codes_per_chart
         if self.num_states <= 0 or self.num_actions <= 0:
             msg = "num_states and num_actions must both be positive."
             raise ValueError(msg)
 
-        self.transition_logits = nn.Parameter(
-            torch.zeros(self.num_states, self.num_actions, self.num_states)
+        self.hidden_dim = int(hidden_dim)
+        self.obs_encoder = BeliefGeometryEncoder(self.obs_latent_dim, self.hidden_dim)
+        self.act_encoder = BeliefGeometryEncoder(self.act_latent_dim, self.hidden_dim)
+        self.query_predictor = NextStateQueryPredictor(self.hidden_dim, self.obs_latent_dim)
+        self.chart_router = ChartTransitionRouter(
+            self.obs_latent_dim,
+            self.hidden_dim,
+            feature_scale=feature_scale,
         )
+        self.code_router = ConditionalCodeRouter(
+            self.obs_latent_dim,
+            self.hidden_dim,
+            feature_scale=feature_scale,
+        )
+
+        self.residual_scale = float(residual_scale)
+        if use_residual_transition:
+            self.residual_transition_logits = nn.Parameter(
+                torch.zeros(self.num_states, self.num_actions, self.num_states)
+            )
+        else:
+            self.register_parameter("residual_transition_logits", None)
 
         if learn_reward:
             self.reward_table = nn.Parameter(torch.zeros(self.num_states, self.num_actions))
@@ -327,9 +352,35 @@ class MacroTransitionModel(nn.Module):
         else:
             self.register_parameter("continuation_logits", None)
 
-    def transition_table(self) -> torch.Tensor:
-        """Return the normalized transition tensor ``[S, A, S]``."""
-        return F.softmax(self.transition_logits, dim=-1)
+    def _validate_inputs(self, state_probs: torch.Tensor, action_probs: torch.Tensor) -> None:
+        if state_probs.dim() < 2 or action_probs.dim() < 2:
+            msg = "state_probs and action_probs must have shape [..., num_symbols]."
+            raise ValueError(msg)
+        if state_probs.shape[:-1] != action_probs.shape[:-1]:
+            msg = "state_probs and action_probs must share the same leading shape."
+            raise ValueError(msg)
+        if state_probs.shape[-1] != self.num_states:
+            msg = "state_probs has the wrong number of states."
+            raise ValueError(msg)
+        if action_probs.shape[-1] != self.num_actions:
+            msg = "action_probs has the wrong number of actions."
+            raise ValueError(msg)
+
+    def _validate_geometry(
+        self,
+        obs_geometry: dict[str, torch.Tensor],
+        act_geometry: dict[str, torch.Tensor],
+    ) -> None:
+        required_obs = {"chart_centers", "codebook", "state_tangent_points"}
+        required_act = {"state_tangent_points"}
+        missing_obs = required_obs.difference(obs_geometry)
+        missing_act = required_act.difference(act_geometry)
+        if missing_obs:
+            msg = f"obs_geometry is missing keys: {sorted(missing_obs)}."
+            raise ValueError(msg)
+        if missing_act:
+            msg = f"act_geometry is missing keys: {sorted(missing_act)}."
+            raise ValueError(msg)
 
     def continuation_table(self) -> torch.Tensor | None:
         """Return the coarse continuation probability for each state-action pair."""
@@ -345,8 +396,6 @@ class MacroTransitionModel(nn.Module):
         """Return the expected coarse reward under soft state/action distributions."""
         if self.reward_table is None:
             return state_probs.new_zeros(state_probs.shape[:-1])
-        # Average the symbolic reward table under the current belief over
-        # coarse states and actions.
         state_probs = _normalize_probs(state_probs)
         action_probs = _normalize_probs(action_probs)
         return torch.einsum("...s,sa,...a->...", state_probs, self.reward_table, action_probs)
@@ -360,97 +409,139 @@ class MacroTransitionModel(nn.Module):
         table = self.continuation_table()
         if table is None:
             return state_probs.new_ones(state_probs.shape[:-1])
-        # This mirrors `reward_from_probs`, but reads from the continuation
-        # table so symbolic rollouts can also predict nonterminal probability.
         state_probs = _normalize_probs(state_probs)
         action_probs = _normalize_probs(action_probs)
         return torch.einsum("...s,sa,...a->...", state_probs, table, action_probs)
-
-    def conditional_from_indices(
-        self,
-        state_idx: torch.Tensor,
-        action_idx: torch.Tensor,
-    ) -> dict[str, torch.Tensor]:
-        """Read one conditional transition row ``p(s' | s, a)`` from hard indices."""
-        if state_idx.shape != action_idx.shape:
-            msg = "state_idx and action_idx must have matching shapes."
-            raise ValueError(msg)
-        flat_state_idx = state_idx.reshape(-1).long()
-        flat_action_idx = action_idx.reshape(-1).long()
-        leading_shape = state_idx.shape
-
-        # Hard indices simply read one row from the learned transition tensor.
-        transition_row = self.transition_table()[flat_state_idx, flat_action_idx]
-        out = {
-            "next_state_probs": _reshape_leading_dims(transition_row, leading_shape),
-            "next_state_log_probs": _reshape_leading_dims(
-                transition_row.clamp(min=1e-8).log(),
-                leading_shape,
-            ),
-        }
-        if self.reward_table is not None:
-            reward = self.reward_table[flat_state_idx, flat_action_idx]
-            out["reward"] = _reshape_leading_dims(reward, leading_shape)
-        if self.continuation_logits is not None:
-            continuation = self.continuation_table()[flat_state_idx, flat_action_idx]
-            out["continuation"] = _reshape_leading_dims(continuation, leading_shape)
-        return out
 
     def forward(
         self,
         state_probs: torch.Tensor,
         action_probs: torch.Tensor,
+        *,
+        obs_geometry: dict[str, torch.Tensor],
+        act_geometry: dict[str, torch.Tensor],
+        eps: float = 1e-8,
     ) -> dict[str, torch.Tensor]:
         """Roll one coarse Markov step from soft symbolic state/action inputs."""
-        if state_probs.dim() < 2 or action_probs.dim() < 2:
-            msg = "state_probs and action_probs must have shape [..., num_symbols]."
-            raise ValueError(msg)
-        if state_probs.shape[:-1] != action_probs.shape[:-1]:
-            msg = "state_probs and action_probs must share the same leading shape."
-            raise ValueError(msg)
-        if state_probs.shape[-1] != self.num_states:
-            msg = "state_probs has the wrong number of states."
-            raise ValueError(msg)
-        if action_probs.shape[-1] != self.num_actions:
-            msg = "action_probs has the wrong number of actions."
-            raise ValueError(msg)
+        self._validate_inputs(state_probs, action_probs)
+        self._validate_geometry(obs_geometry, act_geometry)
 
-        # Normalize the incoming symbolic beliefs, then marginalize the full
-        # `T[s, a, s']` tensor under them to get the next symbolic belief.
-        state_probs = _normalize_probs(state_probs)
-        action_probs = _normalize_probs(action_probs)
-        transition = self.transition_table()
+        leading_shape = state_probs.shape[:-1]
+        state_probs = _normalize_probs(state_probs, eps=eps)
+        action_probs = _normalize_probs(action_probs, eps=eps)
 
-        next_state_probs = torch.einsum(
-            "...s,...a,san->...n",
-            state_probs,
-            action_probs,
-            transition,
+        obs_state_tangent = obs_geometry["state_tangent_points"]
+        act_state_tangent = act_geometry["state_tangent_points"]
+        obs_chart_centers = obs_geometry["chart_centers"]
+        obs_codebook = obs_geometry["codebook"]
+
+        obs_summary = self.obs_encoder(state_probs, obs_state_tangent, eps=eps)
+        act_summary = self.act_encoder(action_probs, act_state_tangent, eps=eps)
+        query = self.query_predictor(obs_summary["summary"], act_summary["summary"])
+        chart_out = self.chart_router(query["query_point"], query["context"], obs_chart_centers)
+        code_out = self.code_router(
+            query["query_point"],
+            query["context"],
+            obs_chart_centers,
+            obs_codebook,
         )
-        next_state_log_probs = next_state_probs.clamp(min=1e-8).log()
-        next_state_entropy = -(next_state_probs * next_state_log_probs).sum(dim=-1)
-        next_state_top1_prob = next_state_probs.max(dim=-1).values
 
-        # Keep a few diagnostics that are useful later when we want to know
-        # whether the coarse model is confident or highly aliased.
+        base_state_log_probs = (
+            chart_out["chart_log_probs"].unsqueeze(-1) + code_out["code_log_probs"]
+        ).reshape(*leading_shape, self.num_states)
+        if self.residual_transition_logits is not None:
+            residual_logits = torch.einsum(
+                "...s,...a,san->...n",
+                state_probs,
+                action_probs,
+                self.residual_transition_logits,
+            )
+            final_logits = base_state_log_probs + self.residual_scale * residual_logits
+            next_state_log_probs = F.log_softmax(final_logits, dim=-1)
+        else:
+            residual_logits = None
+            next_state_log_probs = base_state_log_probs
+        next_state_probs = next_state_log_probs.exp()
+
+        next_chart_probs = _state_probs_to_chart_probs(
+            next_state_probs,
+            self.num_obs_charts,
+            self.obs_codes_per_chart,
+        )
+        next_chart_log_probs = next_chart_probs.clamp(min=eps).log()
+        next_code_probs = _state_probs_to_code_conditionals(
+            next_state_probs,
+            self.num_obs_charts,
+            self.obs_codes_per_chart,
+            eps=eps,
+        )
+        next_code_log_probs = next_code_probs.clamp(min=eps).log()
+
+        next_state_entropy = -(next_state_probs * next_state_log_probs).sum(dim=-1)
+        next_chart_entropy = -(next_chart_probs * next_chart_log_probs).sum(dim=-1)
+        code_entropy_per_chart = -(next_code_probs * next_code_log_probs).sum(dim=-1)
+        next_code_entropy = (next_chart_probs * code_entropy_per_chart).sum(dim=-1)
+
         out = {
             "next_state_probs": next_state_probs,
             "next_state_log_probs": next_state_log_probs,
             "next_state_entropy": next_state_entropy,
-            "next_state_top1_prob": next_state_top1_prob,
+            "next_state_top1_prob": next_state_probs.max(dim=-1).values,
+            "next_chart_probs": next_chart_probs,
+            "next_chart_log_probs": next_chart_log_probs,
+            "next_chart_entropy": next_chart_entropy,
+            "next_chart_top1_prob": next_chart_probs.max(dim=-1).values,
+            "next_code_probs": next_code_probs,
+            "next_code_log_probs": next_code_log_probs,
+            "next_code_entropy": next_code_entropy,
+            "next_code_top1_prob": (
+                next_chart_probs * next_code_probs.max(dim=-1).values
+            ).sum(dim=-1),
+            "base_state_log_probs": base_state_log_probs,
+            "base_state_probs": base_state_log_probs.exp(),
+            "next_query_tangent": query["query_tangent"],
+            "next_query_point": query["query_point"],
+            "joint_context": query["context"],
+            "next_chart_logits_base": chart_out["chart_logits"],
+            "next_code_logits_base": code_out["code_logits"],
+            "next_local_query": code_out["local_query"],
         }
+        if residual_logits is not None:
+            out["residual_transition_logits"] = residual_logits
         if self.reward_table is not None:
-            # The same symbolic belief is used to read expected reward.
             out["reward"] = self.reward_from_probs(state_probs, action_probs)
         if self.continuation_logits is not None:
-            # And optionally the expected continuation probability.
             out["continuation"] = self.continuation_from_probs(state_probs, action_probs)
         return out
+
+    def conditional_from_indices(
+        self,
+        state_idx: torch.Tensor,
+        action_idx: torch.Tensor,
+        *,
+        obs_geometry: dict[str, torch.Tensor],
+        act_geometry: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        """Read one conditional transition row from hard indices via one-hot inputs."""
+        if state_idx.shape != action_idx.shape:
+            msg = "state_idx and action_idx must have matching shapes."
+            raise ValueError(msg)
+        state_probs = F.one_hot(state_idx.long(), self.num_states).to(dtype=torch.float32)
+        action_probs = F.one_hot(action_idx.long(), self.num_actions).to(dtype=torch.float32)
+        return self(
+            state_probs,
+            action_probs,
+            obs_geometry=obs_geometry,
+            act_geometry=act_geometry,
+        )
 
     def rollout(
         self,
         state_probs_0: torch.Tensor,
         action_probs_seq: torch.Tensor,
+        *,
+        obs_geometry: dict[str, torch.Tensor],
+        act_geometry: dict[str, torch.Tensor],
     ) -> dict[str, torch.Tensor]:
         """Roll the coarse model forward for a sequence of soft symbolic actions."""
         if state_probs_0.dim() < 2:
@@ -463,8 +554,6 @@ class MacroTransitionModel(nn.Module):
             msg = "state_probs_0 and action_probs_seq must share the same batch shape."
             raise ValueError(msg)
 
-        # Roll the belief state forward one symbolic action at a time and keep
-        # the whole trajectory for planning or multi-step supervision.
         current_state = _normalize_probs(state_probs_0)
         state_traj = [current_state]
         next_state_traj: list[torch.Tensor] = []
@@ -475,7 +564,12 @@ class MacroTransitionModel(nn.Module):
 
         horizon = action_probs_seq.shape[-2]
         for t in range(horizon):
-            step_out = self(current_state, action_probs_seq[..., t, :])
+            step_out = self(
+                current_state,
+                action_probs_seq[..., t, :],
+                obs_geometry=obs_geometry,
+                act_geometry=act_geometry,
+            )
             current_state = step_out["next_state_probs"]
             state_traj.append(current_state)
             next_state_traj.append(step_out["next_state_probs"])
@@ -486,8 +580,6 @@ class MacroTransitionModel(nn.Module):
             if "continuation" in step_out:
                 continuation_traj.append(step_out["continuation"])
 
-        # Return both the full state trajectory and the per-step outputs so the
-        # caller can use this for planning, supervision, or diagnostics.
         out = {
             "state_probs": torch.stack(state_traj, dim=-2),
             "next_state_probs": torch.stack(next_state_traj, dim=-2),
@@ -506,6 +598,8 @@ def compute_markov_transition_loss(
     state_probs: torch.Tensor,
     action_probs: torch.Tensor,
     *,
+    obs_geometry: dict[str, torch.Tensor],
+    act_geometry: dict[str, torch.Tensor],
     target_next_state_probs: torch.Tensor | None = None,
     target_next_chart_idx: torch.Tensor | None = None,
     target_next_code_idx: torch.Tensor | None = None,
@@ -514,36 +608,61 @@ def compute_markov_transition_loss(
     metric_prefix: str = "markov",
     eps: float = 1e-8,
 ) -> tuple[torch.Tensor, dict[str, float], dict[str, torch.Tensor]]:
-    """Fit the coarse model on replay next-symbol supervision.
-
-    This helper does not detach inputs or targets. If the caller passes live
-    symbolic probabilities from the atlas, the transition loss can reshape the
-    symbol geometry. Detach before calling if a frozen target is desired.
-    """
-    pred = model(state_probs, action_probs)
+    """Fit the coarse model on replay next-symbol supervision."""
+    pred = model(
+        state_probs,
+        action_probs,
+        obs_geometry=obs_geometry,
+        act_geometry=act_geometry,
+        eps=eps,
+    )
     flat_next_probs = pred["next_state_probs"].reshape(-1, model.num_states)
     flat_next_log_probs = pred["next_state_log_probs"].reshape(-1, model.num_states)
+    flat_next_chart_probs = pred["next_chart_probs"].reshape(-1, model.num_obs_charts)
+    flat_next_chart_log_probs = pred["next_chart_log_probs"].reshape(-1, model.num_obs_charts)
+    flat_next_code_probs = pred["next_code_probs"].reshape(
+        -1, model.num_obs_charts, model.obs_codes_per_chart
+    )
+    flat_next_code_log_probs = pred["next_code_log_probs"].reshape(
+        -1, model.num_obs_charts, model.obs_codes_per_chart
+    )
 
     if valid_mask is None:
         flat_valid = flat_next_probs.new_ones(flat_next_probs.shape[0])
     else:
         flat_valid = valid_mask.reshape(-1).to(flat_next_probs)
 
-    target_state: torch.Tensor | None = None
+    target_state: torch.Tensor
+    flat_target_chart: torch.Tensor
+    flat_target_code: torch.Tensor
     target_entropy = flat_next_probs.new_zeros(flat_next_probs.shape[0])
+
     if target_next_state_probs is not None:
-        # Soft targets let the macro model imitate another symbolic predictor or
-        # a teacher distribution instead of one-hot replay labels.
         flat_target_probs = _normalize_probs(
             target_next_state_probs.reshape(-1, model.num_states),
             eps=eps,
         )
-        flat_transition_ce = -(flat_target_probs * flat_next_log_probs).sum(dim=-1)
+        target_chart_probs = _state_probs_to_chart_probs(
+            flat_target_probs,
+            model.num_obs_charts,
+            model.obs_codes_per_chart,
+        )
+        target_code_probs = _state_probs_to_code_conditionals(
+            flat_target_probs,
+            model.num_obs_charts,
+            model.obs_codes_per_chart,
+            eps=eps,
+        )
+        flat_chart_ce = -(target_chart_probs * flat_next_chart_log_probs).sum(dim=-1)
+        flat_code_ce = -(
+            target_chart_probs.unsqueeze(-1) * target_code_probs * flat_next_code_log_probs
+        ).sum(dim=(-1, -2))
+        flat_state_ce = -(flat_target_probs * flat_next_log_probs).sum(dim=-1)
         target_state = flat_target_probs.argmax(dim=-1)
+        flat_target_chart = torch.div(target_state, model.obs_codes_per_chart, rounding_mode="floor")
+        flat_target_code = target_state.remainder(model.obs_codes_per_chart)
         target_entropy = -(flat_target_probs * flat_target_probs.clamp(min=eps).log()).sum(dim=-1)
     else:
-        # Hard targets train against replay `(chart, code)` labels exactly the
-        # same way a standard next-class model would.
         if target_next_chart_idx is None or target_next_code_idx is None or codes_per_chart is None:
             msg = (
                 "Provide either target_next_state_probs or the "
@@ -553,40 +672,61 @@ def compute_markov_transition_loss(
         flat_target_chart = target_next_chart_idx.reshape(-1).long()
         flat_target_code = target_next_code_idx.reshape(-1).long()
         target_state = _state_index(flat_target_chart, flat_target_code, codes_per_chart)
-        flat_transition_ce = F.nll_loss(flat_next_log_probs, target_state, reduction="none")
+        flat_chart_ce = F.nll_loss(flat_next_chart_log_probs, flat_target_chart, reduction="none")
+        code_rows = flat_next_code_log_probs[
+            torch.arange(flat_next_code_log_probs.shape[0], device=flat_next_code_log_probs.device),
+            flat_target_chart,
+        ]
+        flat_code_ce = F.nll_loss(code_rows, flat_target_code, reduction="none")
+        flat_state_ce = F.nll_loss(flat_next_log_probs, target_state, reduction="none")
 
-    # Optimize the masked average transition CE and report both full-state and
-    # decomposed chart/code accuracy for debugging symbol failures.
+    flat_transition_ce = flat_chart_ce + flat_code_ce
     loss = _masked_mean(flat_transition_ce, flat_valid)
     pred_state = flat_next_probs.argmax(dim=-1)
+    pred_chart = torch.div(pred_state, model.obs_codes_per_chart, rounding_mode="floor")
+    pred_code = pred_state.remainder(model.obs_codes_per_chart)
 
     metrics = {
         f"{metric_prefix}/L_transition": float(loss.detach()),
         f"{metric_prefix}/transition_ce": float(_masked_mean(flat_transition_ce, flat_valid).detach()),
+        f"{metric_prefix}/state_ce": float(_masked_mean(flat_state_ce, flat_valid).detach()),
+        f"{metric_prefix}/chart_ce": float(_masked_mean(flat_chart_ce, flat_valid).detach()),
+        f"{metric_prefix}/code_ce": float(_masked_mean(flat_code_ce, flat_valid).detach()),
         f"{metric_prefix}/transition_acc": float(
             _masked_mean((pred_state == target_state).to(flat_next_probs.dtype), flat_valid).detach()
+        ),
+        f"{metric_prefix}/chart_acc": float(
+            _masked_mean((pred_chart == flat_target_chart).to(flat_next_probs.dtype), flat_valid).detach()
+        ),
+        f"{metric_prefix}/code_acc": float(
+            _masked_mean((pred_code == flat_target_code).to(flat_next_probs.dtype), flat_valid).detach()
         ),
         f"{metric_prefix}/next_state_entropy": float(
             _masked_mean(pred["next_state_entropy"].reshape(-1), flat_valid).detach()
         ),
+        f"{metric_prefix}/next_chart_entropy": float(
+            _masked_mean(pred["next_chart_entropy"].reshape(-1), flat_valid).detach()
+        ),
+        f"{metric_prefix}/next_code_entropy": float(
+            _masked_mean(pred["next_code_entropy"].reshape(-1), flat_valid).detach()
+        ),
         f"{metric_prefix}/next_state_top1_prob": float(
             _masked_mean(pred["next_state_top1_prob"].reshape(-1), flat_valid).detach()
+        ),
+        f"{metric_prefix}/next_chart_top1_prob": float(
+            _masked_mean(pred["next_chart_top1_prob"].reshape(-1), flat_valid).detach()
+        ),
+        f"{metric_prefix}/next_code_top1_prob": float(
+            _masked_mean(pred["next_code_top1_prob"].reshape(-1), flat_valid).detach()
         ),
         f"{metric_prefix}/target_state_entropy": float(
             _masked_mean(target_entropy, flat_valid).detach()
         ),
     }
 
-    if target_next_chart_idx is not None and target_next_code_idx is not None and codes_per_chart is not None:
-        flat_target_chart = target_next_chart_idx.reshape(-1).long()
-        flat_target_code = target_next_code_idx.reshape(-1).long()
-        pred_chart = torch.div(pred_state, codes_per_chart, rounding_mode="floor")
-        pred_code = pred_state.remainder(codes_per_chart)
-        metrics[f"{metric_prefix}/chart_acc"] = float(
-            _masked_mean((pred_chart == flat_target_chart).to(flat_next_probs.dtype), flat_valid).detach()
-        )
-        metrics[f"{metric_prefix}/code_acc"] = float(
-            _masked_mean((pred_code == flat_target_code).to(flat_next_probs.dtype), flat_valid).detach()
+    if "residual_transition_logits" in pred:
+        metrics[f"{metric_prefix}/residual_logit_norm"] = float(
+            pred["residual_transition_logits"].norm(dim=-1).mean().detach()
         )
 
     return loss, metrics, pred
@@ -601,11 +741,7 @@ def compute_distribution_alignment_loss(
     detach_teacher: bool = True,
     eps: float = 1e-8,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Align one symbolic distribution to another with masked KL/CE metrics.
-
-    The default is the teacher-student setup discussed for the macro model:
-    the teacher is detached and the student receives the gradients.
-    """
+    """Align one symbolic distribution to another with masked KL/CE metrics."""
     if teacher_probs.shape != student_probs.shape:
         msg = "teacher_probs and student_probs must have the same shape."
         raise ValueError(msg)
@@ -620,8 +756,6 @@ def compute_distribution_alignment_loss(
     else:
         flat_valid = valid_mask.reshape(-1).to(flat_student)
 
-    # Compute teacher->student cross-entropy and KL. In the common use case the
-    # teacher is detached, so this becomes a one-way shaping loss.
     flat_student_log_probs = flat_student.clamp(min=eps).log()
     flat_teacher_log_probs = flat_teacher.clamp(min=eps).log()
     cross_entropy = -(flat_teacher * flat_student_log_probs).sum(dim=-1)
@@ -629,8 +763,6 @@ def compute_distribution_alignment_loss(
     kl = cross_entropy - teacher_entropy
     loss = _masked_mean(kl, flat_valid)
 
-    # Agreement and entropy metrics tell us whether the student is matching the
-    # teacher's modes and whether it is collapsing or staying too diffuse.
     teacher_idx = flat_teacher.argmax(dim=-1)
     student_idx = flat_student.argmax(dim=-1)
     student_entropy = -(flat_student * flat_student_log_probs).sum(dim=-1)

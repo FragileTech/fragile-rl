@@ -61,6 +61,7 @@ def _default_act_vla_config() -> VLAConfig:
         num_charts=8,
         codes_per_chart=32,
         batch_size=256,
+        input_affine_enabled=True,
     )
 
 
@@ -84,6 +85,9 @@ def _encoder_kwargs(config: VLAConfig) -> dict[str, Any]:
         "soft_equiv_zero_self_mixing": config.soft_equiv_zero_self_mixing,
         "soft_equiv_soft_assign": config.soft_equiv_soft_assign,
         "soft_equiv_temperature": config.soft_equiv_temperature,
+        "input_affine_enabled": config.input_affine_enabled,
+        "input_affine_learnable": config.input_affine_learnable,
+        "input_affine_min_scale": config.input_affine_min_scale,
         "film_conditioning": True,
         "commitment_beta": config.commitment_beta,
         "codebook_loss_weight": config.codebook_loss_weight,
@@ -145,6 +149,10 @@ class FragileAgentConfig:
     enclosure_hidden_dim: int = 128
     enclosure_dropout: float = 0.1
     enclosure_alpha: float = 1.0
+    markov_hidden_dim: int = 128
+    markov_feature_scale: float = 0.1
+    markov_use_residual_transition: bool = True
+    markov_residual_scale: float = 1.0
     markov_learn_reward: bool = True
     markov_learn_continuation: bool = True
     markov_initial_continuation: float = 0.99
@@ -178,6 +186,7 @@ class FragileAgentTrainerConfig:
     weight_markov_shape: float = 1.0
     enclosure_alpha_max: float = 1.0
     enclosure_alpha_warmup_steps: int = 5000
+    phase1_frame_mode: str = "all"
 
 
 class FragileAgent(nn.Module):
@@ -223,8 +232,16 @@ class FragileAgent(nn.Module):
         )
 
         self.macro_model = MacroTransitionModel(
-            num_states=self.num_obs_states,
-            num_actions=self.num_act_states,
+            obs_latent_dim=self.config.obs_encoder.latent_dim,
+            act_latent_dim=self.config.act_encoder.latent_dim,
+            num_obs_charts=self.config.obs_encoder.num_charts,
+            obs_codes_per_chart=self.config.obs_encoder.codes_per_chart,
+            num_act_charts=self.config.act_encoder.num_charts,
+            act_codes_per_chart=self.config.act_encoder.codes_per_chart,
+            hidden_dim=self.config.markov_hidden_dim,
+            feature_scale=self.config.markov_feature_scale,
+            use_residual_transition=self.config.markov_use_residual_transition,
+            residual_scale=self.config.markov_residual_scale,
             learn_reward=self.config.markov_learn_reward,
             learn_continuation=self.config.markov_learn_continuation,
             initial_continuation=self.config.markov_initial_continuation,
@@ -292,7 +309,21 @@ class FragileAgent(nn.Module):
             msg = "Received a fully masked batch; at least one valid frame is required."
             raise ValueError(msg)
 
+        time_index = torch.arange(horizon, device=x.device, dtype=torch.long).expand(batch_size, -1)
+        last_valid_t = torch.where(mask, time_index, -torch.ones_like(time_index)).max(dim=1).values
+        anchor_batch = (last_valid_t >= 0).nonzero(as_tuple=True)[0]
+        anchor_flat_idx = anchor_batch * horizon + last_valid_t[anchor_batch]
+        valid_lookup = torch.full(
+            (batch_size * horizon,),
+            -1,
+            device=x.device,
+            dtype=torch.long,
+        )
+        valid_lookup[valid_idx] = torch.arange(valid_idx.numel(), device=x.device)
+        anchor_valid_pos = valid_lookup[anchor_flat_idx]
+
         x_valid = flat_x[valid_idx]
+        x_model_valid = model.normalize_input(x_valid)
         (
             chart_idx_valid,
             code_idx_valid,
@@ -306,9 +337,9 @@ class FragileAgent(nn.Module):
             c_bar_valid,
             v_local_valid,
             z_q_blended_valid,
-        ) = model.encoder(x_valid, routing_tau=routing_tau)
+        ) = model.encoder(x_model_valid, routing_tau=routing_tau)
 
-        x_recon_valid, dec_router_weights_valid, _ = model.decoder(
+        x_recon_valid, dec_router_weights_valid, _ = model.decode(
             z_geo_valid,
             chart_index=None,
             router_weights=enc_router_weights_valid,
@@ -328,6 +359,7 @@ class FragileAgent(nn.Module):
             "input": x,
             "mask": mask,
             "valid_idx": valid_idx,
+            "anchor_valid_pos": anchor_valid_pos,
             "num_valid": torch.tensor(valid_idx.numel(), device=x.device),
             "x_valid": x_valid,
             "x_recon_valid": x_recon_valid,
@@ -422,6 +454,10 @@ class FragileAgent(nn.Module):
             "hard_state_point",
         ]
         out = {
+            "chart_centers": symbol_valid["chart_centers"],
+            "chart_tangent_points": symbol_valid["chart_tangent_points"],
+            "codebook": symbol_valid["codebook"],
+            "code_tangent_points": symbol_valid["code_tangent_points"],
             "state_points": symbol_valid["state_points"],
             "state_tangent_points": symbol_valid["state_tangent_points"],
             "dictionary_chart_idx": symbol_valid["chart_idx"],
@@ -468,6 +504,7 @@ class FragileAgent(nn.Module):
         routing_tau: float = -1.0,
         macro_chart_tau: float = 1.0,
         macro_code_tau: float = 1.0,
+        compute_macro: bool = True,
     ) -> dict[str, Any]:
         """Encode a batch of trajectories and build aligned transition views."""
         obs, mask = self._normalize_sequence_input(obs, mask)
@@ -485,20 +522,23 @@ class FragileAgent(nn.Module):
         obs_out = self._encode_sequence(self.obs_encoder, obs, mask, routing_tau=routing_tau)
         act_out = self._encode_sequence(self.act_encoder, act, act_mask, routing_tau=routing_tau)
 
-        obs_macro = self._symbolize_sequence(
-            obs_out,
-            self.obs_encoder.encoder.chart_centers,
-            self.obs_encoder.encoder.codebook,
-            chart_tau=macro_chart_tau,
-            code_tau=macro_code_tau,
-        )
-        act_macro = self._symbolize_sequence(
-            act_out,
-            self.act_encoder.encoder.chart_centers,
-            self.act_encoder.encoder.codebook,
-            chart_tau=macro_chart_tau,
-            code_tau=macro_code_tau,
-        )
+        obs_macro = None
+        act_macro = None
+        if compute_macro:
+            obs_macro = self._symbolize_sequence(
+                obs_out,
+                self.obs_encoder.encoder.chart_centers,
+                self.obs_encoder.encoder.codebook,
+                chart_tau=macro_chart_tau,
+                code_tau=macro_code_tau,
+            )
+            act_macro = self._symbolize_sequence(
+                act_out,
+                self.act_encoder.encoder.chart_centers,
+                self.act_encoder.encoder.codebook,
+                chart_tau=macro_chart_tau,
+                code_tau=macro_code_tau,
+            )
 
         transition_mask = mask[:, :-1] & mask[:, 1:]
         transition_valid_idx = transition_mask.reshape(-1).nonzero(as_tuple=True)[0]
@@ -520,12 +560,12 @@ class FragileAgent(nn.Module):
             "obs_z_geo_t": obs_out["z_geo"][:, :-1],
             "obs_z_geo_tp1": obs_out["z_geo"][:, 1:],
             "act_z_geo_t": act_out["z_geo"][:, :-1],
-            "obs_state_probs_t": obs_macro["state_probs"][:, :-1],
-            "act_state_probs_t": act_macro["state_probs"][:, :-1],
-            "obs_state_probs_tp1": obs_macro["state_probs"][:, 1:],
-            "obs_state_idx_t": obs_macro["state_idx"][:, :-1],
-            "act_state_idx_t": act_macro["state_idx"][:, :-1],
-            "obs_state_idx_tp1": obs_macro["state_idx"][:, 1:],
+            "obs_state_probs_t": None if obs_macro is None else obs_macro["state_probs"][:, :-1],
+            "act_state_probs_t": None if act_macro is None else act_macro["state_probs"][:, :-1],
+            "obs_state_probs_tp1": None if obs_macro is None else obs_macro["state_probs"][:, 1:],
+            "obs_state_idx_t": None if obs_macro is None else obs_macro["state_idx"][:, :-1],
+            "act_state_idx_t": None if act_macro is None else act_macro["state_idx"][:, :-1],
+            "obs_state_idx_tp1": None if obs_macro is None else obs_macro["state_idx"][:, 1:],
         }
         if transition_valid_idx.numel() > 0:
             transitions.update({
@@ -563,31 +603,43 @@ class FragileAgent(nn.Module):
                     transitions["act_z_geo_t"],
                     transition_valid_idx,
                 ),
-                "obs_state_probs_t_valid": _flatten_selected(
-                    transitions["obs_state_probs_t"],
-                    transition_valid_idx,
-                ),
-                "act_state_probs_t_valid": _flatten_selected(
-                    transitions["act_state_probs_t"],
-                    transition_valid_idx,
-                ),
-                "obs_state_probs_tp1_valid": _flatten_selected(
-                    transitions["obs_state_probs_tp1"],
-                    transition_valid_idx,
-                ),
-                "obs_state_idx_t_valid": _flatten_selected(
-                    transitions["obs_state_idx_t"],
-                    transition_valid_idx,
-                ),
-                "act_state_idx_t_valid": _flatten_selected(
-                    transitions["act_state_idx_t"],
-                    transition_valid_idx,
-                ),
-                "obs_state_idx_tp1_valid": _flatten_selected(
-                    transitions["obs_state_idx_tp1"],
-                    transition_valid_idx,
-                ),
             })
+            if obs_macro is not None and act_macro is not None:
+                transitions.update({
+                    "obs_state_probs_t_valid": _flatten_selected(
+                        transitions["obs_state_probs_t"],
+                        transition_valid_idx,
+                    ),
+                    "act_state_probs_t_valid": _flatten_selected(
+                        transitions["act_state_probs_t"],
+                        transition_valid_idx,
+                    ),
+                    "obs_state_probs_tp1_valid": _flatten_selected(
+                        transitions["obs_state_probs_tp1"],
+                        transition_valid_idx,
+                    ),
+                    "obs_state_idx_t_valid": _flatten_selected(
+                        transitions["obs_state_idx_t"],
+                        transition_valid_idx,
+                    ),
+                    "act_state_idx_t_valid": _flatten_selected(
+                        transitions["act_state_idx_t"],
+                        transition_valid_idx,
+                    ),
+                    "obs_state_idx_tp1_valid": _flatten_selected(
+                        transitions["obs_state_idx_tp1"],
+                        transition_valid_idx,
+                    ),
+                })
+            else:
+                transitions.update({
+                    "obs_state_probs_t_valid": None,
+                    "act_state_probs_t_valid": None,
+                    "obs_state_probs_tp1_valid": None,
+                    "obs_state_idx_t_valid": None,
+                    "act_state_idx_t_valid": None,
+                    "obs_state_idx_tp1_valid": None,
+                })
         else:
             obs_latent_dim = self.config.obs_encoder.latent_dim
             act_latent_dim = self.config.act_encoder.latent_dim
@@ -605,19 +657,31 @@ class FragileAgent(nn.Module):
                 "obs_z_geo_t_valid": obs_out["z_geo_valid"].new_empty((0, obs_latent_dim)),
                 "obs_z_geo_tp1_valid": obs_out["z_geo_valid"].new_empty((0, obs_latent_dim)),
                 "act_z_geo_t_valid": act_out["z_geo_valid"].new_empty((0, act_latent_dim)),
-                "obs_state_probs_t_valid": obs_macro["state_probs_valid"].new_empty(
-                    (0, self.num_obs_states),
-                ),
-                "act_state_probs_t_valid": act_macro["state_probs_valid"].new_empty(
-                    (0, self.num_act_states),
-                ),
-                "obs_state_probs_tp1_valid": obs_macro["state_probs_valid"].new_empty(
-                    (0, self.num_obs_states),
-                ),
-                "obs_state_idx_t_valid": obs_macro["state_idx_valid"].new_empty((0,)),
-                "act_state_idx_t_valid": act_macro["state_idx_valid"].new_empty((0,)),
-                "obs_state_idx_tp1_valid": obs_macro["state_idx_valid"].new_empty((0,)),
             })
+            if obs_macro is not None and act_macro is not None:
+                transitions.update({
+                    "obs_state_probs_t_valid": obs_macro["state_probs_valid"].new_empty(
+                        (0, self.num_obs_states),
+                    ),
+                    "act_state_probs_t_valid": act_macro["state_probs_valid"].new_empty(
+                        (0, self.num_act_states),
+                    ),
+                    "obs_state_probs_tp1_valid": obs_macro["state_probs_valid"].new_empty(
+                        (0, self.num_obs_states),
+                    ),
+                    "obs_state_idx_t_valid": obs_macro["state_idx_valid"].new_empty((0,)),
+                    "act_state_idx_t_valid": act_macro["state_idx_valid"].new_empty((0,)),
+                    "obs_state_idx_tp1_valid": obs_macro["state_idx_valid"].new_empty((0,)),
+                })
+            else:
+                transitions.update({
+                    "obs_state_probs_t_valid": None,
+                    "act_state_probs_t_valid": None,
+                    "obs_state_probs_tp1_valid": None,
+                    "obs_state_idx_t_valid": None,
+                    "act_state_idx_t_valid": None,
+                    "obs_state_idx_tp1_valid": None,
+                })
 
         return {
             "obs": obs_out,
@@ -773,6 +837,68 @@ class FragileAgentTrainer:
             mask = mask.to(self.device)
         return obs, act, mask
 
+    def init_code_activity_accumulator(self) -> dict[str, list[set[int]]]:
+        """Create mutable per-chart code-usage sets for obs and act."""
+        return {
+            "obs": [set() for _ in range(self.agent.config.obs_encoder.num_charts)],
+            "act": [set() for _ in range(self.agent.config.act_encoder.num_charts)],
+        }
+
+    def update_code_activity_accumulator(
+        self,
+        accumulator: dict[str, list[set[int]]] | None,
+        forward: dict[str, Any],
+    ) -> None:
+        """Fold one batch of hard chart/code assignments into an activity accumulator."""
+        if accumulator is None:
+            return
+
+        obs_chart = forward["obs"]["chart_idx_valid"].reshape(-1).detach().cpu()
+        obs_code = forward["obs"]["code_idx_valid"].reshape(-1).detach().cpu()
+        act_chart = forward["act"]["chart_idx_valid"].reshape(-1).detach().cpu()
+        act_code = forward["act"]["code_idx_valid"].reshape(-1).detach().cpu()
+
+        for chart in range(len(accumulator["obs"])):
+            mask = obs_chart == chart
+            if mask.any():
+                accumulator["obs"][chart].update(int(code) for code in obs_code[mask].tolist())
+        for chart in range(len(accumulator["act"])):
+            mask = act_chart == chart
+            if mask.any():
+                accumulator["act"][chart].update(int(code) for code in act_code[mask].tolist())
+
+    def finalize_code_activity(
+        self,
+        accumulator: dict[str, list[set[int]]] | None,
+    ) -> dict[str, list[int]]:
+        """Convert a mutable activity accumulator into per-chart counts."""
+        if accumulator is None:
+            return {"obs": [], "act": []}
+        return {
+            "obs": [len(codes) for codes in accumulator["obs"]],
+            "act": [len(codes) for codes in accumulator["act"]],
+        }
+
+    def _phase1_valid_positions(self, encoded: dict[str, torch.Tensor]) -> torch.Tensor | None:
+        """Select which valid frames contribute frame-local Phase-1 losses."""
+        mode = self.config.phase1_frame_mode
+        if mode == "all":
+            return None
+        if mode == "anchor":
+            return encoded["anchor_valid_pos"]
+        msg = "phase1_frame_mode must be one of {'all', 'anchor'}."
+        raise ValueError(msg)
+
+    def _select_valid_rows(
+        self,
+        value: torch.Tensor | None,
+        valid_positions: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        """Select a subset of valid-frame rows when anchor-mode supervision is active."""
+        if value is None or valid_positions is None:
+            return value
+        return value[valid_positions]
+
     def _compute_phase1_stack(
         self,
         encoded: dict[str, torch.Tensor],
@@ -784,21 +910,53 @@ class FragileAgentTrainer:
         prefix: str,
     ) -> tuple[torch.Tensor, dict[str, float]]:
         """Run the Phase-1 encoder losses for one manifold."""
-        base_loss, zn_reg_loss, metrics = compute_phase1_loss(
-            encoded["x_valid"],
-            encoded["x_recon_valid"],
-            encoded["vq_loss"],
+        valid_positions = self._phase1_valid_positions(encoded)
+        x_valid = self._select_valid_rows(encoded["x_valid"], valid_positions)
+        x_recon_valid = self._select_valid_rows(encoded["x_recon_valid"], valid_positions)
+        enc_router_weights_valid = self._select_valid_rows(
             encoded["enc_router_weights_valid"],
+            valid_positions,
+        )
+        dec_router_weights_valid = self._select_valid_rows(
             encoded["dec_router_weights_valid"],
-            encoded["z_geo_valid"],
+            valid_positions,
+        )
+        z_geo_valid = self._select_valid_rows(encoded["z_geo_valid"], valid_positions)
+        soft_router_weights_valid = self._select_valid_rows(
+            encoded["soft_router_weights_valid"],
+            valid_positions,
+        )
+        c_bar_valid = self._select_valid_rows(encoded["c_bar_valid"], valid_positions)
+        v_local_valid = self._select_valid_rows(encoded["v_local_valid"], valid_positions)
+        usage_router_weights_valid = self._select_valid_rows(
+            encoded["usage_router_weights_valid"],
+            valid_positions,
+        )
+        indices_stack_valid = self._select_valid_rows(encoded["indices_stack_valid"], valid_positions)
+        router_scores_valid = self._select_valid_rows(encoded["router_scores_valid"], valid_positions)
+        z_n_valid = self._select_valid_rows(encoded["z_n_valid"], valid_positions)
+        z_tex_valid = self._select_valid_rows(encoded["z_tex_valid"], valid_positions)
+        z_n_all_valid = self._select_valid_rows(encoded["z_n_all_valid"], valid_positions)
+
+        selection_scale = 1.0
+        if valid_positions is not None and encoded["x_valid"].shape[0] > 0:
+            selection_scale = float(valid_positions.numel()) / float(encoded["x_valid"].shape[0])
+
+        base_loss, zn_reg_loss, metrics = compute_phase1_loss(
+            x_valid,
+            x_recon_valid,
+            encoded["vq_loss"] * selection_scale,
+            enc_router_weights_valid,
+            dec_router_weights_valid,
+            z_geo_valid,
             model,
             config,
-            router_reg_weights=encoded["soft_router_weights_valid"],
-            c_bar=encoded["c_bar_valid"],
-            v_local=encoded["v_local_valid"],
-            usage_router_weights=encoded["usage_router_weights_valid"],
-            indices_stack=encoded["indices_stack_valid"],
-            router_scores=encoded["router_scores_valid"],
+            router_reg_weights=soft_router_weights_valid,
+            c_bar=c_bar_valid,
+            v_local=v_local_valid,
+            usage_router_weights=usage_router_weights_valid,
+            indices_stack=indices_stack_valid,
+            router_scores=router_scores_valid,
         )
 
         current_jump_weight = get_jump_weight_schedule(
@@ -809,15 +967,15 @@ class FragileAgentTrainer:
         )
         if current_jump_weight > 0:
             jump_loss, _ = compute_jump_consistency_loss(
-                encoded["z_n_all_valid"],
-                encoded["enc_router_weights_valid"],
+                z_n_all_valid,
+                enc_router_weights_valid,
                 jump_operator,
             )
             zn_reg_loss = zn_reg_loss + current_jump_weight * jump_loss
         else:
             jump_loss = torch.zeros((), device=self.device)
 
-        ortho_loss = orthogonality_loss(encoded["z_n_valid"], encoded["z_tex_valid"])
+        ortho_loss = orthogonality_loss(z_n_valid, z_tex_valid)
         base_loss = base_loss + getattr(config, "w_perp", 0.01) * ortho_loss
         total = base_loss + zn_reg_loss
 
@@ -845,6 +1003,13 @@ class FragileAgentTrainer:
         alpha = self.enclosure_alpha_for_step(global_step)
         self.agent.enclosure_probe.obs_grl.alpha.fill_(alpha)
         self.agent.enclosure_probe.act_grl.alpha.fill_(alpha)
+        compute_enclosure = (
+            self.config.weight_enclosure_encoder != 0.0
+            or self.config.weight_enclosure_probe != 0.0
+        )
+        compute_markov_transition = self.config.weight_markov_transition != 0.0
+        compute_markov_shape = self.config.weight_markov_shape != 0.0
+        compute_macro = compute_markov_transition or compute_markov_shape
 
         forward = self.agent.forward_batch(
             obs,
@@ -853,6 +1018,7 @@ class FragileAgentTrainer:
             routing_tau=routing_tau,
             macro_chart_tau=self.config.macro_chart_tau,
             macro_code_tau=self.config.macro_code_tau,
+            compute_macro=compute_macro,
         )
 
         obs_loss, obs_metrics = self._compute_phase1_stack(
@@ -882,44 +1048,145 @@ class FragileAgentTrainer:
         enclosure_metrics: dict[str, float] = {}
         markov_metrics: dict[str, float] = {}
         if transitions["num_valid"] > 0:
-            enclosure_encoder_loss, enclosure_probe_loss, enclosure_diag = (
-                compute_absolute_enclosure_loss(
-                    self.agent.enclosure_probe,
-                    obs_chart_centers=self.agent.obs_encoder.encoder.chart_centers,
-                    obs_codebook=self.agent.obs_encoder.encoder.codebook,
-                    obs_chart_t=transitions["obs_chart_t_valid"],
-                    obs_code_t=transitions["obs_code_t_valid"],
-                    obs_z_n_t=transitions["obs_z_n_t_valid"],
-                    obs_z_tex_t=transitions["obs_z_tex_t_valid"],
-                    act_chart_centers=self.agent.act_encoder.encoder.chart_centers,
-                    act_codebook=self.agent.act_encoder.encoder.codebook,
-                    act_chart_t=transitions["act_chart_t_valid"],
-                    act_code_t=transitions["act_code_t_valid"],
-                    act_z_n_t=transitions["act_z_n_t_valid"],
-                    act_z_tex_t=transitions["act_z_tex_t_valid"],
-                    obs_chart_tp1=transitions["obs_chart_tp1_valid"],
-                    obs_code_tp1=transitions["obs_code_tp1_valid"],
-                    obs_codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
+            if compute_enclosure:
+                enclosure_encoder_loss, enclosure_probe_loss, enclosure_diag = (
+                    compute_absolute_enclosure_loss(
+                        self.agent.enclosure_probe,
+                        obs_chart_centers=self.agent.obs_encoder.encoder.chart_centers,
+                        obs_codebook=self.agent.obs_encoder.encoder.codebook,
+                        obs_chart_t=transitions["obs_chart_t_valid"],
+                        obs_code_t=transitions["obs_code_t_valid"],
+                        obs_z_n_t=transitions["obs_z_n_t_valid"],
+                        obs_z_tex_t=transitions["obs_z_tex_t_valid"],
+                        act_chart_centers=self.agent.act_encoder.encoder.chart_centers,
+                        act_codebook=self.agent.act_encoder.encoder.codebook,
+                        act_chart_t=transitions["act_chart_t_valid"],
+                        act_code_t=transitions["act_code_t_valid"],
+                        act_z_n_t=transitions["act_z_n_t_valid"],
+                        act_z_tex_t=transitions["act_z_tex_t_valid"],
+                        obs_chart_tp1=transitions["obs_chart_tp1_valid"],
+                        obs_code_tp1=transitions["obs_code_tp1_valid"],
+                        obs_codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
+                    )
                 )
-            )
-            enclosure_metrics = _prefixed_metrics("enclosure", enclosure_diag)
+                enclosure_metrics = _prefixed_metrics("enclosure", enclosure_diag)
+            else:
+                enclosure_metrics = {
+                    "enclosure/acc_base": 0.0,
+                    "enclosure/acc_obs": 0.0,
+                    "enclosure/acc_act": 0.0,
+                    "enclosure/acc_both": 0.0,
+                    "enclosure/defect_acc_obs": 0.0,
+                    "enclosure/defect_acc_act": 0.0,
+                    "enclosure/defect_acc_both": 0.0,
+                    "enclosure/ce_base": 0.0,
+                    "enclosure/ce_obs": 0.0,
+                    "enclosure/ce_act": 0.0,
+                    "enclosure/ce_both": 0.0,
+                    "enclosure/defect_ce_obs": 0.0,
+                    "enclosure/defect_ce_act": 0.0,
+                    "enclosure/defect_ce_both": 0.0,
+                    "enclosure/loss_encoder": 0.0,
+                    "enclosure/loss_probe": 0.0,
+                }
 
-            markov_transition_loss, transition_metrics, pred = compute_markov_transition_loss(
-                self.agent.macro_model,
-                transitions["obs_state_probs_t_valid"],
-                transitions["act_state_probs_t_valid"],
-                target_next_state_probs=transitions["obs_state_probs_tp1_valid"].detach(),
-                target_next_chart_idx=transitions["obs_chart_tp1_valid"],
-                target_next_code_idx=transitions["obs_code_tp1_valid"],
-                codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
-                metric_prefix="markov",
-            )
-            markov_shape_loss, shape_metrics = compute_markov_shape_loss(
-                pred["next_state_probs"],
-                transitions["obs_state_probs_tp1_valid"],
-                metric_prefix="markov/shape",
-            )
-            markov_metrics = transition_metrics | shape_metrics
+            if compute_macro:
+                obs_geometry = {
+                    "chart_centers": forward["macro"]["obs"]["chart_centers"],
+                    "codebook": forward["macro"]["obs"]["codebook"],
+                    "state_tangent_points": forward["macro"]["obs"]["state_tangent_points"],
+                    "state_points": forward["macro"]["obs"]["state_points"],
+                }
+                act_geometry = {
+                    "chart_centers": forward["macro"]["act"]["chart_centers"],
+                    "codebook": forward["macro"]["act"]["codebook"],
+                    "state_tangent_points": forward["macro"]["act"]["state_tangent_points"],
+                    "state_points": forward["macro"]["act"]["state_points"],
+                }
+                if compute_markov_transition:
+                    markov_transition_loss, transition_metrics, pred = compute_markov_transition_loss(
+                        self.agent.macro_model,
+                        transitions["obs_state_probs_t_valid"],
+                        transitions["act_state_probs_t_valid"],
+                        obs_geometry=obs_geometry,
+                        act_geometry=act_geometry,
+                        target_next_state_probs=transitions["obs_state_probs_tp1_valid"].detach(),
+                        target_next_chart_idx=transitions["obs_chart_tp1_valid"],
+                        target_next_code_idx=transitions["obs_code_tp1_valid"],
+                        codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
+                        metric_prefix="markov",
+                    )
+                else:
+                    pred = self.agent.macro_model(
+                        transitions["obs_state_probs_t_valid"],
+                        transitions["act_state_probs_t_valid"],
+                        obs_geometry=obs_geometry,
+                        act_geometry=act_geometry,
+                    )
+                    transition_metrics = {
+                        "markov/L_transition": 0.0,
+                        "markov/transition_ce": 0.0,
+                        "markov/state_ce": 0.0,
+                        "markov/chart_ce": 0.0,
+                        "markov/code_ce": 0.0,
+                        "markov/transition_acc": 0.0,
+                        "markov/chart_acc": 0.0,
+                        "markov/code_acc": 0.0,
+                        "markov/next_state_entropy": 0.0,
+                        "markov/next_chart_entropy": 0.0,
+                        "markov/next_code_entropy": 0.0,
+                        "markov/next_state_top1_prob": float(
+                            pred["next_state_top1_prob"].mean().detach()
+                        ),
+                        "markov/next_chart_top1_prob": float(
+                            pred["next_chart_top1_prob"].mean().detach()
+                        ),
+                        "markov/next_code_top1_prob": float(
+                            pred["next_code_top1_prob"].mean().detach()
+                        ),
+                        "markov/target_state_entropy": 0.0,
+                    }
+
+                if compute_markov_shape:
+                    markov_shape_loss, shape_metrics = compute_markov_shape_loss(
+                        pred["next_state_probs"],
+                        transitions["obs_state_probs_tp1_valid"],
+                        metric_prefix="markov/shape",
+                    )
+                else:
+                    shape_metrics = {
+                        "markov/shape/L_align": 0.0,
+                        "markov/shape/align_ce": 0.0,
+                        "markov/shape/align_kl": 0.0,
+                        "markov/shape/agreement": 0.0,
+                        "markov/shape/teacher_entropy": 0.0,
+                        "markov/shape/student_entropy": 0.0,
+                    }
+                markov_metrics = transition_metrics | shape_metrics
+            else:
+                markov_metrics = {
+                    "markov/L_transition": 0.0,
+                    "markov/transition_ce": 0.0,
+                    "markov/state_ce": 0.0,
+                    "markov/chart_ce": 0.0,
+                    "markov/code_ce": 0.0,
+                    "markov/transition_acc": 0.0,
+                    "markov/chart_acc": 0.0,
+                    "markov/code_acc": 0.0,
+                    "markov/next_state_entropy": 0.0,
+                    "markov/next_state_top1_prob": 0.0,
+                    "markov/next_chart_entropy": 0.0,
+                    "markov/next_code_entropy": 0.0,
+                    "markov/next_chart_top1_prob": 0.0,
+                    "markov/next_code_top1_prob": 0.0,
+                    "markov/target_state_entropy": 0.0,
+                    "markov/shape/L_align": 0.0,
+                    "markov/shape/align_ce": 0.0,
+                    "markov/shape/align_kl": 0.0,
+                    "markov/shape/agreement": 0.0,
+                    "markov/shape/teacher_entropy": 0.0,
+                    "markov/shape/student_entropy": 0.0,
+                }
         else:
             enclosure_metrics = {
                 "enclosure/acc_base": 0.0,
@@ -942,11 +1209,18 @@ class FragileAgentTrainer:
             markov_metrics = {
                 "markov/L_transition": 0.0,
                 "markov/transition_ce": 0.0,
+                "markov/state_ce": 0.0,
+                "markov/chart_ce": 0.0,
+                "markov/code_ce": 0.0,
                 "markov/transition_acc": 0.0,
                 "markov/chart_acc": 0.0,
                 "markov/code_acc": 0.0,
                 "markov/next_state_entropy": 0.0,
                 "markov/next_state_top1_prob": 0.0,
+                "markov/next_chart_entropy": 0.0,
+                "markov/next_code_entropy": 0.0,
+                "markov/next_chart_top1_prob": 0.0,
+                "markov/next_code_top1_prob": 0.0,
                 "markov/target_state_entropy": 0.0,
                 "markov/shape/L_align": 0.0,
                 "markov/shape/align_ce": 0.0,
@@ -996,6 +1270,7 @@ class FragileAgentTrainer:
         *,
         epoch: int | None = None,
         global_step: int | None = None,
+        code_activity_accumulator: dict[str, list[set[int]]] | None = None,
     ) -> dict[str, float]:
         """Run one optimization step."""
         self.agent.train()
@@ -1006,6 +1281,7 @@ class FragileAgentTrainer:
             global_step=step_index,
             training=True,
         )
+        self.update_code_activity_accumulator(code_activity_accumulator, outputs["forward"])
 
         self.probe_optimizer.zero_grad()
         self.encoder_optimizer.zero_grad()
@@ -1067,6 +1343,7 @@ class FragileAgentTrainer:
         *,
         epoch: int | None = None,
         global_step: int | None = None,
+        code_activity_accumulator: dict[str, list[set[int]]] | None = None,
     ) -> dict[str, float]:
         """Evaluate one batch without parameter updates."""
         self.agent.eval()
@@ -1078,6 +1355,7 @@ class FragileAgentTrainer:
                 global_step=step_index,
                 training=False,
             )
+        self.update_code_activity_accumulator(code_activity_accumulator, outputs["forward"])
         return outputs["metrics"]
 
     def fit_epoch(

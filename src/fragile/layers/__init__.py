@@ -22,6 +22,12 @@ from .lorentzian import (
     LorentzianMetric,
     TemporalChristoffelQuery,
 )
+from .macro_router import (
+    BeliefGeometryEncoder,
+    ChartTransitionRouter,
+    ConditionalCodeRouter,
+    NextStateQueryPredictor,
+)
 from .primitives import (
     IsotropicBlock,
     NormGate,
@@ -35,10 +41,13 @@ from .topoencoder import AttentiveAtlasEncoder, TopoEncoder, TopologicalDecoder
 __all__ = [
     "AreaLawScreening",
     "AttentiveAtlasEncoder",
+    "BeliefGeometryEncoder",
     "CausalMask",
+    "ChartTransitionRouter",
     "ChiralProjector",
     "ChristoffelQuery",
     "ConformalMetric",
+    "ConditionalCodeRouter",
     "CovariantAttention",
     "CovariantCrossAttention",
     "FactorizedJumpOperator",
@@ -52,6 +61,7 @@ __all__ = [
     "LorentzianMetric",
     "NormGate",
     "NormGatedGELU",
+    "NextStateQueryPredictor",
     "SoftEquivariantLayer",
     "SpectralLinear",
     "TemporalChristoffelQuery",

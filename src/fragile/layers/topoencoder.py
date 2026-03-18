@@ -23,6 +23,90 @@ from fragile.layers.initialization import (
 from fragile.layers.router import CovariantChartRouter
 
 
+class GlobalAffineMap(nn.Module):
+    """Global per-dimension affine map shared by encoder input and decoder output.
+
+    The map is deterministic and invertible as long as every scale is positive.
+    It can be initialized from dataset statistics and optionally left frozen, so
+    dreamed latents can still be decoded back to the original raw coordinate
+    system without needing an accompanying input sample.
+    """
+
+    def __init__(
+        self,
+        dim: int,
+        *,
+        enabled: bool = False,
+        learnable: bool = False,
+        min_scale: float = 1e-3,
+    ) -> None:
+        super().__init__()
+        self.dim = int(dim)
+        self.min_scale = float(min_scale)
+        self.register_buffer(
+            "_enabled",
+            torch.tensor(bool(enabled), dtype=torch.bool),
+            persistent=True,
+        )
+        self.offset = nn.Parameter(torch.zeros(dim), requires_grad=learnable)
+        self.log_scale = nn.Parameter(torch.zeros(dim), requires_grad=learnable)
+
+    @property
+    def enabled(self) -> bool:
+        """Whether the affine normalization is active."""
+        return bool(self._enabled.item())
+
+    def set_enabled(self, enabled: bool) -> None:
+        """Enable or disable the affine map."""
+        self._enabled.fill_(bool(enabled))
+
+    def set_learnable(self, learnable: bool) -> None:
+        """Toggle gradient updates for the affine parameters."""
+        self.offset.requires_grad_(learnable)
+        self.log_scale.requires_grad_(learnable)
+
+    def scale(self) -> torch.Tensor:
+        """Return the positive per-dimension scale."""
+        return self.log_scale.exp().clamp_min(self.min_scale)
+
+    def normalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Map raw inputs into the normalized model space."""
+        if not self.enabled:
+            return x
+        offset = self.offset.to(device=x.device, dtype=x.dtype)
+        scale = self.scale().to(device=x.device, dtype=x.dtype)
+        return (x - offset) / scale
+
+    def denormalize(self, x: torch.Tensor) -> torch.Tensor:
+        """Map normalized model outputs back to the raw data space."""
+        if not self.enabled:
+            return x
+        offset = self.offset.to(device=x.device, dtype=x.dtype)
+        scale = self.scale().to(device=x.device, dtype=x.dtype)
+        return x * scale + offset
+
+    @torch.no_grad()
+    def set_stats(self, mean: torch.Tensor, std: torch.Tensor) -> None:
+        """Initialize the affine map from dataset mean/std statistics."""
+        mean_t = torch.as_tensor(mean, device=self.offset.device, dtype=self.offset.dtype)
+        std_t = torch.as_tensor(std, device=self.offset.device, dtype=self.offset.dtype)
+        if mean_t.shape != self.offset.shape:
+            msg = "mean must have shape [input_dim]."
+            raise ValueError(msg)
+        if std_t.shape != self.offset.shape:
+            msg = "std must have shape [input_dim]."
+            raise ValueError(msg)
+        self.offset.copy_(mean_t)
+        self.log_scale.copy_(std_t.clamp_min(self.min_scale).log())
+        self.set_enabled(True)
+
+    def extra_repr(self) -> str:
+        return (
+            f"dim={self.dim}, enabled={self.enabled}, "
+            f"learnable={self.offset.requires_grad}, min_scale={self.min_scale}"
+        )
+
+
 class AttentiveAtlasEncoder(nn.Module):
     """Attentive Atlas encoder using gauge-covariant primitives."""
 
@@ -516,9 +600,18 @@ class TopoEncoder(nn.Module):
         film_conditioning: bool = False,
         commitment_beta: float = 0.25,
         codebook_loss_weight: float = 1.0,
+        input_affine_enabled: bool = False,
+        input_affine_learnable: bool = False,
+        input_affine_min_scale: float = 1e-3,
     ) -> None:
         super().__init__()
         self.num_charts = num_charts
+        self.io_affine = GlobalAffineMap(
+            input_dim,
+            enabled=input_affine_enabled,
+            learnable=input_affine_learnable,
+            min_scale=input_affine_min_scale,
+        )
 
         self.encoder = AttentiveAtlasEncoder(
             input_dim=input_dim,
@@ -552,6 +645,57 @@ class TopoEncoder(nn.Module):
             film_conditioning=film_conditioning,
         )
 
+    def normalize_input(self, x: torch.Tensor) -> torch.Tensor:
+        """Project raw inputs into the model's normalized coordinate space."""
+        return self.io_affine.normalize(x)
+
+    def denormalize_output(self, x: torch.Tensor) -> torch.Tensor:
+        """Project normalized decoder outputs back into raw data coordinates."""
+        return self.io_affine.denormalize(x)
+
+    def loss_space_pair(
+        self,
+        x: torch.Tensor,
+        x_recon: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the reconstruction pair in the normalized training space."""
+        return self.normalize_input(x), self.normalize_input(x_recon)
+
+    @torch.no_grad()
+    def set_io_affine_stats(
+        self,
+        mean: torch.Tensor,
+        std: torch.Tensor,
+        *,
+        learnable: bool | None = None,
+    ) -> None:
+        """Initialize the optional affine map from dataset-level statistics."""
+        self.io_affine.set_stats(mean, std)
+        if learnable is not None:
+            self.io_affine.set_learnable(learnable)
+
+    def decode(
+        self,
+        z_geo: torch.Tensor,
+        chart_index: torch.Tensor | None = None,
+        router_weights: torch.Tensor | None = None,
+        routing_tau: float = 1.0,
+        *,
+        return_model_space: bool = False,
+    ) -> tuple[torch.Tensor, torch.Tensor, dict[str, torch.Tensor]]:
+        """Decode a latent state and optionally expose the normalized output."""
+        x_model, dec_router_weights, aux_losses = self.decoder(
+            z_geo,
+            chart_index=chart_index,
+            router_weights=router_weights,
+            routing_tau=routing_tau,
+        )
+        x_raw = self.denormalize_output(x_model)
+        if return_model_space:
+            aux_losses = dict(aux_losses)
+            aux_losses["x_model"] = x_model
+        return x_raw, dec_router_weights, aux_losses
+
     def forward(
         self,
         x: torch.Tensor,
@@ -581,12 +725,12 @@ class TopoEncoder(nn.Module):
             _v_local,
             _z_q_blended,
         ) = self.encoder(
-            x,
+            self.normalize_input(x),
             routing_tau=routing_tau,
         )
 
         router_override = enc_router_weights
-        x_recon, dec_router_weights, aux_losses = self.decoder(
+        x_recon, dec_router_weights, aux_losses = self.decode(
             z_geo,
             chart_index=None,
             router_weights=router_override,

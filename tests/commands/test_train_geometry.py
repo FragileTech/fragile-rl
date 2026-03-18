@@ -17,8 +17,13 @@ from fragile.losses.macro import compute_absolute_enclosure_loss
 from fragile.losses.markov_model import compute_markov_transition_loss
 from fragile.vla.extract_features import VLAFeatureDataset
 
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
+
 
 train_geometry_module = importlib.import_module("fragile.commands.train_geometry")
+
+CONFIG_PATH = train_geometry_module.CONFIG_PATH
 
 
 def _write_sequence_feature_cache(cache_dir: Path) -> None:
@@ -47,67 +52,50 @@ def _write_sequence_feature_cache(cache_dir: Path) -> None:
         torch.save(actions, ep_dir / "actions.pt")
 
 
-def _make_geometry_args(
+def _make_runner(
     cache_dir: Path,
     output_dir: Path,
     **overrides,
-):
-    """Build a small, fast geometry-training arg namespace for tests."""
-    parser = train_geometry_module._build_parser()
-    argv = [
-        "--feature-cache-dir",
-        str(cache_dir),
-        "--output-dir",
-        str(output_dir),
-        "--epochs",
-        "1",
-        "--batch-size",
-        "2",
-        "--sequence-length",
-        "2",
-        "--device",
-        "cpu",
-        "--hidden-dim",
-        "24",
-        "--latent-dim",
-        "4",
-        "--num-charts",
-        "4",
-        "--codes-per-chart",
-        "4",
-        "--act-hidden-dim",
-        "24",
-        "--act-latent-dim",
-        "4",
-        "--act-num-charts",
-        "2",
-        "--act-codes-per-chart",
-        "3",
-        "--enclosure-hidden-dim",
-        "32",
-        "--chart-ot-iters",
-        "4",
-        "--w-jump",
-        "0.1",
-        "--w-jump-warmup",
-        "0",
-        "--w-jump-ramp-end",
-        "1",
-        "--log-every",
-        "1",
-        "--save-every",
-        "1",
-    ]
-    for key, value in overrides.items():
-        flag = f"--{key.replace('_', '-')}"
-        if isinstance(value, bool):
-            if value:
-                argv.append(flag)
-            continue
-        if value is None:
-            continue
-        argv.extend([flag, str(value)])
-    return parser.parse_args(argv)
+) -> train_geometry_module.GeometryTrainingRunner:
+    """Build a GeometryTrainingRunner with small test dimensions."""
+    cfg = OmegaConf.load(CONFIG_PATH)
+    test_overrides = OmegaConf.create(
+        {
+            "feature_cache_dir": str(cache_dir),
+            "output_dir": str(output_dir),
+            "epochs": 1,
+            "batch_size": 2,
+            "sequence_length": 2,
+            "device": "cpu",
+            "log_every": 1,
+            "save_every": 1,
+            "agent": {
+                "enclosure_hidden_dim": 32,
+                "obs_encoder": {
+                    "hidden_dim": 24,
+                    "latent_dim": 4,
+                    "num_charts": 4,
+                    "codes_per_chart": 4,
+                    "chart_ot_iters": 4,
+                    "w_jump": 0.1,
+                    "w_jump_warmup": 0,
+                    "w_jump_ramp_end": 1,
+                },
+                "act_encoder": {
+                    "hidden_dim": 24,
+                    "latent_dim": 4,
+                    "num_charts": 2,
+                    "codes_per_chart": 3,
+                    "chart_ot_iters": 4,
+                    "w_jump": 0.1,
+                    "w_jump_warmup": 0,
+                    "w_jump_ramp_end": 1,
+                },
+            },
+        }
+    )
+    merged = OmegaConf.merge(cfg, test_overrides, OmegaConf.create(overrides))
+    return instantiate(merged)
 
 
 def _build_runtime(
@@ -116,43 +104,53 @@ def _build_runtime(
     **overrides,
 ):
     """Construct the dataset/loaders/trainer stack used by the command."""
-    args = _make_geometry_args(cache_dir, output_dir, **overrides)
+    runner = _make_runner(cache_dir, output_dir, **overrides)
+    window_stride = train_geometry_module._effective_window_stride(
+        runner.sequence_length, runner.window_stride
+    )
     train_dataset = VLAFeatureDataset(
         cache_dir,
-        sequence_length=args.sequence_length,
+        sequence_length=runner.sequence_length,
+        window_stride=window_stride,
         split="train",
     )
     eval_dataset = VLAFeatureDataset(
         cache_dir,
-        sequence_length=args.sequence_length,
+        sequence_length=runner.sequence_length,
+        window_stride=window_stride,
         split="test",
     )
     train_loader = DataLoader(
         train_dataset,
-        batch_size=args.batch_size,
+        batch_size=runner.batch_size,
         shuffle=False,
         drop_last=False,
         num_workers=0,
     )
     eval_loader = DataLoader(
         eval_dataset,
-        batch_size=args.batch_size,
+        batch_size=runner.batch_size,
         shuffle=False,
         drop_last=False,
         num_workers=0,
     )
     sample = train_dataset[0]
+    obs_dim = int(sample["features"].shape[-1])
+    act_dim = int(sample["actions"].shape[-1])
+
+    runner.agent.obs_encoder.input_dim = obs_dim
+    runner.agent.obs_encoder.feature_dim = obs_dim
+    runner.agent.act_encoder.input_dim = act_dim
+    runner.agent.act_encoder.feature_dim = act_dim
+
+    from fragile.agent import FragileAgent, FragileAgentTrainer
 
     torch.manual_seed(7)
-    agent, trainer = train_geometry_module._build_agent_and_trainer(
-        args,
-        obs_dim=int(sample["features"].shape[-1]),
-        act_dim=int(sample["actions"].shape[-1]),
-        num_train_batches=len(train_loader),
-    )
+    agent = FragileAgent(runner.agent)
+    trainer = FragileAgentTrainer(agent, runner.trainer)
     trainer.agent.to(torch.device("cpu"))
     batch = train_geometry_module._trainer_batch(next(iter(train_loader)))
-    return args, train_loader, eval_loader, trainer, batch
+    return runner, train_loader, eval_loader, trainer, batch
 
 
 def _time_call_ms(fn, *, repeats: int = 1, warmup: int = 1) -> float:
@@ -188,12 +186,28 @@ def _enclosure_loss_call(trainer, transitions: dict[str, torch.Tensor]) -> None:
     )
 
 
-def _markov_loss_call(trainer, transitions: dict[str, torch.Tensor]) -> None:
+def _markov_loss_call(
+    trainer,
+    transitions: dict[str, torch.Tensor],
+    macro: dict[str, dict[str, torch.Tensor]],
+) -> None:
     """Run the coarse Markov transition loss on a prepared transition batch."""
     compute_markov_transition_loss(
         trainer.agent.macro_model,
         transitions["obs_state_probs_t_valid"],
         transitions["act_state_probs_t_valid"],
+        obs_geometry={
+            "chart_centers": macro["obs"]["chart_centers"],
+            "codebook": macro["obs"]["codebook"],
+            "state_points": macro["obs"]["state_points"],
+            "state_tangent_points": macro["obs"]["state_tangent_points"],
+        },
+        act_geometry={
+            "chart_centers": macro["act"]["chart_centers"],
+            "codebook": macro["act"]["codebook"],
+            "state_points": macro["act"]["state_points"],
+            "state_tangent_points": macro["act"]["state_tangent_points"],
+        },
         target_next_state_probs=transitions["obs_state_probs_tp1_valid"].detach(),
         target_next_chart_idx=transitions["obs_chart_tp1_valid"],
         target_next_code_idx=transitions["obs_code_tp1_valid"],
@@ -205,21 +219,31 @@ def _markov_loss_call(trainer, transitions: dict[str, torch.Tensor]) -> None:
 def test_train_geometry_smoke_writes_checkpoints_and_logs_metrics(
     tmp_path,
     capsys,
+    monkeypatch,
 ) -> None:
     cache_dir = tmp_path / "features"
     output_dir = tmp_path / "geometry"
     _write_sequence_feature_cache(cache_dir)
 
-    args = _make_geometry_args(cache_dir, output_dir, epochs=1, save_every=1)
-    train_geometry_module.train_geometry(args)
+    def fail_on_rescan(*_args, **_kwargs):
+        msg = "train_geometry should not rescan the loader for code activity."
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(train_geometry_module, "_collect_code_activity", fail_on_rescan)
+
+    runner = _make_runner(cache_dir, output_dir, epochs=1, save_every=1)
+    runner.run()
 
     output = capsys.readouterr().out
+    assert (output_dir / "geometry_best.pt").exists()
     assert (output_dir / "geometry_epoch_00000.pt").exists()
     assert (output_dir / "geometry_final.pt").exists()
     assert "Train metrics:" in output
+    assert "train obs active codes/chart:" in output
+    assert "train act active codes/chart:" in output
     assert "Eval metrics:" in output
-    assert "obs active codes/chart:" in output
-    assert "act active codes/chart:" in output
+    assert "eval obs active codes/chart:" in output
+    assert "eval act active codes/chart:" in output
     assert "split=test" in output
     assert "loss:" in output
     assert "markov:" in output
@@ -231,25 +255,63 @@ def test_train_geometry_resume_restores_progress(tmp_path) -> None:
     output_dir = tmp_path / "geometry"
     _write_sequence_feature_cache(cache_dir)
 
-    first_args = _make_geometry_args(cache_dir, output_dir, epochs=1, save_every=1)
-    train_geometry_module.train_geometry(first_args)
+    runner = _make_runner(cache_dir, output_dir, epochs=1, save_every=1)
+    runner.run()
 
     epoch_ckpt = output_dir / "geometry_epoch_00000.pt"
     first_ckpt = load_checkpoint(str(epoch_ckpt))
     first_global_step = int(first_ckpt["global_step"])
 
-    second_args = _make_geometry_args(
+    runner2 = _make_runner(
         cache_dir,
         output_dir,
         epochs=2,
         save_every=1,
         resume=str(epoch_ckpt),
     )
-    train_geometry_module.train_geometry(second_args)
+    runner2.run()
 
     final_ckpt = load_checkpoint(str(output_dir / "geometry_final.pt"))
     assert int(final_ckpt["epoch"]) == 1
     assert int(final_ckpt["global_step"]) > first_global_step
+
+
+def test_train_geometry_early_stops_on_stale_eval_metric(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    cache_dir = tmp_path / "features"
+    output_dir = tmp_path / "geometry"
+    _write_sequence_feature_cache(cache_dir)
+
+    eval_scores = iter([0.9, 0.8, 0.7])
+
+    def fake_train_epoch(*_args, **_kwargs) -> dict[str, float]:
+        return {"loss/main": 1.0, "obs/I_XK": 0.0}, {"obs": [1, 1, 1, 1], "act": [1, 1]}
+
+    def fake_eval_epoch(*_args, **_kwargs):
+        score = next(eval_scores)
+        return {"loss/main": 1.0, "obs/I_XK": score}, {"obs": [1, 1, 1, 1], "act": [1, 1]}
+
+    monkeypatch.setattr(train_geometry_module, "_run_train_epoch", fake_train_epoch)
+    monkeypatch.setattr(train_geometry_module, "_run_eval_epoch", fake_eval_epoch)
+
+    runner = _make_runner(
+        cache_dir,
+        output_dir,
+        epochs=10,
+        eval_every=1,
+        save_every=10,
+        early_stop_patience=2,
+        early_stop_min_epochs=0,
+    )
+    runner.run()
+
+    final_ckpt = load_checkpoint(str(output_dir / "geometry_final.pt"))
+    best_ckpt = load_checkpoint(str(output_dir / "geometry_best.pt"))
+    assert int(final_ckpt["epoch"]) == 2
+    assert int(best_ckpt["best_eval_epoch"]) == 0
+    assert float(best_ckpt["best_eval_metric_value"]) == 0.9
 
 
 def test_train_geometry_eval_every_decouples_eval_from_logging(tmp_path, capsys) -> None:
@@ -257,7 +319,7 @@ def test_train_geometry_eval_every_decouples_eval_from_logging(tmp_path, capsys)
     output_dir = tmp_path / "geometry"
     _write_sequence_feature_cache(cache_dir)
 
-    args = _make_geometry_args(
+    runner = _make_runner(
         cache_dir,
         output_dir,
         epochs=3,
@@ -265,29 +327,45 @@ def test_train_geometry_eval_every_decouples_eval_from_logging(tmp_path, capsys)
         eval_every=10,
         save_every=3,
     )
-    train_geometry_module.train_geometry(args)
+    runner.run()
 
     output = capsys.readouterr().out
     assert output.count("Geometry E") == 3
     assert output.count("Train metrics:") == 3
-    assert output.count("obs active codes/chart:") == 2
-    assert output.count("act active codes/chart:") == 2
+    assert output.count("train obs active codes/chart:") == 3
+    assert output.count("train act active codes/chart:") == 3
+    assert output.count("eval obs active codes/chart:") == 2
+    assert output.count("eval act active codes/chart:") == 2
     assert "eval=skipped" in output
     assert "Eval metrics: skipped (runs every 10 epochs)" in output
 
 
-def test_vla_geometry_cli_exposes_geometry_flags() -> None:
-    runner = CliRunner()
-    result = runner.invoke(run, ["vla-geometry", "--", "--help"])
-
-    assert result.exit_code == 0
-    assert "--sequence-length" in result.output
-    assert "--eval-every" in result.output
-    assert "--lr-probe" in result.output
-    assert "--lr-markov" in result.output
-    assert "--w-markov-transition" in result.output
-    assert "--w-markov-shape" in result.output
-    assert "--act-num-charts" in result.output
+def test_vla_geometry_config_loads_and_instantiates() -> None:
+    """Verify that the YAML config loads and produces a valid runner."""
+    cfg = OmegaConf.load(CONFIG_PATH)
+    assert "markov_hidden_dim" in cfg.agent
+    assert "markov_feature_scale" in cfg.agent
+    assert "markov_use_residual_transition" in cfg.agent
+    assert "chart_usage_entropy_low" in cfg.agent.obs_encoder
+    assert "chart_usage_entropy_high" in cfg.agent.obs_encoder
+    assert "code_usage_entropy_low" in cfg.agent.obs_encoder
+    assert "code_usage_entropy_high" in cfg.agent.obs_encoder
+    assert "soft_equiv_bundle_size" in cfg.agent.obs_encoder
+    assert "input_affine_min_scale" in cfg.agent.act_encoder
+    runner = instantiate(cfg)
+    assert isinstance(runner, train_geometry_module.GeometryTrainingRunner)
+    assert runner.epochs == 1000
+    assert runner.output_dir == "outputs/vla/geometry-obs16x16-act8x8"
+    assert runner.eval_every == 10
+    assert runner.agent.obs_encoder.num_charts == 16
+    assert runner.agent.obs_encoder.codes_per_chart == 16
+    assert runner.agent.act_encoder.input_affine_enabled is True
+    assert runner.agent.act_encoder.num_charts == 8
+    assert runner.agent.act_encoder.codes_per_chart == 8
+    assert runner.agent.obs_encoder.w_window == 1.0
+    assert runner.agent.act_encoder.w_window == 1.0
+    assert runner.agent.markov_hidden_dim == 128
+    assert runner.trainer.lr_encoder == 0.001
 
 
 def test_train_geometry_profile_breakdown(tmp_path, capsys) -> None:
@@ -295,7 +373,7 @@ def test_train_geometry_profile_breakdown(tmp_path, capsys) -> None:
     cache_dir = tmp_path / "features"
     _write_sequence_feature_cache(cache_dir)
 
-    args, train_loader, eval_loader, trainer, batch = _build_runtime(
+    runner, train_loader, eval_loader, trainer, batch = _build_runtime(
         cache_dir,
         tmp_path / "profile",
     )
@@ -359,7 +437,7 @@ def test_train_geometry_profile_breakdown(tmp_path, capsys) -> None:
             repeats=3,
         ),
         "markov_transition_loss_ms": _time_call_ms(
-            lambda: _markov_loss_call(trainer, transitions),
+            lambda: _markov_loss_call(trainer, transitions, forward["macro"]),
             repeats=3,
         ),
         "compute_batch_losses_train_ms": _time_call_ms(

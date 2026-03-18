@@ -1,14 +1,21 @@
 """Checkpoint utilities for VLA and RL training."""
 
+from __future__ import annotations
+
+import copy
 import math
 import os
 import pathlib
 import tempfile
+from typing import TYPE_CHECKING, Any
 
 import numpy as np
 from sklearn.metrics import adjusted_mutual_info_score
 import torch
 from torch import nn, optim
+
+if TYPE_CHECKING:
+    from fragile.agent import FragileAgentTrainer
 
 
 def _atomic_save(obj: object, path: str) -> None:
@@ -145,3 +152,96 @@ def load_optimizer_state(
 def compute_ami(labels_true: np.ndarray, labels_pred: np.ndarray) -> float:
     """Compute Adjusted Mutual Information score."""
     return float(adjusted_mutual_info_score(labels_true, labels_pred))
+
+
+def geometry_checkpoint_payload(
+    trainer: FragileAgentTrainer,
+    config: dict[str, Any],
+    *,
+    epoch: int,
+    train_metrics: dict[str, float],
+    eval_metrics: dict[str, float],
+    best_eval_metric_name: str | None = None,
+    best_eval_metric_value: float | None = None,
+    best_eval_epoch: int | None = None,
+) -> dict[str, Any]:
+    """Build the checkpoint payload for periodic and final saves."""
+    return {
+        "epoch": epoch,
+        "global_step": trainer.global_step,
+        "agent_state": trainer.agent.state_dict(),
+        "encoder_optimizer": trainer.encoder_optimizer.state_dict(),
+        "probe_optimizer": trainer.probe_optimizer.state_dict(),
+        "markov_optimizer": trainer.markov_optimizer.state_dict(),
+        "encoder_scheduler": (
+            trainer.encoder_scheduler.state_dict()
+            if trainer.encoder_scheduler is not None
+            else None
+        ),
+        "args": config,
+        "agent_config": copy.deepcopy(trainer.agent.config),
+        "trainer_config": copy.deepcopy(trainer.config),
+        "train_metrics": dict(train_metrics),
+        "eval_metrics": dict(eval_metrics),
+        "best_eval_metric_name": best_eval_metric_name,
+        "best_eval_metric_value": best_eval_metric_value,
+        "best_eval_epoch": best_eval_epoch,
+    }
+
+
+def save_geometry_checkpoint(
+    path: pathlib.Path,
+    trainer: FragileAgentTrainer,
+    config: dict[str, Any],
+    *,
+    epoch: int,
+    train_metrics: dict[str, float],
+    eval_metrics: dict[str, float],
+    best_eval_metric_name: str | None = None,
+    best_eval_metric_value: float | None = None,
+    best_eval_epoch: int | None = None,
+) -> None:
+    """Save a geometry-training checkpoint."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(
+        geometry_checkpoint_payload(
+            trainer,
+            config,
+            epoch=epoch,
+            train_metrics=train_metrics,
+            eval_metrics=eval_metrics,
+            best_eval_metric_name=best_eval_metric_name,
+            best_eval_metric_value=best_eval_metric_value,
+            best_eval_epoch=best_eval_epoch,
+        ),
+        path,
+    )
+    print(f"  Saved checkpoint: {path}")
+
+
+def load_geometry_resume_checkpoint(
+    trainer: FragileAgentTrainer,
+    resume_path: str,
+    *,
+    device: torch.device,
+) -> tuple[int, str | None, float | None, int | None]:
+    """Load trainer/model state and return the first epoch to run next."""
+    ckpt = load_checkpoint(resume_path)
+    trainer.agent.load_state_dict(ckpt["agent_state"])
+    load_optimizer_state(trainer.encoder_optimizer, ckpt.get("encoder_optimizer"), device)
+    load_optimizer_state(trainer.probe_optimizer, ckpt.get("probe_optimizer"), device)
+    load_optimizer_state(trainer.markov_optimizer, ckpt.get("markov_optimizer"), device)
+    if trainer.encoder_scheduler is not None and ckpt.get("encoder_scheduler") is not None:
+        trainer.encoder_scheduler.load_state_dict(ckpt["encoder_scheduler"])
+    trainer.global_step = int(ckpt.get("global_step", 0))
+    start_epoch = max(int(ckpt.get("epoch", -1)) + 1, 0)
+    print(
+        f"Resumed from {resume_path} "
+        f"(epoch {ckpt.get('epoch', '?')}, global_step {trainer.global_step})",
+    )
+    return (
+        start_epoch,
+        ckpt.get("best_eval_metric_name"),
+        ckpt.get("best_eval_metric_value"),
+        ckpt.get("best_eval_epoch"),
+    )

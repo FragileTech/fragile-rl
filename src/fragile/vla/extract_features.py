@@ -409,16 +409,28 @@ class VLAFeatureDataset(Dataset):
         cache_dir: Path to the feature cache (output of ``extract_smolvla_features``).
         sequence_length: 1 for Phase 1 (single frames), >1 for Phase 2/3 (rollout
             windows respecting episode boundaries).
+        window_stride: Step between consecutive sequence windows. The default
+            keeps single-frame behavior unchanged and uses non-overlapping
+            windows in sequence mode.
     """
 
     def __init__(
         self,
         cache_dir: str | Path,
         sequence_length: int = 1,
+        window_stride: int | None = None,
         split: str = "all",
     ) -> None:
         self.cache_dir = Path(cache_dir)
         self.sequence_length = sequence_length
+        if sequence_length <= 1:
+            self.window_stride = 1
+        else:
+            stride = sequence_length if window_stride in {None, 0} else int(window_stride)
+            if stride <= 0:
+                msg = "window_stride must be positive when sequence_length > 1."
+                raise ValueError(msg)
+            self.window_stride = stride
         self.split = split
         self.meta = load_feature_cache_metadata(self.cache_dir)
 
@@ -456,8 +468,11 @@ class VLAFeatureDataset(Dataset):
             if sequence_length <= 1:
                 offset += feat.shape[0]
             else:
-                # Sliding windows that fit within the episode
-                valid = max(0, feat.shape[0] - sequence_length + 1)
+                # Sequence mode indexes contiguous chunks spaced by `window_stride`.
+                if feat.shape[0] < sequence_length:
+                    valid = 0
+                else:
+                    valid = 1 + (feat.shape[0] - sequence_length) // self.window_stride
                 offset += valid
 
         self._total = offset
@@ -486,10 +501,12 @@ class VLAFeatureDataset(Dataset):
                 "timestep": torch.tensor(local, dtype=torch.long),
             }
 
-        # Sequence mode: return a window [local : local + H]
-        end = local + self.sequence_length
+        # Sequence mode: return one chunk [start : start + H].
+        start = local * self.window_stride
+        end = start + self.sequence_length
         return {
-            "features": features[local:end],
-            "actions": actions[local:end],
+            "features": features[start:end],
+            "actions": actions[start:end],
             "episode_id": torch.tensor(ep_id, dtype=torch.long),
+            "timestep": torch.tensor(start, dtype=torch.long),
         }

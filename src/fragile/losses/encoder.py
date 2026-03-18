@@ -878,15 +878,22 @@ def compute_phase1_loss(
     if router_scores is None:
         router_scores = getattr(atlas_encoder, "_last_router_scores_live", None)
 
+    loss_x = x
+    loss_x_recon = x_recon
+    loss_space_pair = getattr(encoder, "loss_space_pair", None)
+    if callable(loss_space_pair):
+        loss_x, loss_x_recon = loss_space_pair(x, x_recon)
+        metrics["recon_raw"] = F.mse_loss(x_recon, x).item()
+
     # Feature reconstruction (MSE)
-    loss_recon = F.mse_loss(x_recon, x)
+    loss_recon = F.mse_loss(loss_x_recon, loss_x)
     base_loss = config.w_feature_recon * loss_recon
     metrics["recon"] = loss_recon.item()
     per_sample_recon_error = (
         F
         .mse_loss(
-            x_recon,
-            x,
+            loss_x_recon,
+            loss_x,
             reduction="none",
         )
         .reshape(x.shape[0], -1)

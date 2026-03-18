@@ -1,0 +1,218 @@
+# Hydra-style config for geometry training via GeometryTrainingRunner.
+#
+# Override any field from the CLI with dotted notation:
+#   uv run fragile vla-geometry epochs=200 agent.obs_encoder.num_charts=16
+#
+# Runtime-computed values (input_dim, device, routing_tau_anneal_steps,
+# phase1_frame_mode) are patched by GeometryTrainingRunner.run() after
+# instantiation — they are NOT listed here.
+
+_target_: fragile.commands.train_geometry.GeometryTrainingRunner
+
+# --- Paths ---
+feature_cache_dir: outputs/vla/features
+output_dir: outputs/vla/geometry-obs16x16-act8x8
+
+# --- Training loop ---
+epochs: 1000
+batch_size: 256
+sequence_length: 2
+window_stride: 0       # 0 → non-overlapping (= sequence_length)
+phase1_frame_mode: auto # "auto", "all", or "anchor"
+device: auto            # "auto", "cpu", or "cuda"
+
+# --- Logging / checkpoints ---
+log_every: 1
+eval_every: 10
+save_every: 10
+resume: ""
+
+# --- Early stopping ---
+best_eval_metric: obs/I_XK
+best_eval_mode: max
+early_stop_patience: 2
+early_stop_min_epochs: 50
+early_stop_min_delta: 0.0
+
+# --- Epoch → step conversion (patched at runtime) ---
+routing_tau_anneal_epochs: 0
+
+# --- Agent config ---
+agent:
+  _target_: fragile.agent.FragileAgentConfig
+  obs_jump_curvature: 1.0
+  act_jump_curvature: 1.0
+  enclosure_hidden_dim: 128
+  enclosure_dropout: 0.1
+  enclosure_alpha: 0.5
+  markov_hidden_dim: 128
+  markov_feature_scale: 0.1
+  markov_use_residual_transition: true
+  markov_residual_scale: 1.0
+  markov_learn_reward: true
+  markov_learn_continuation: true
+  markov_initial_continuation: 0.99
+
+  obs_encoder:
+    _target_: fragile.vla.config.VLAConfig
+    hidden_dim: 256
+    latent_dim: 16
+    num_charts: 16
+    codes_per_chart: 16
+    covariant_attn_tau_min: 0.01
+    covariant_attn_denom_min: 0.001
+    covariant_attn_transport_eps: 0.001
+    soft_equiv_metric: true
+    soft_equiv_bundle_size: 0
+    soft_equiv_hidden_dim: 64
+    soft_equiv_use_spectral_norm: true
+    soft_equiv_zero_self_mixing: false
+    soft_equiv_soft_assign: true
+    soft_equiv_temperature: 1.0
+    input_affine_enabled: false
+    input_affine_learnable: false
+    input_affine_min_scale: 0.001
+    commitment_beta: 0.25
+    codebook_loss_weight: 1.0
+    w_feature_recon: 1.0
+    w_vq: 1.0
+    w_entropy: 0.3
+    w_diversity: 1.0
+    chart_usage_entropy_low: null
+    chart_usage_entropy_high: null
+    w_chart_ot: 1.0
+    chart_ot_epsilon: 0.05
+    chart_ot_iters: 20
+    w_uniformity: 0.05
+    w_radial_calibration: 0.1
+    w_confidence_calibration: 0.05
+    w_hard_routing_nll: 0.5
+    w_router_margin: 2.0
+    router_margin_target: 0.05
+    radial_quality_alpha: 2.0
+    radial_vq_alpha: 1.0
+    radial_quality_rank_mix: 0.75
+    radial_recon_quality_weight: 0.7
+    radial_quality_mix: 1.0
+    radial_quality_base_weight: 0.0
+    radial_calibration_rho_max: 4.0
+    radial_calibration_band_width: 0.75
+    w_v_tangent_barrier: 0.01
+    v_tangent_barrier_radius: 0.9
+    w_codebook_spread: 0.05
+    w_codebook_spread_margin: 1.0
+    w_codebook_center: 0.02
+    w_chart_center_mean: 0.02
+    w_chart_center_radius: 0.05
+    chart_center_radius_max: 2.0
+    w_chart_center_sep: 0.02
+    chart_center_sep_margin: 1.0
+    w_chart_collapse: 0.0
+    w_code_collapse: 0.5
+    code_usage_entropy_low: null
+    code_usage_entropy_high: null
+    w_code_collapse_temperature: 1.0
+    w_window: 1.0
+    w_window_eps_ground: 0.1
+    w_consistency: 0.0
+    w_jump: 0.0
+    w_jump_warmup: 20
+    w_jump_ramp_end: 50
+    w_perp: 0.01
+    lr_chart_centers_scale: 0.1
+    lr_codebook_scale: 0.5
+
+  act_encoder:
+    _target_: fragile.vla.config.VLAConfig
+    hidden_dim: 256
+    latent_dim: 16
+    num_charts: 8
+    codes_per_chart: 8
+    covariant_attn_tau_min: 0.01
+    covariant_attn_denom_min: 0.001
+    covariant_attn_transport_eps: 0.001
+    soft_equiv_metric: true
+    soft_equiv_bundle_size: 0
+    soft_equiv_hidden_dim: 64
+    soft_equiv_use_spectral_norm: true
+    soft_equiv_zero_self_mixing: false
+    soft_equiv_soft_assign: true
+    soft_equiv_temperature: 1.0
+    input_affine_enabled: true
+    input_affine_learnable: false
+    input_affine_min_scale: 0.001
+    commitment_beta: 0.25
+    codebook_loss_weight: 1.0
+    w_feature_recon: 1.0
+    w_vq: 1.0
+    w_entropy: 0.3
+    w_diversity: 1.0
+    chart_usage_entropy_low: null
+    chart_usage_entropy_high: null
+    w_chart_ot: 1.0
+    chart_ot_epsilon: 0.05
+    chart_ot_iters: 20
+    w_uniformity: 0.05
+    w_radial_calibration: 0.1
+    w_confidence_calibration: 0.05
+    w_hard_routing_nll: 0.5
+    w_router_margin: 2.0
+    router_margin_target: 0.05
+    radial_quality_alpha: 2.0
+    radial_vq_alpha: 1.0
+    radial_quality_rank_mix: 0.75
+    radial_recon_quality_weight: 0.7
+    radial_quality_mix: 1.0
+    radial_quality_base_weight: 0.0
+    radial_calibration_rho_max: 4.0
+    radial_calibration_band_width: 0.75
+    w_v_tangent_barrier: 0.01
+    v_tangent_barrier_radius: 0.9
+    w_codebook_spread: 0.05
+    w_codebook_spread_margin: 1.0
+    w_codebook_center: 0.02
+    w_chart_center_mean: 0.02
+    w_chart_center_radius: 0.05
+    chart_center_radius_max: 2.0
+    w_chart_center_sep: 0.02
+    chart_center_sep_margin: 1.0
+    w_chart_collapse: 0.0
+    w_code_collapse: 0.5
+    code_usage_entropy_low: null
+    code_usage_entropy_high: null
+    w_code_collapse_temperature: 1.0
+    w_window: 1.0
+    w_window_eps_ground: 0.1
+    w_consistency: 0.0
+    w_jump: 0.0
+    w_jump_warmup: 20
+    w_jump_ramp_end: 50
+    w_perp: 0.01
+    lr_chart_centers_scale: 0.1
+    lr_codebook_scale: 0.5
+
+# --- Trainer config ---
+trainer:
+  _target_: fragile.agent.FragileAgentTrainerConfig
+  lr_encoder: 0.001
+  lr_probe: 0.003
+  lr_markov: 0.001
+  weight_decay: 0.0
+  grad_clip: 1.0
+  lr_chart_centers_scale: 0.1
+  lr_codebook_scale: 0.5
+  use_cosine_lr: false
+  cosine_eta_min: 0.000001
+  routing_tau: 1.0
+  routing_tau_end: 1.0
+  eval_routing_tau: 1.0
+  macro_chart_tau: 1.0
+  macro_code_tau: 1.0
+  weight_obs_phase1: 1.0
+  weight_act_phase1: 1.0
+  weight_enclosure_encoder: 1.0
+  weight_enclosure_probe: 1.0
+  weight_markov_transition: 1.0
+  weight_markov_shape: 1.0
+  enclosure_alpha_max: 0.5
+  enclosure_alpha_warmup_steps: 20000

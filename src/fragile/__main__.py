@@ -106,8 +106,8 @@ def vla_phase1(args):
 def vla_geometry(args):
     """Train the new sequence-based geometry stack on cached VLA windows.
 
-    All arguments after 'vla-geometry' are forwarded to the command module.
-    Run `uv run fragile vla-geometry -- --help` for all training options.
+    Uses Hydra-style key=value overrides, e.g.:
+        uv run fragile vla-geometry epochs=200 agent.obs_encoder.num_charts=16
     """
     import sys
 
