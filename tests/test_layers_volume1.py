@@ -1,7 +1,7 @@
 import torch
 from torch import nn
 
-from fragile.core.layers import (
+from fragile.layers import (
     AreaLawScreening,
     ChiralProjector,
     ChristoffelQuery,
@@ -12,108 +12,26 @@ from fragile.core.layers import (
     compute_topology_loss,
     ConformalMetric,
     CovariantAttention,
-    DisentangledAgent,
-    DisentangledConfig,
-    Encoder,
     FactorizedJumpOperator,
     GeodesicConfig,
     GeodesicCrossAttention,
-    HierarchicalDisentangled,
     HyperbolicTransport,
     InvariantChartClassifier,
     IsotropicBlock,
     LorentzianConfig,
     LorentzianMemoryAttention,
     LorentzianMetric,
-    MacroDynamicsModel,
     SpectralLinear,
     SupervisedTopologyLoss,
     TemporalChristoffelQuery,
-    VectorQuantizer,
 )
-from fragile.core.layers.gauge import (
+from fragile.layers.gauge import (
     exp_map_zero,
     hyperbolic_distance,
     log_map_zero,
     mobius_add,
-    mobius_scalar_mul,
     parallel_transport,
-    parallel_transport_zero,
 )
-
-
-def test_disentangled_agent_shapes() -> None:
-    torch.manual_seed(0)
-    config = DisentangledConfig(
-        obs_dim=64 * 64 * 3,
-        hidden_dim=32,
-        macro_embed_dim=8,
-        codebook_size=16,
-        nuisance_dim=4,
-        tex_dim=6,
-        action_dim=3,
-        rnn_hidden_dim=12,
-    )
-    agent = DisentangledAgent(config)
-
-    obs = torch.rand(2, 3, 64, 64)  # [B, C, H, W]
-    action = torch.rand(2, config.action_dim)  # [B, Da]
-    hidden = torch.zeros(2, config.rnn_hidden_dim)  # [B, Dh]
-
-    out = agent(obs, action, hidden)
-
-    assert out["z_macro"].shape == (2, config.macro_embed_dim)
-    assert out["z_nuis"].shape == (2, config.nuisance_dim)
-    assert out["z_tex"].shape == (2, config.tex_dim)
-    assert out["indices"].shape == (2,)
-    assert out["recon"].shape == (2, 3, 64, 64)
-    assert out["next_logits"].shape == (2, config.codebook_size)
-    assert out["hidden_next"].shape == (2, config.rnn_hidden_dim)
-    assert out["losses"]["loss_total"].ndim == 0
-
-
-def test_vq_encoder_decoder_components() -> None:
-    torch.manual_seed(1)
-    encoder = Encoder(obs_dim=64 * 64 * 3, hidden_dim=16)
-    quantizer = VectorQuantizer(codebook_size=8, embed_dim=6)
-    decoder = MacroDynamicsModel(macro_embed_dim=6, action_dim=2, hidden_dim=10, codebook_size=8)
-
-    obs = torch.rand(3, 3, 64, 64)  # [B, C, H, W]
-    h = encoder(obs)  # [B, H]
-    z_q, indices, vq_loss = quantizer(h[:, :6])  # [B, D], [B], []
-
-    action = torch.rand(3, 2)  # [B, Da]
-    hidden = torch.zeros(3, 10)  # [B, Dh]
-    logits, hidden_next, z_pred = decoder(z_q, action, hidden)  # [B, K], [B, Dh], [B, D]
-
-    assert h.shape == (3, 16)
-    assert z_q.shape == (3, 6)
-    assert indices.shape == (3,)
-    assert vq_loss.ndim == 0
-    assert logits.shape == (3, 8)
-    assert hidden_next.shape == (3, 10)
-    assert z_pred.shape == (3, 6)
-
-
-def test_hierarchical_disentangled_shapes() -> None:
-    torch.manual_seed(2)
-    config = DisentangledConfig(hidden_dim=16)
-    model = HierarchicalDisentangled(
-        config,
-        n_levels=2,
-        level_dims=[4, 6],
-        level_codebook_sizes=[8, 12],
-        level_update_freqs=[2, 1],
-    )
-
-    obs = torch.rand(2, 3, 64, 64)  # [B, C, H, W]
-    prev = torch.zeros(2, 2, 6)  # [B, L, Dmax]
-    out = model(obs, step=0, prev_z_macro=prev)
-
-    assert out["z_macro"].shape == (2, 2, 6)
-    assert out["indices"].shape == (2, 2)
-    assert out["vq_loss"].ndim == 0
-
 
 def test_supervised_topology_loss_and_jump_rate() -> None:
     torch.manual_seed(3)

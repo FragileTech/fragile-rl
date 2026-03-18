@@ -6,16 +6,16 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.layers.__atlas import (
-    _poincare_hyperbolic_score,
-    _poincare_temperature,
-    _poincare_weighted_mean,
-    _poincare_weighted_mean_per_chart,
-    _project_to_ball,
-    _routing_weights,
+from fragile.layers.gauge import (
+    poincare_hyperbolic_score,
+    poincare_temperature,
+    poincare_weighted_mean,
+    poincare_weighted_mean_per_chart,
+    project_to_ball,
 )
 from fragile.layers.gauge import exp_map_zero, log_map_zero, mobius_add
 from fragile.layers.primitives import SpectralLinear
+from fragile.layers.router import routing_weights
 
 
 class LatentTokenizer(nn.Module):
@@ -46,7 +46,7 @@ def _straight_through_one_hot(indices: torch.Tensor, num_classes: int) -> torch.
 def _extract_codebook_tensor(atlas_model: nn.Module) -> torch.Tensor:
     """Return the projected codebook tensor for an atlas-like module."""
     atlas = getattr(atlas_model, "encoder", atlas_model)
-    return _project_to_ball(atlas.codebook)
+    return project_to_ball(atlas.codebook)
 
 
 def compose_structured_state_with_atlas(
@@ -74,8 +74,8 @@ def compose_structured_state_with_atlas(
         chart_weights = F.one_hot(chart_idx.long(), num_classes=atlas.num_charts).to(dtype=dtype)
     chart_idx = chart_weights.argmax(dim=-1)
 
-    chart_centers = _project_to_ball(atlas.chart_centers).to(device=device, dtype=dtype)
-    codebook = _project_to_ball(atlas.codebook).to(device=device, dtype=dtype)
+    chart_centers = project_to_ball(atlas.chart_centers).to(device=device, dtype=dtype)
+    codebook = project_to_ball(atlas.codebook).to(device=device, dtype=dtype)
 
     if code_probs is None:
         if code_idx is None:
@@ -94,17 +94,17 @@ def compose_structured_state_with_atlas(
             .unsqueeze(1)
             .expand(-1, codebook.shape[0], -1)
         )
-        z_q_all = _poincare_weighted_mean_per_chart(codebook, code_probs)
+        z_q_all = poincare_weighted_mean_per_chart(codebook, code_probs)
         z_q = selected_code
     else:
-        z_q_all = _poincare_weighted_mean_per_chart(codebook, code_probs)
-        z_q = _poincare_weighted_mean(z_q_all, chart_weights)
+        z_q_all = poincare_weighted_mean_per_chart(codebook, code_probs)
+        z_q = poincare_weighted_mean(z_q_all, chart_weights)
         per_chart_code_idx = code_probs.argmax(dim=-1)
         selected_idx = per_chart_code_idx.gather(1, chart_idx.unsqueeze(1)).squeeze(1)
 
-    c_bar = _poincare_weighted_mean(chart_centers, chart_weights)
+    c_bar = poincare_weighted_mean(chart_centers, chart_weights)
     z_local = mobius_add(z_q, exp_map_zero(z_n))
-    z_geo = _project_to_ball(mobius_add(c_bar, z_local))
+    z_geo = project_to_ball(mobius_add(c_bar, z_local))
     return {
         "z_geo": z_geo,
         "router_weights": chart_weights,
@@ -129,8 +129,8 @@ def symbolize_latent_with_atlas(
 ) -> dict[str, torch.Tensor]:
     """Attach symbolic `(K_chart, K_code, z_n)` structure to a bulk latent `z_geo`."""
     atlas = getattr(atlas_model, "encoder", atlas_model)
-    z_latent = _project_to_ball(z_latent)
-    chart_centers = _project_to_ball(atlas.chart_centers)
+    z_latent = project_to_ball(z_latent)
+    chart_centers = project_to_ball(atlas.chart_centers)
 
     if router_weights_override is not None:
         router_weights = router_weights_override.to(device=z_latent.device, dtype=z_latent.dtype)
@@ -152,7 +152,7 @@ def symbolize_latent_with_atlas(
                 hard_routing_tau=hard_routing_tau,
             )
         else:
-            scores = _poincare_hyperbolic_score(
+            scores = poincare_hyperbolic_score(
                 z_latent,
                 chart_centers,
                 key_dim=atlas.latent_dim,
@@ -162,18 +162,18 @@ def symbolize_latent_with_atlas(
             )
             latent_router = getattr(atlas, "latent_router", None)
             if latent_router is not None:
-                tau = _poincare_temperature(
+                tau = poincare_temperature(
                     z_latent,
                     key_dim=atlas.latent_dim,
                     tau_min=atlas.router_tau_min,
                     tau_denom_min=atlas.router_tau_denom_min,
                 )
                 scores = scores + 0.1 * latent_router(z_latent) / tau.unsqueeze(1)
-            router_weights = _routing_weights(scores, hard_routing, hard_routing_tau)
+            router_weights = routing_weights(scores, hard_routing_tau)
             chart_idx = router_weights.argmax(dim=-1)
 
-    c_bar = _poincare_weighted_mean(chart_centers, router_weights)
-    v_local = _project_to_ball(mobius_add(-c_bar, z_latent))
+    c_bar = poincare_weighted_mean(chart_centers, router_weights)
+    v_local = project_to_ball(mobius_add(-c_bar, z_latent))
     z_q, code_idx, indices_stack, _vq, z_q_all = atlas._hyperbolic_vq(
         v_local,
         atlas.codebook,

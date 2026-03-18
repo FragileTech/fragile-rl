@@ -10,8 +10,8 @@ import torch
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 
-from fragile.core.layers.topoencoder import TopoEncoder
-from fragile.core.layers.topology import FactorizedJumpOperator
+from fragile.layers.topoencoder import TopoEncoder
+from fragile.layers.topology import FactorizedJumpOperator
 from fragile.losses.encoder import compute_phase1_loss
 from fragile.vla.config import VLAConfig
 from fragile.vla.train_joint import _compute_encoder_losses, _eval_pass, _get_hard_routing_tau

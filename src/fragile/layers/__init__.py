@@ -1,4 +1,3 @@
-from .__atlas import HierarchicalAtlasStack, TopoEncoderAttachments, TopoEncoderPrimitives
 from .attention import (
     AreaLawScreening,
     ChiralProjector,
@@ -52,7 +51,6 @@ __all__ = [
     "GeodesicBAOAB",
     "GeodesicConfig",
     "GeodesicCrossAttention",
-    "HierarchicalAtlasStack",
     "HyperbolicTransport",
     "InvariantChartClassifier",
     "IsotropicBlock",
@@ -66,8 +64,6 @@ __all__ = [
     "SupervisedTopologyLoss",
     "TemporalChristoffelQuery",
     "TopoEncoder",
-    "TopoEncoderAttachments",
-    "TopoEncoderPrimitives",
     "TopologicalDecoder",
     "WilsonLineApprox",
     "class_modulated_jump_rate",

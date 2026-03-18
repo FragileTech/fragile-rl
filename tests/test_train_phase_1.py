@@ -14,8 +14,8 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from fragile.__main__ import run
-from fragile.core.layers import FactorizedJumpOperator
-from fragile.core.layers.topoencoder import TopoEncoder
+from fragile.layers import FactorizedJumpOperator
+from fragile.layers.topoencoder import TopoEncoder
 from fragile.vla.train_joint import (
     _compute_encoder_losses as joint_compute_encoder_losses,
     _eval_pass as joint_eval_pass,

@@ -1,15 +1,12 @@
 import torch
 
-from fragile.core.layers import (
-    PrimitiveAttentiveAtlasEncoder,
-    PrimitiveTopologicalDecoder,
-    TopoEncoderPrimitives,
-)
+from fragile.layers import (AttentiveAtlasEncoder, TopoEncoder, TopologicalDecoder,
+                            )
 
 
-def test_primitive_attentive_atlas_encoder_shapes() -> None:
+def test_attentive_atlas_encoder_shapes() -> None:
     torch.manual_seed(0)
-    encoder = PrimitiveAttentiveAtlasEncoder(
+    encoder = AttentiveAtlasEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -44,9 +41,9 @@ def test_primitive_attentive_atlas_encoder_shapes() -> None:
     assert c_bar.shape == (4, 2)
 
 
-def test_primitive_topological_decoder_shapes() -> None:
+def test_topological_decoder_shapes() -> None:
     torch.manual_seed(1)
-    decoder = PrimitiveTopologicalDecoder(
+    decoder = TopologicalDecoder(
         latent_dim=2,
         hidden_dim=32,
         num_charts=3,
@@ -61,9 +58,9 @@ def test_primitive_topological_decoder_shapes() -> None:
     assert isinstance(aux_losses, dict)
 
 
-def test_topoencoder_primitives_forward_and_losses() -> None:
+def test_topoencoder_forward_and_losses() -> None:
     torch.manual_seed(2)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -91,15 +88,11 @@ def test_topoencoder_primitives_forward_and_losses() -> None:
 def test_decoder_film_conditioning() -> None:
     """Conv decoder with FiLM conditioning produces correct shapes."""
     torch.manual_seed(3)
-    decoder = PrimitiveTopologicalDecoder(
+    decoder = TopologicalDecoder(
         latent_dim=2,
         hidden_dim=32,
         num_charts=5,
         output_dim=784,
-        conv_backbone=True,
-        img_channels=1,
-        img_size=28,
-        conv_channels=32,
         film_conditioning=True,
     )
     z_geo = torch.randn(4, 2)
@@ -113,27 +106,17 @@ def test_decoder_film_conditioning() -> None:
 def test_decoder_conformal_freq_gating() -> None:
     """Conformal frequency gating produces correct shapes and modifies output."""
     torch.manual_seed(4)
-    decoder_plain = PrimitiveTopologicalDecoder(
+    decoder_plain = TopologicalDecoder(
         latent_dim=2,
         hidden_dim=32,
         num_charts=3,
         output_dim=784,
-        conv_backbone=True,
-        img_channels=1,
-        img_size=28,
-        conv_channels=32,
-        conformal_freq_gating=False,
     )
-    decoder_gated = PrimitiveTopologicalDecoder(
+    decoder_gated = TopologicalDecoder(
         latent_dim=2,
         hidden_dim=32,
         num_charts=3,
         output_dim=784,
-        conv_backbone=True,
-        img_channels=1,
-        img_size=28,
-        conv_channels=32,
-        conformal_freq_gating=True,
     )
     # Copy weights for fair comparison
     decoder_gated.load_state_dict(decoder_plain.state_dict())
@@ -150,17 +133,12 @@ def test_decoder_conformal_freq_gating() -> None:
 def test_decoder_all_features_combined() -> None:
     """All features together produce correct shapes."""
     torch.manual_seed(6)
-    decoder = PrimitiveTopologicalDecoder(
+    decoder = TopologicalDecoder(
         latent_dim=2,
         hidden_dim=32,
         num_charts=5,
         output_dim=784,
-        conv_backbone=True,
-        img_channels=1,
-        img_size=28,
-        conv_channels=32,
         film_conditioning=True,
-        conformal_freq_gating=True,
     )
     z_geo = torch.randn(4, 2)
     x_hat, router_weights, aux_losses = decoder(z_geo)
@@ -173,7 +151,7 @@ def test_decoder_all_features_combined() -> None:
 def test_hard_routing_produces_onehot() -> None:
     """Hard routing produces one-hot encoder weights with correct shapes."""
     torch.manual_seed(10)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -206,7 +184,7 @@ def test_hard_routing_produces_onehot() -> None:
 def test_hard_routing_gradients_flow() -> None:
     """Straight-through gradients flow through hard routing."""
     torch.manual_seed(11)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -242,7 +220,7 @@ def test_hard_routing_straight_through_argmax() -> None:
     Gradients should still flow.
     """
     torch.manual_seed(12)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,

@@ -1,13 +1,10 @@
 import torch
 
-from fragile.core.layers import (
+from fragile.layers import (
     AttentiveAtlasEncoder,
-    HierarchicalAtlasStack,
     TopoEncoder,
-    TopoEncoderAttachments,
     TopologicalDecoder,
 )
-from fragile.core.layers.vision import StandardResNetBackbone
 
 
 def test_attentive_atlas_encoder_shapes() -> None:
@@ -95,62 +92,3 @@ def test_topoencoder_forward_shapes() -> None:
     consistency = model.compute_consistency_loss(enc_w, dec_w)
     assert consistency.ndim == 0
     assert model.compute_perplexity(k_chart) > 0.0
-
-
-def test_hierarchical_atlas_stack_outputs() -> None:
-    torch.manual_seed(3)
-    model = HierarchicalAtlasStack(
-        input_dim=4,
-        hidden_dim=8,
-        latent_dim=[2, 3],
-        num_charts=[3, 2],
-        codes_per_chart=[4, 3],
-        n_levels=2,
-        level_update_freqs=[1, 1],
-        covariant_attn=True,
-        covariant_attn_tensorization="sum",
-    )
-    x = torch.randn(3, 4)
-    outputs = model(x)
-
-    assert len(outputs) == 2
-    for level, out in enumerate(outputs):
-        latent_dim = [2, 3][level]
-        num_charts = [3, 2][level]
-        assert out["x_recon"].shape == (3, 4)
-        assert out["vq_loss"].ndim == 0
-        assert out["enc_router_weights"].shape == (3, num_charts)
-        assert out["dec_router_weights"].shape == (3, num_charts)
-        assert out["K_chart"].shape == (3,)
-        assert out["K_code"].shape == (3,)
-        assert out["z_geo"].shape == (3, latent_dim)
-        assert out["z_n"].shape == (3, latent_dim)
-        assert out["z_tex"].shape == (3, latent_dim)
-        assert out["indices_stack"].shape == (3, num_charts)
-        assert out["z_n_all_charts"].shape == (3, num_charts, latent_dim)
-        assert out["c_bar"].shape == (3, latent_dim)
-
-
-def test_topoencoder_attachments_classifier() -> None:
-    torch.manual_seed(4)
-    attachments = TopoEncoderAttachments(
-        num_charts=3,
-        latent_dim=4,
-        num_classes=2,
-        enable_jump=False,
-        enable_classifier=True,
-    )
-    router_weights = torch.softmax(torch.randn(5, 3), dim=-1)
-    z_geo = torch.randn(5, 4)
-    outputs = attachments(router_weights=router_weights, z_geo=z_geo)
-
-    assert outputs["classifier_logits"].shape == (5, 2)
-
-
-def test_standard_resnet_backbone_shape() -> None:
-    torch.manual_seed(5)
-    backbone = StandardResNetBackbone(in_channels=3, out_dim=16, base_channels=8)
-    x = torch.randn(2, 3, 32, 32)
-    out = backbone(x)
-
-    assert out.shape == (2, 16)

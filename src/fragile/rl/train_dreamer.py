@@ -30,9 +30,8 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.core.layers import FactorizedJumpOperator
-from fragile.core.layers.atlas import _project_to_ball, TopoEncoderPrimitives
-from fragile.core.layers.gauge import hyperbolic_distance, poincare_log_map
+from fragile.layers import FactorizedJumpOperator, TopoEncoder
+from fragile.layers.gauge import project_to_ball, hyperbolic_distance, poincare_log_map
 from fragile.losses.macro import (
     compute_enclosure_loss,
     EnclosureProbe,
@@ -253,7 +252,7 @@ def _soft_symbolic_state_distribution(
         hard_routing_tau=hard_routing_tau,
     )
     atlas = getattr(atlas_model, "encoder", atlas_model)
-    codebook = _project_to_ball(atlas.codebook).to(device=z_latent.device, dtype=z_latent.dtype)
+    codebook = project_to_ball(atlas.codebook).to(device=z_latent.device, dtype=z_latent.dtype)
     v_local = obs_info["v_local"]
     B, K, C = v_local.shape[0], codebook.shape[0], codebook.shape[1]
     flat_v = v_local[:, None, None, :].expand(B, K, C, -1).reshape(-1, z_latent.shape[-1])
@@ -1111,7 +1110,7 @@ def _eval_policy(
 
 
 def _imagine(
-    obs_model: TopoEncoderPrimitives,
+    obs_model: TopoEncoder,
     world_model: GeometricWorldModel,
     reward_head: RewardHead,
     critic: nn.Module,
@@ -1374,7 +1373,7 @@ def _phase1_config(
 @torch.no_grad()
 def _bind_chart_tokenizer_centers(chart_tok: nn.Module, centers: torch.Tensor) -> None:
     """Copy projected chart centers into a chart tokenizer and freeze them."""
-    safe_centers = _project_to_ball(centers.detach())
+    safe_centers = project_to_ball(centers.detach())
     chart_tok.chart_centers.copy_(
         safe_centers.to(
             device=chart_tok.chart_centers.device,
@@ -1386,8 +1385,8 @@ def _bind_chart_tokenizer_centers(chart_tok: nn.Module, centers: torch.Tensor) -
 
 @torch.no_grad()
 def _sync_rl_atlas(
-    model: TopoEncoderPrimitives,
-    action_model: TopoEncoderPrimitives,
+    model: TopoEncoder,
+    action_model: TopoEncoder,
     world_model: GeometricWorldModel,
     critic: nn.Module,
     actor: GeometricActor,
@@ -1407,10 +1406,10 @@ def _sync_rl_atlas(
     ):
         return
 
-    obs_centers = _project_to_ball(obs_centers.detach())
-    action_centers = _project_to_ball(action_centers.detach())
-    obs_codebook = _project_to_ball(obs_codebook.detach())
-    action_codebook = _project_to_ball(action_codebook.detach())
+    obs_centers = project_to_ball(obs_centers.detach())
+    action_centers = project_to_ball(action_centers.detach())
+    obs_codebook = project_to_ball(obs_codebook.detach())
+    action_codebook = project_to_ball(action_codebook.detach())
     world_model_mod = _unwrap_compiled_module(world_model)
     critic_mod = _unwrap_compiled_module(critic)
     reward_head_mod = _unwrap_compiled_module(reward_head)
@@ -2500,7 +2499,7 @@ def _multistep_covector_alignment_loss(
 
 
 def _collect_policy_state_rollout(
-    obs_model: TopoEncoderPrimitives,
+    obs_model: TopoEncoder,
     world_model: GeometricWorldModel,
     actor: GeometricActor,
     action_model: SharedDynTopoEncoder,
@@ -3057,7 +3056,7 @@ def _should_run_actor_update(
 
 def _imagine_actor_return(
     config: DreamerConfig | None,
-    obs_model: TopoEncoderPrimitives,
+    obs_model: TopoEncoder,
     world_model: GeometricWorldModel,
     reward_head: RewardHead,
     critic: nn.Module,
@@ -3339,9 +3338,9 @@ def _value_calibration_error(
 
 
 def _train_step(
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: FactorizedJumpOperator,
-    action_model: TopoEncoderPrimitives,
+    action_model: TopoEncoder,
     action_jump_op: FactorizedJumpOperator,
     world_model: GeometricWorldModel,
     enclosure_probe: EnclosureProbe,
@@ -3389,7 +3388,7 @@ def _train_step(
 
     def _encode_sequence(
         x: torch.Tensor,
-        topo_model: TopoEncoderPrimitives,
+        topo_model: TopoEncoder,
         topo_jump_op: FactorizedJumpOperator,
         phase_cfg: VLAConfig,
     ) -> tuple[
@@ -5368,27 +5367,27 @@ def _train_step(
         metrics["geometric/jump_frac"] = float(wm_out["jumped"].float().mean())
         metrics["geometric/energy_var"] = float(wm_out["energy_var"])
 
-        obs_centers = _project_to_ball(model.encoder.chart_centers.detach())
-        action_centers = _project_to_ball(action_model.encoder.chart_centers.detach())
+        obs_centers = project_to_ball(model.encoder.chart_centers.detach())
+        action_centers = project_to_ball(action_model.encoder.chart_centers.detach())
         world_model_mod = _unwrap_compiled_module(world_model)
         reward_head_mod = _unwrap_compiled_module(reward_head)
         metrics["chart/wm_center_drift"] = float(
             (
                 obs_centers
-                - _project_to_ball(world_model_mod.potential_net.chart_tok.chart_centers.detach())
+                - project_to_ball(world_model_mod.potential_net.chart_tok.chart_centers.detach())
             )
             .norm(dim=-1)
             .mean()
         )
         metrics["action_chart/actor_center_drift"] = float(
-            (action_centers - _project_to_ball(actor.action_chart_centers.detach()))
+            (action_centers - project_to_ball(actor.action_chart_centers.detach()))
             .norm(dim=-1)
             .mean()
         )
         metrics["action_chart/reward_center_drift"] = float(
             (
                 action_centers
-                - _project_to_ball(reward_head_mod.action_chart_tok.chart_centers.detach())
+                - project_to_ball(reward_head_mod.action_chart_tok.chart_centers.detach())
             )
             .norm(dim=-1)
             .mean()
@@ -6406,7 +6405,7 @@ def train(config: DreamerConfig) -> None:
 
 def _save_checkpoint(
     path: str,
-    model: TopoEncoderPrimitives,
+    model: TopoEncoder,
     jump_op: nn.Module,
     action_model: nn.Module,
     action_jump_op: nn.Module,

@@ -8,13 +8,13 @@ simultaneously good for both decoding and Markov-transition prediction.
 
 from __future__ import annotations
 
-from fragile.layers.__atlas import (
-    PrimitiveAttentiveAtlasEncoder,
-    TopoEncoderPrimitives,
+from fragile.layers.topoencoder import (
+    AttentiveAtlasEncoder,
+    TopoEncoder,
 )
 
 
-class SharedDynAtlasEncoder(PrimitiveAttentiveAtlasEncoder):
+class SharedDynAtlasEncoder(AttentiveAtlasEncoder):
     """Atlas encoder where ``dynamics_vq`` uses the main codebook.
 
     The parent class creates a separate ``codebook_dyn`` when
@@ -53,11 +53,11 @@ class SharedDynAtlasEncoder(PrimitiveAttentiveAtlasEncoder):
         return self.codes_per_chart
 
 
-class SharedDynTopoEncoder(TopoEncoderPrimitives):
-    """``TopoEncoderPrimitives`` whose inner encoder uses the shared codebook.
+class SharedDynTopoEncoder(TopoEncoder):
+    """``TopoEncoder`` whose inner encoder uses the shared codebook.
 
     ``super().__init__()`` builds both ``self.encoder`` (a
-    ``PrimitiveAttentiveAtlasEncoder``) and ``self.decoder``.  We then
+    ``AttentiveAtlasEncoder``) and ``self.decoder``.  We then
     replace ``self.encoder`` with a ``SharedDynAtlasEncoder`` that has
     the identical architecture but overrides ``dynamics_vq``.
     """
@@ -65,7 +65,7 @@ class SharedDynTopoEncoder(TopoEncoderPrimitives):
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
 
-        # Collect the kwargs that PrimitiveAttentiveAtlasEncoder accepts.
+        # Collect the kwargs that AttentiveAtlasEncoder accepts.
         encoder_kwargs = {
             "input_dim": kwargs.get("input_dim", 2),
             "hidden_dim": kwargs.get("hidden_dim", 32),
@@ -98,6 +98,6 @@ class SharedDynTopoEncoder(TopoEncoderPrimitives):
             "dyn_codebook_loss_weight": kwargs.get("dyn_codebook_loss_weight", 1.0),
         }
 
-        # Replace the parent's PrimitiveAttentiveAtlasEncoder with our
+        # Replace the parent's AttentiveAtlasEncoder with our
         # shared-dynamics variant.  The decoder is left unchanged.
         self.encoder = SharedDynAtlasEncoder(**encoder_kwargs)

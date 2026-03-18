@@ -12,7 +12,7 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.layers.__atlas import _project_to_ball
+from fragile.layers.gauge import project_to_ball
 from fragile.layers.primitives import SpectralLinear
 from fragile.rl.action_manifold import _state_index, compose_structured_state_with_atlas
 
@@ -60,8 +60,8 @@ class GeometricActor(nn.Module):
 
     def bind_action_atlas(self, chart_centers: torch.Tensor, codebook: torch.Tensor) -> None:
         """Bind the action atlas used to reconstruct `z_geo` from `(K, z_n)`."""
-        self.action_chart_centers.copy_(_project_to_ball(chart_centers.detach()))
-        self.action_codebook.copy_(_project_to_ball(codebook.detach()))
+        self.action_chart_centers.copy_(project_to_ball(chart_centers.detach()))
+        self.action_codebook.copy_(project_to_ball(codebook.detach()))
 
     def _action_code_probs(
         self,

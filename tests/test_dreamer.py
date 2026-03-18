@@ -11,6 +11,10 @@ import pytest
 import torch
 from torch import nn
 
+from fragile.layers import FactorizedJumpOperator
+from fragile.layers.gauge import poincare_exp_map, project_to_ball
+from fragile.rl import train_dreamer
+from fragile.rl.train_dreamer import _sync_rl_atlas
 
 B = 4
 D = 8
@@ -306,14 +310,14 @@ def action_model():
 
 @pytest.fixture
 def jump_op():
-    from fragile.core.layers import FactorizedJumpOperator
+
 
     return FactorizedJumpOperator(num_charts=K, latent_dim=D)
 
 
 @pytest.fixture
 def action_jump_op():
-    from fragile.core.layers import FactorizedJumpOperator
+
 
     return FactorizedJumpOperator(num_charts=K, latent_dim=D)
 
@@ -1513,8 +1517,6 @@ class TestCriticStiffness:
         world_model,
         device,
     ):
-        from fragile.core.layers.gauge import poincare_exp_map
-        from fragile.rl import train_dreamer
 
         z = torch.zeros(4, D, device=device)
         displacement = torch.zeros(4, D, device=device)
@@ -1655,8 +1657,6 @@ class TestAtlasSync:
         actor,
         reward_head,
     ):
-        from fragile.core.layers.atlas import _project_to_ball
-        from fragile.rl.train_dreamer import _sync_rl_atlas
 
         with torch.no_grad():
             obs_model.encoder.chart_centers.copy_(
@@ -1679,22 +1679,22 @@ class TestAtlasSync:
             reward_head,
         )
 
-        expected_obs = _project_to_ball(obs_model.encoder.chart_centers.detach())
-        expected_action = _project_to_ball(action_model.encoder.chart_centers.detach())
+        expected_obs = project_to_ball(obs_model.encoder.chart_centers.detach())
+        expected_action = project_to_ball(action_model.encoder.chart_centers.detach())
         torch.testing.assert_close(
-            _project_to_ball(world_model.potential_net.chart_tok.chart_centers.detach()),
+            project_to_ball(world_model.potential_net.chart_tok.chart_centers.detach()),
             expected_obs,
         )
         torch.testing.assert_close(
-            _project_to_ball(standalone_critic.chart_tok.chart_centers.detach()),
+            project_to_ball(standalone_critic.chart_tok.chart_centers.detach()),
             expected_obs,
         )
         torch.testing.assert_close(
-            _project_to_ball(actor.action_chart_centers.detach()),
+            project_to_ball(actor.action_chart_centers.detach()),
             expected_action,
         )
         torch.testing.assert_close(
-            _project_to_ball(reward_head.action_chart_tok.chart_centers.detach()),
+            project_to_ball(reward_head.action_chart_tok.chart_centers.detach()),
             expected_action,
         )
         assert not actor.action_chart_centers.requires_grad

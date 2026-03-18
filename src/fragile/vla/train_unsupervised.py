@@ -22,7 +22,7 @@ from fragile.checkpoints import (
     compute_param_norm,
     count_parameters,
 )
-from fragile.layers import FactorizedJumpOperator, TopoEncoderPrimitives
+from fragile.layers import FactorizedJumpOperator, TopoEncoder
 from fragile.layers.topology import compute_jump_consistency_loss
 from fragile.losses.encoder import (
     compute_phase1_loss,
@@ -208,16 +208,13 @@ def train_unsupervised(args: argparse.Namespace) -> None:  # noqa: C901
 
     # ── Model ──────────────────────────────────────────────────
     K = args.num_charts
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=input_dim,
         hidden_dim=args.hidden_dim,
         latent_dim=args.latent_dim,
         num_charts=K,
         codes_per_chart=args.codes_per_chart,
-        covariant_attn=True,
-        covariant_attn_tensorization="full",
         soft_equiv_metric=True,
-        conv_backbone=False,
         film_conditioning=True,
     ).to(device)
 

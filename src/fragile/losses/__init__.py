@@ -22,6 +22,7 @@ def __getattr__(name: str):
     """Lazy re-export: ``from fragile.losses import X`` works for any public symbol."""
     submodules = [
         "fragile.losses.encoder",
+        "fragile.losses.encoder_unused",
         "fragile.losses.world_model",
         "fragile.losses.macro",
         "fragile.losses.critic",

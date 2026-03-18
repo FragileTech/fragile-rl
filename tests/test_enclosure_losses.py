@@ -4,7 +4,7 @@ import pytest
 import torch
 import torch.nn.functional as F
 
-from fragile.core.layers.gauge import hyperbolic_distance, poincare_exp_map
+from fragile.layers.gauge import hyperbolic_distance, poincare_exp_map
 from fragile.losses.encoder import orthogonality_loss
 from fragile.losses.macro import (
     compute_dynamics_markov_loss,

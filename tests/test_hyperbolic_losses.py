@@ -5,8 +5,8 @@ import math
 import torch
 from torch import nn
 
-from fragile.core.layers import FactorizedJumpOperator, TopoEncoderPrimitives
-from fragile.core.layers.atlas import _smooth_tangent_to_ball
+from fragile.layers import FactorizedJumpOperator, TopoEncoder
+from fragile.layers.gauge import smooth_tangent_to_ball
 from fragile.losses.encoder import (
     combine_quality_targets,
     compute_chart_center_mean_loss,
@@ -179,7 +179,7 @@ def test_code_usage_band_loss_respects_explicit_hard_indices() -> None:
 def test_hard_routing_keeps_live_soft_router_weights() -> None:
     """Hard routing should still expose soft probabilities for loss terms."""
     torch.manual_seed(13)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -258,7 +258,7 @@ def test_chart_center_geometry_losses_respect_mean_radius_and_separation() -> No
 
 def test_encoder_optimizer_groups_split_chart_centers_and_codebooks() -> None:
     """Atlas anchors and codebooks should use their slower LR groups."""
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -292,7 +292,7 @@ def test_encoder_optimizer_groups_split_chart_centers_and_codebooks() -> None:
 def test_primitive_encoder_caches_v_local_for_phase1_losses() -> None:
     """Phase 1 helpers should be able to reuse the exact chart-local latent."""
     torch.manual_seed(7)
-    model = TopoEncoderPrimitives(
+    model = TopoEncoder(
         input_dim=3,
         hidden_dim=32,
         latent_dim=2,
@@ -358,7 +358,7 @@ def test_smooth_tangent_to_ball_is_bounded_and_monotone() -> None:
         dtype=torch.float32,
     )
 
-    squashed = _smooth_tangent_to_ball(raw, max_norm=0.99)
+    squashed = smooth_tangent_to_ball(raw, max_norm=0.99)
     radii = squashed.norm(dim=-1)
 
     assert torch.all(radii < 0.99)
