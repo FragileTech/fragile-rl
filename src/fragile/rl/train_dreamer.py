@@ -31,7 +31,7 @@ from torch import nn
 import torch.nn.functional as F
 
 from fragile.layers import FactorizedJumpOperator, TopoEncoder
-from fragile.layers.gauge import project_to_ball, hyperbolic_distance, poincare_log_map
+from fragile.layers.gauge import hyperbolic_distance, poincare_log_map, project_to_ball
 from fragile.losses.macro import (
     compute_enclosure_loss,
     EnclosureProbe,
@@ -772,8 +772,7 @@ def _policy_action(
         action_mean, _, _ = action_model.decoder(
             action_state["action_z_geo"].detach(),
             router_weights=action_state["action_router_weights"].detach(),
-            hard_routing=hard_routing,
-            hard_routing_tau=hard_routing_tau,
+            routing_tau=hard_routing_tau,
         )
     return {
         "action": action_mean.detach(),
@@ -839,8 +838,7 @@ def _collect_episode(
             with torch.no_grad():
                 enc_out = encoder.encoder(
                     obs_t,
-                    hard_routing=hard_routing,
-                    hard_routing_tau=routing_tau,
+                    routing_tau=routing_tau,
                 )
                 obs_info = _structured_state_from_encoder_output(enc_out)
             action_out = _policy_action(
@@ -971,8 +969,7 @@ def _collect_parallel_episodes(
             with torch.no_grad():
                 enc_out = encoder.encoder(
                     obs_t,
-                    hard_routing=hard_routing,
-                    hard_routing_tau=routing_tau,
+                    routing_tau=routing_tau,
                 )
                 obs_info = _structured_state_from_encoder_output(enc_out)
             action_out = _policy_action(
@@ -1076,8 +1073,7 @@ def _eval_policy(
                     obs_t = obs_normalizer.normalize_tensor(obs_t)
                 enc_out = encoder.encoder(
                     obs_t,
-                    hard_routing=hard_routing,
-                    hard_routing_tau=routing_tau,
+                    routing_tau=routing_tau,
                 )
                 obs_info = _structured_state_from_encoder_output(enc_out)
             action_out = _policy_action(
@@ -3121,8 +3117,7 @@ def _imagine_actor_return(
         action_mean, _, _ = action_model.decoder(
             action_state["action_z_geo"],
             router_weights=action_state["action_router_weights"],
-            hard_routing=hard_routing,
-            hard_routing_tau=routing_tau,
+            routing_tau=routing_tau,
         )
         z_state_list.append(z)
         rw_state_list.append(rw.detach())
@@ -3424,8 +3419,7 @@ def _train_step(
             topo_jump_op,
             config,
             epoch,
-            hard_routing=current_hard_routing,
-            hard_routing_tau=current_tau,
+            routing_tau=current_tau,
             phase1_config=phase_cfg,
         )
         return (
@@ -5463,10 +5457,7 @@ def train(config: DreamerConfig) -> None:
         latent_dim=config.latent_dim,
         num_charts=config.num_charts,
         codes_per_chart=config.codes_per_chart,
-        covariant_attn=True,
-        covariant_attn_tensorization="full",
         soft_equiv_metric=True,
-        conv_backbone=False,
         film_conditioning=True,
         commitment_beta=config.commitment_beta,
         codebook_loss_weight=config.codebook_loss_weight,
@@ -5481,10 +5472,7 @@ def train(config: DreamerConfig) -> None:
         latent_dim=config.latent_dim,
         num_charts=config.num_action_charts,
         codes_per_chart=config.action_codes_per_chart,
-        covariant_attn=True,
-        covariant_attn_tensorization="full",
         soft_equiv_metric=True,
-        conv_backbone=False,
         film_conditioning=True,
         commitment_beta=config.commitment_beta,
         codebook_loss_weight=config.codebook_loss_weight,

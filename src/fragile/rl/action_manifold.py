@@ -7,13 +7,15 @@ from torch import nn
 import torch.nn.functional as F
 
 from fragile.layers.gauge import (
+    exp_map_zero,
+    log_map_zero,
+    mobius_add,
     poincare_hyperbolic_score,
     poincare_temperature,
     poincare_weighted_mean,
     poincare_weighted_mean_per_chart,
     project_to_ball,
 )
-from fragile.layers.gauge import exp_map_zero, log_map_zero, mobius_add
 from fragile.layers.primitives import SpectralLinear
 from fragile.layers.router import routing_weights
 
@@ -148,8 +150,7 @@ def symbolize_latent_with_atlas(
             router_weights, chart_idx = cov_router(
                 z_latent,
                 chart_tokens=chart_centers,
-                hard_routing=hard_routing,
-                hard_routing_tau=hard_routing_tau,
+                routing_tau=hard_routing_tau,
             )
         else:
             scores = poincare_hyperbolic_score(

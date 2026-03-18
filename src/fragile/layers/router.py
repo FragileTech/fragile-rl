@@ -8,6 +8,23 @@ from fragile.layers import SpectralLinear
 
 
 def routing_weights(scores: torch.Tensor, routing_tau: float) -> torch.Tensor:
+    """Turn router logits into hard assignments with straight-through gradients.
+
+    When ``routing_tau`` is negative, routing becomes deterministic: the forward
+    pass emits the argmax as a one-hot vector while gradients flow through a
+    plain softmax of ``scores``. Otherwise the function uses
+    :func:`torch.nn.functional.gumbel_softmax` with ``hard=True`` to sample a
+    one-hot route while keeping the relaxed gradients.
+
+    Args:
+        scores: Router logits of shape ``[batch, num_charts]``.
+        routing_tau: Temperature for hard Gumbel-softmax. Negative values switch
+            to deterministic straight-through argmax routing.
+
+    Returns:
+        A tensor with the same shape as ``scores`` whose forward values are
+        one-hot chart selections.
+    """
     if routing_tau < 0:
         # Negative tau → deterministic straight-through argmax (no Gumbel noise).
         # Forward: one-hot from argmax.  Backward: gradients through softmax.
@@ -21,9 +38,19 @@ def routing_weights(scores: torch.Tensor, routing_tau: float) -> torch.Tensor:
 
 
 class CovariantChartRouter(nn.Module):
-    """Gauge-covariant chart router with hyperbolic transport and metric-aware temperature.
+    """Route latent states to charts using geometry-aware hyperbolic scores.
 
-    Uses O(n) Poincaré ball parallel transport instead of O(n³) Cayley transform.
+    The router treats each chart as a point or token associated with the
+    Poincaré ball latent space. Base routing logits are the negative
+    hyperbolic distance from each latent state ``z`` to each chart, scaled by a
+    temperature derived from the position of ``z`` in the ball. When optional
+    features are available, the router adds a smaller feature-conditioned
+    correction built from projected features, projected latents, and a learned
+    quadratic ``q_gamma`` term.
+
+    The module also caches both detached and live soft routing weights/scores
+    from the most recent forward pass so downstream losses or diagnostics can
+    inspect the router's confidence even when the returned routing is hard.
     """
 
     def __init__(
@@ -36,6 +63,23 @@ class CovariantChartRouter(nn.Module):
         tau_denom_min: float = 1e-3,
         transport_eps: float = 1e-3,
     ) -> None:
+        """Initialize the router parameters and numerical-stability settings.
+
+        Args:
+            latent_dim: Dimensionality of the latent state ``z`` scored against
+                chart centers.
+            key_dim: Dimensionality of the internal query/key space used for the
+                optional feature-conditioned correction.
+            num_charts: Number of charts the router can assign each sample to.
+            feature_dim: Optional feature width. When provided, the router learns
+                ``q_feat_proj`` and can incorporate ``features`` in ``forward``.
+            tau_min: Lower bound applied to the geometry-derived routing
+                temperature.
+            tau_denom_min: Lower bound for the ``1 - |z|^2`` factor used when
+                computing the temperature near the Poincaré-ball boundary.
+            transport_eps: Small constant used to keep conformal factors and
+                hyperbolic distance computations numerically stable.
+        """
         super().__init__()
         self.latent_dim = latent_dim
         self.key_dim = key_dim
@@ -64,12 +108,25 @@ class CovariantChartRouter(nn.Module):
         self._last_router_scores_live = None
 
     def _gamma_term(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute the learned quadratic latent correction used in ``q``.
+
+        The method forms the outer product ``z z^T`` for each sample and
+        contracts it with ``self.q_gamma`` to produce a ``[batch, key_dim]``
+        tensor. In ``forward`` this term is added to the projected latent and
+        optional feature projections before comparing against transported chart
+        queries.
+        """
         # Quadratic term captures Christoffel-symbol curvature corrections.
         z_outer = z.unsqueeze(2) * z.unsqueeze(1)  # [B, D, D]
         return torch.einsum("bij,kij->bk", z_outer, self.q_gamma)
 
     def _conformal_factor(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute Poincaré ball conformal factor λ(z) = 2 / (1 - |z|²)."""
+        """Return the Poincaré-ball conformal factor for each latent state.
+
+        The radius is clamped to stay inside the unit ball before evaluating
+        ``lambda(z) = 2 / (1 - |z|^2 + eps)`` so transport and distance-related
+        calculations remain finite close to the boundary.
+        """
         r2 = (z**2).sum(dim=-1, keepdim=True)
         r2 = torch.clamp(r2, max=1.0 - self.transport_eps)
         return 2.0 / (1.0 - r2 + self.transport_eps)
@@ -77,10 +134,25 @@ class CovariantChartRouter(nn.Module):
     def _transport_queries(
         self, z: torch.Tensor, chart_tokens: torch.Tensor | None = None
     ) -> torch.Tensor:
-        """Transport chart queries using O(n) hyperbolic parallel transport.
+        """Expand chart queries across the batch and rescale them at ``z``.
 
-        In the Poincaré ball, parallel transport from the origin scales vectors
-        by the conformal factor ratio. This replaces the O(n³) Cayley transform.
+        ``self.chart_queries`` live at the origin of the Poincaré ball in key
+        space. This helper optionally replaces them with user-provided
+        ``chart_tokens`` and then applies the origin-to-``z`` scaling used by
+        the router's simplified parallel transport rule.
+
+        ``chart_tokens`` may be either:
+        - ``[num_charts, key_dim]``: already in key space, used directly.
+        - ``[num_charts, latent_dim]``: projected into key space with
+          ``self.chart_key_proj`` before transport.
+
+        Args:
+            z: Latent states of shape ``[batch, latent_dim]``.
+            chart_tokens: Optional chart representations overriding the learned
+                ``self.chart_queries``.
+
+        Returns:
+            A ``[batch, num_charts, key_dim]`` tensor of transported queries.
         """
         batch_size = z.shape[0]
         if chart_tokens is None:
@@ -110,6 +182,13 @@ class CovariantChartRouter(nn.Module):
         return queries_expanded / lambda_z.unsqueeze(1)
 
     def _temperature(self, z: torch.Tensor) -> torch.Tensor:
+        """Compute the per-sample routing temperature from latent geometry.
+
+        The temperature shrinks as ``|z|`` approaches the Poincaré-ball
+        boundary, making routing more selective for high-radius latent states.
+        Floors on both the denominator and the final value keep the temperature
+        finite and nonzero.
+        """
         # Router energies are hyperbolic distances in the latent manifold, so
         # their Gibbs temperature should scale with the latent geometry, not
         # with the hidden/key projection width used for auxiliary feature terms.
@@ -119,17 +198,20 @@ class CovariantChartRouter(nn.Module):
         return tau.clamp(min=self.tau_min)
 
     def _hyperbolic_score(self, z: torch.Tensor, chart_centers: torch.Tensor) -> torch.Tensor:
-        """Compute logits based on negative hyperbolic distance. O(N*D).
+        """Score each chart by negative Poincaré distance to ``z``.
 
-        Uses the Poincaré ball distance formula for efficient chart scoring
-        without requiring matrix operations.
+        The method evaluates the closed-form distance in the Poincaré ball and
+        divides by the geometry-derived temperature returned by
+        :meth:`_temperature`. Higher scores therefore correspond to charts that
+        are hyperbolically closer to each latent sample.
 
         Args:
-            z: [B, D] latent positions
-            chart_centers: [N_c, D] chart center positions
+            z: Latent states of shape ``[batch, latent_dim]``.
+            chart_centers: Chart locations of shape ``[num_charts, latent_dim]``.
 
         Returns:
-            scores: [B, N_c] negative distances (higher = closer)
+            A ``[batch, num_charts]`` score matrix where larger values indicate
+            a stronger routing preference.
         """
         # z: [B, D], chart_centers: [N_c, D]
         z_exp = z.unsqueeze(1)  # [B, 1, D]
@@ -159,16 +241,32 @@ class CovariantChartRouter(nn.Module):
         chart_tokens: torch.Tensor | None = None,
         routing_tau: float = 1.0,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Route to charts using hyperbolic distance scoring.
+        """Compute hard chart assignments and expose the router's soft beliefs.
+
+        The forward pass first builds chart centers for the hyperbolic distance
+        score. If ``chart_tokens`` is not provided, it falls back to the learned
+        ``self.chart_queries`` truncated to ``latent_dim``. It then computes
+        distance-based scores and, when both ``features`` and ``q_feat_proj`` are
+        available, adds a smaller feature-conditioned correction based on the
+        transported chart queries.
+
+        Before returning, the method caches both detached and live versions of
+        the softmax-normalized scores and raw scores in ``self._last_*`` fields.
+        The returned ``router_weights`` are hard one-hot assignments produced by
+        :func:`routing_weights`, while ``k_chart`` is their argmax index.
 
         Args:
-            z: [B, D] latent positions
-            features: [B, F] optional feature vectors
-            chart_tokens: [N_c, D] optional chart centers (defaults to self.chart_centers)
+            z: Latent states of shape ``[batch, latent_dim]``.
+            features: Optional feature tensor of shape ``[batch, feature_dim]``
+                used only when the router was initialized with ``feature_dim``.
+            chart_tokens: Optional chart tensor whose leading dimension must be
+                ``num_charts`` and whose width must be compatible with the
+                distance computation used for scoring.
+            routing_tau: Temperature passed to :func:`routing_weights`.
 
         Returns:
-            router_weights: [B, N_c] routing weights
-            K_chart: [B] argmax chart assignments
+            A tuple ``(router_weights, k_chart)`` where ``router_weights`` has
+            shape ``[batch, num_charts]`` and ``k_chart`` has shape ``[batch]``.
         """
         # Get chart centers for scoring
         if chart_tokens is not None:

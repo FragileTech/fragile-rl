@@ -54,14 +54,14 @@ def test_topological_decoder_routing() -> None:
         output_dim=4,
     )
     z_geo = torch.randn(5, 2)
-    x_hat, router_weights = decoder(z_geo)
+    x_hat, router_weights, _aux = decoder(z_geo)
 
     assert x_hat.shape == (5, 4)
     assert router_weights.shape == (5, 3)
     assert torch.allclose(router_weights.sum(dim=-1), torch.ones(5), atol=1e-5)
 
     chart_index = torch.tensor([0, 1, 2, 1, 0])
-    _, router_hard = decoder(z_geo, chart_index=chart_index)
+    _, router_hard, _ = decoder(z_geo, chart_index=chart_index)
     expected = torch.nn.functional.one_hot(chart_index, num_classes=3).float()
     assert torch.allclose(router_hard, expected, atol=1e-6)
 
@@ -76,7 +76,7 @@ def test_topoencoder_forward_shapes() -> None:
         codes_per_chart=5,
     )
     x = torch.randn(4, 4)
-    x_recon, vq_loss, enc_w, dec_w, k_chart, z_geo, z_n, c_bar = model(x)
+    x_recon, vq_loss, enc_w, dec_w, k_chart, z_geo, z_n, c_bar, _aux = model(x)
 
     assert x_recon.shape == (4, 4)
     assert vq_loss.ndim == 0

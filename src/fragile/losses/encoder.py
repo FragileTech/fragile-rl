@@ -11,17 +11,18 @@ import math
 from typing import TYPE_CHECKING
 
 import torch
-from torch import nn, Tensor
+from torch import Tensor
 import torch.nn.functional as F
 
 from fragile.layers import FactorizedJumpOperator
-from fragile.layers.gauge import (  # noqa: F401
+from fragile.layers.gauge import (  # noqa: F401  # noqa: F401
+    as_tangent,
     exp_map_zero,
     hyperbolic_distance,
     log_map_zero,
     mobius_add,
+    project_to_ball,
 )
-from fragile.layers.gauge import as_tangent, project_to_ball  # noqa: F401
 
 
 if TYPE_CHECKING:
@@ -120,7 +121,6 @@ def compute_hard_routing_nll(router_scores: Tensor) -> Tensor:
     """Maximize the Gibbs probability of the deterministic hard chart partition."""
     hard_labels = router_scores.detach().argmax(dim=-1)
     return F.cross_entropy(router_scores, hard_labels)
-
 
 
 def _entropy_band_loss(
@@ -1198,11 +1198,10 @@ def compute_phase1_loss(
 # =============================================================================
 
 __all__ = [
-    "as_tangent",
-    "project_to_ball",
     # Extracted from vla/losses.py
     "_deterministic_st_router_weights",
-    "orthogonality_loss",
+    "as_tangent",
+    "combine_quality_targets",
     # Chart center losses
     "compute_chart_center_mean_loss",
     "compute_chart_center_radius_loss",
@@ -1216,6 +1215,15 @@ __all__ = [
     "compute_confidence_calibration_loss",
     "compute_error_quality_targets",
     "compute_hard_routing_nll",
+    # Geometry losses
+    "compute_hyperbolic_uniformity_loss",
+    # Jump
+    "compute_jump_consistency_loss",
+    # Phase 1 assembly
+    "compute_phase1_loss",
+    "compute_radial_calibration_loss",
+    # Quality targets
+    "compute_rank_quality_targets",
     "compute_router_information_metrics",
     "compute_router_margin_loss",
     "compute_router_score_metrics",
@@ -1223,18 +1231,10 @@ __all__ = [
     "compute_routing_confidence",
     "compute_routing_entropy",
     "compute_sinkhorn_balanced_chart_loss",
-    # Geometry losses
-    "compute_hyperbolic_uniformity_loss",
-    "compute_radial_calibration_loss",
     "compute_v_tangent_barrier_loss",
-    # Quality targets
-    "compute_rank_quality_targets",
-    "combine_quality_targets",
-    "mix_quality_targets",
-    # Jump
-    "compute_jump_consistency_loss",
-    "get_jump_weight_schedule",
-    # Phase 1 assembly
-    "compute_phase1_loss",
     "compute_window_loss",
+    "get_jump_weight_schedule",
+    "mix_quality_targets",
+    "orthogonality_loss",
+    "project_to_ball",
 ]

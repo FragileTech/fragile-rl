@@ -18,8 +18,8 @@ from tqdm import tqdm
 
 from fragile.checkpoints import compute_grad_norm, compute_param_norm, count_parameters
 from fragile.layers import FactorizedJumpOperator
+from fragile.layers.jump_operator import compute_jump_consistency_loss
 from fragile.layers.topoencoder import TopoEncoder
-from fragile.layers.topology import compute_jump_consistency_loss
 from fragile.losses.encoder import (
     _deterministic_st_router_weights,
     compute_phase1_loss,

@@ -11,7 +11,18 @@ from fragile.layers.gauge import ConformalMetric
 
 
 def _as_query_tokens(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, bool]:
-    """Normalize a query tensor to shape ``[B, Q, ...]``."""
+    """Normalize single-query and multi-query inputs to a common token layout.
+
+    Args:
+        tensor: Tensor shaped either ``[batch, dim]`` for one query per sample
+            or ``[batch, n_queries, dim]`` for an explicit query bank.
+        name: Name used in validation errors.
+
+    Returns:
+        A pair ``(tokens, squeezed)`` where ``tokens`` always has shape
+        ``[batch, n_queries, dim]`` and ``squeezed`` records whether a singleton
+        query axis was introduced.
+    """
     if tensor.dim() == 2:
         return tensor.unsqueeze(1), True
     if tensor.dim() == 3:
@@ -26,7 +37,18 @@ def _as_optional_query_tokens(
     expected_batch: int,
     expected_queries: int,
 ) -> torch.Tensor | None:
-    """Normalize optional query-conditioned inputs to ``[B, Q, ...]``."""
+    """Normalize an optional query-aligned tensor and validate its leading shape.
+
+    Args:
+        tensor: Optional tensor shaped like a single query bank input.
+        name: Name used in validation errors.
+        expected_batch: Batch size that must match the normalized query bank.
+        expected_queries: Query count that must match the normalized query bank.
+
+    Returns:
+        ``None`` when ``tensor`` is ``None``; otherwise a rank-3 tensor with
+        leading shape ``[expected_batch, expected_queries, ...]``.
+    """
     if tensor is None:
         return None
     tokens, _ = _as_query_tokens(tensor, name)
@@ -38,7 +60,17 @@ def _as_optional_query_tokens(
 
 @dataclass
 class GeodesicConfig:
-    """Configuration for hyperbolic covariant attention on the Poincare ball."""
+    """Shared hyperparameters for hyperbolic attention and BAOAB updates.
+
+    The fields are consumed by several modules in this file:
+    - ``d_model``, ``d_latent``, and ``n_heads`` control feature and latent sizes.
+    - ``g_s``, ``g_2``, and ``g_1`` weight the three skew bases used by
+      :class:`WilsonLineApprox`.
+    - ``dt``, ``gamma_friction``, and ``T_c`` parameterize the BAOAB-style
+      update in :class:`GeodesicCrossAttention`.
+    - ``use_learned_thermostat`` and ``thermostat_residual_scale`` enable and
+      scale the optional learned thermostat correction.
+    """
 
     d_model: int = 256
     d_latent: int = 64
@@ -62,6 +94,15 @@ class HyperbolicTransport(nn.Module):
     """
 
     def __init__(self, config: GeodesicConfig, d_k: int, curvature: float = 1.0) -> None:
+        """Store latent dimensions and metric helpers for transport scaling.
+
+        Args:
+            config: Global geometry configuration. Only ``d_latent`` is used
+                directly by this module.
+            d_k: Per-head feature width associated with transported vectors.
+            curvature: Stored for API compatibility; the current implementation
+                always uses :class:`ConformalMetric` on the unit Poincare ball.
+        """
         super().__init__()
         self.d_k = d_k
         self.d_latent = config.d_latent
@@ -69,6 +110,17 @@ class HyperbolicTransport(nn.Module):
         self.metric = ConformalMetric()
 
     def _scale_factors(self, z_query: torch.Tensor, z_key: torch.Tensor) -> torch.Tensor:
+        """Compute conformal-factor ratios between query and key positions.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
+
+        Returns:
+            A tensor of shape ``[batch, n_queries, n_keys, 1]`` containing
+            ``lambda(z_key) / lambda(z_query)`` for each query-key pair.
+        """
         z_query_tokens, _ = _as_query_tokens(z_query, "z_query")
         if z_key.dim() != 3:
             msg = "z_key must have shape [B, N, D]."
@@ -92,7 +144,12 @@ class HyperbolicTransport(nn.Module):
         return lambda_key / (lambda_query + 1e-6)
 
     def forward(self, z_query: torch.Tensor, z_key: torch.Tensor) -> torch.Tensor:
-        """Return hyperbolic transport scales.
+        """Return pairwise transport scales in a layout matching the query input.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
 
         Returns:
             ``[B, N, 1]`` for a single query point or ``[B, Q, N, 1]`` for a
@@ -113,6 +170,14 @@ class WilsonLineApprox(nn.Module):
     """
 
     def __init__(self, config: GeodesicConfig, d_k: int, d_conn: int = 8) -> None:
+        """Initialize the displacement projection and skew transport bases.
+
+        Args:
+            config: Hyperparameters providing latent size and basis weights.
+            d_k: Per-head feature width of the transported key vectors.
+            d_conn: Width of the learned displacement feature used to combine the
+                skew bases. It is clipped to ``config.d_latent``.
+        """
         super().__init__()
         self.d_k = d_k
         self.d_conn = min(d_conn, config.d_latent)
@@ -127,9 +192,24 @@ class WilsonLineApprox(nn.Module):
 
     @staticmethod
     def _skew(basis: torch.Tensor) -> torch.Tensor:
+        """Return the antisymmetric part of a basis tensor."""
         return basis - basis.transpose(-1, -2)
 
     def _transport_matrices(self, z_query: torch.Tensor, z_key: torch.Tensor) -> torch.Tensor:
+        """Build Wilson-line-style transport matrices for each query-key pair.
+
+        The matrices combine the scalar hyperbolic transport factor from
+        :class:`HyperbolicTransport` with a first-order skew correction derived
+        from the projected displacement ``z_query - z_key``.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
+
+        Returns:
+            A tensor of shape ``[batch, n_queries, n_keys, d_k, d_k]``.
+        """
         z_query_tokens, _ = _as_query_tokens(z_query, "z_query")
         if z_key.dim() != 3:
             msg = "z_key must have shape [B, N, D]."
@@ -155,7 +235,12 @@ class WilsonLineApprox(nn.Module):
         return scale * (identity + h)
 
     def forward(self, z_query: torch.Tensor, z_key: torch.Tensor) -> torch.Tensor:
-        """Return hyperbolic transport matrices.
+        """Return transport matrices in a layout matching the query input.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
 
         Returns:
             ``[B, N, d_k, d_k]`` for a single query point or
@@ -167,9 +252,23 @@ class WilsonLineApprox(nn.Module):
 
 
 class ChristoffelQuery(nn.Module):
-    """Geometric query projection encoding Poincare-ball Christoffel terms."""
+    """Query projection augmented with latent and geometry-dependent corrections.
+
+    The output starts from linear projections of the feature input ``x`` and the
+    latent geometry ``z_geom``. Optional velocity features add another linear
+    term, while two learned bilinear tensors contribute quadratic ``z-z`` and
+    mixed ``z-v`` corrections. ``W_Q_gamma`` is initialized with a small
+    Christoffel-inspired pattern and ``W_Qzv`` starts at zero.
+    """
 
     def __init__(self, d_in: int, d_out: int, d_latent: int) -> None:
+        """Create the linear and bilinear terms used to build query vectors.
+
+        Args:
+            d_in: Width of the incoming feature representation.
+            d_out: Width of the resulting query representation.
+            d_latent: Width of the latent geometric state.
+        """
         super().__init__()
         self.W_Q = nn.Linear(d_in, d_out, bias=False)
         self.W_Qz = nn.Linear(d_latent, d_out, bias=False)
@@ -180,6 +279,7 @@ class ChristoffelQuery(nn.Module):
         self.W_Qzv = nn.Parameter(torch.zeros(d_out, d_latent, d_latent))
 
     def _init_christoffel(self, d_latent: int) -> None:
+        """Seed ``W_Q_gamma`` with a small structured Christoffel-like pattern."""
         with torch.no_grad():
             for k in range(min(d_latent, self.W_Q_gamma.shape[0])):
                 for i in range(d_latent):
@@ -196,7 +296,20 @@ class ChristoffelQuery(nn.Module):
         v_feat: torch.Tensor | None = None,
         v_geom: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Compute the Christoffel-aware query vector."""
+        """Project feature and geometric inputs into the query space.
+
+        Args:
+            x: Query features of shape ``[batch, d_in]``.
+            z_geom: Query positions or geometric descriptors of shape
+                ``[batch, d_latent]``.
+            v_feat: Optional velocity-like features in the same feature space as
+                ``x``.
+            v_geom: Optional geometry-space velocity term used by the mixed
+                bilinear correction.
+
+        Returns:
+            A tensor of shape ``[batch, d_out]``.
+        """
         q = self.W_Q(x) + self.W_Qz(z_geom)
         if v_feat is not None:
             q = q + self.W_Qv(v_feat)
@@ -225,9 +338,15 @@ class ChristoffelQuery(nn.Module):
 
 
 class ChiralProjector(nn.Module):
-    """SU(2)-style chiral projector driven by the value gradient."""
+    """Project 2-channel features onto a gradient-chosen SU(2)-like direction."""
 
     def __init__(self, d_latent: int) -> None:
+        """Learn the gradient-to-direction map and register Pauli-like bases.
+
+        Args:
+            d_latent: Width of the gradient signal used to choose the projection
+                direction.
+        """
         super().__init__()
         self.grad_proj = nn.Linear(d_latent, 3, bias=False)
 
@@ -237,7 +356,17 @@ class ChiralProjector(nn.Module):
         self.register_buffer("sigma_3", torch.tensor([[1.0, 0.0], [0.0, -1.0]]))
 
     def forward(self, psi_doublet: torch.Tensor, grad_V: torch.Tensor) -> torch.Tensor:
-        """Project a doublet-valued representation onto the committed channel."""
+        """Project a doublet-valued representation onto the committed channel.
+
+        Args:
+            psi_doublet: Tensor of shape ``[batch, 2, width]`` representing a
+                two-channel feature doublet.
+            grad_V: Tensor of shape ``[batch, d_latent]`` whose projection picks
+                the chiral direction.
+
+        Returns:
+            A flattened tensor of shape ``[batch, 2 * width]``.
+        """
         n_vec = self.grad_proj(grad_V)
         n_hat = n_vec / (torch.norm(n_vec, dim=-1, keepdim=True) + 1e-8)
         n_x, n_y, n_z = n_hat.unbind(dim=-1)
@@ -256,14 +385,16 @@ class ChiralProjector(nn.Module):
 
 
 class AreaLawScreening(nn.Module):
-    """Area-law screening for hyperbolic attention weights."""
+    """Exponentially damp attention using a hyperbolic string-area proxy."""
 
     def __init__(self, config: GeodesicConfig) -> None:
+        """Initialize the learnable screening strength from ``config.g_s``."""
         super().__init__()
         self.log_sigma = nn.Parameter(torch.log(torch.tensor(config.g_s**2)))
 
     @property
     def sigma(self) -> torch.Tensor:
+        """Return the positive screening coefficient."""
         return torch.exp(self.log_sigma)
 
     def string_area(
@@ -272,9 +403,22 @@ class AreaLawScreening(nn.Module):
         z_key: torch.Tensor,
         lambda_z: torch.Tensor,
     ) -> torch.Tensor:
-        """Compute the hyperbolic string-area proxy.
+        """Compute the query-key area proxy used for screening.
 
-        Supports single-query inputs ``[B, D]`` and query banks ``[B, Q, D]``.
+        Supports single-query inputs ``[B, D]`` and query banks ``[B, Q, D]`` by
+        forming squared Euclidean displacements and scaling them by the squared
+        conformal factor at the query location.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
+            lambda_z: Query conformal factor shaped ``[batch, 1]`` or
+                ``[batch, n_queries, 1]``.
+
+        Returns:
+            A tensor of pairwise area proxies with shape ``[batch, n_keys]`` or
+            ``[batch, n_queries, n_keys]``.
         """
         if z_query.dim() == 2:
             delta = z_query.unsqueeze(1) - z_key
@@ -296,7 +440,22 @@ class AreaLawScreening(nn.Module):
         level: int = 0,
         l_max: float = 10.0,
     ) -> torch.Tensor:
-        """Apply area-law screening to attention weights."""
+        """Apply level-dependent screening to an attention tensor.
+
+        Args:
+            attention: Attention weights shaped either ``[batch, n_queries,
+                n_keys]`` or ``[batch, n_queries, n_heads, n_keys]``.
+            z_query: Query positions.
+            z_key: Key positions.
+            lambda_z: Conformal factor at the query positions.
+            level: Hierarchical level used to decay the effective screening
+                coefficient.
+            l_max: Characteristic scale for the exponential level decay.
+
+        Returns:
+            ``attention`` multiplied by the screening factor, preserving the
+            input shape.
+        """
         area = self.string_area(z_query, z_key, lambda_z)
         sigma_eff = self.sigma * math.exp(-level / l_max)
         screening = torch.exp(-sigma_eff * area)
@@ -328,6 +487,17 @@ class CovariantCrossAttention(nn.Module):
         use_screening: bool = False,
         head_type: str = "generic",
     ) -> None:
+        """Construct a hyperbolic cross-attention head stack.
+
+        Args:
+            config: Shared model and geometry hyperparameters.
+            use_chirality: Whether to post-process the attention output with
+                :class:`ChiralProjector` when ``grad_V`` is provided.
+            use_screening: Whether to damp attention weights with
+                :class:`AreaLawScreening`.
+            head_type: Label retained on the module for higher-level callers; it
+                does not change the computation in this class.
+        """
         super().__init__()
         if config.d_model % config.n_heads != 0:
             msg = "d_model must be divisible by n_heads."
@@ -363,6 +533,25 @@ class CovariantCrossAttention(nn.Module):
         x_key: torch.Tensor,
         x_value: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, bool]:
+        """Normalize query inputs and build multi-head query/key/value tensors.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            x_query: Query features matching the query bank layout.
+            v_query: Optional feature-space velocity term aligned with the query
+                bank.
+            v_query_geom: Optional latent-space velocity term aligned with the
+                query bank.
+            x_key: Key features of shape ``[batch, n_keys, d_model]``.
+            x_value: Value features of shape ``[batch, n_keys, d_model]``.
+
+        Returns:
+            ``(z_query_tokens, q, k, v, squeeze_query)`` where ``q`` has shape
+            ``[batch, n_queries, n_heads, d_k]``, ``k`` and ``v`` have shape
+            ``[batch, n_keys, n_heads, d_k]``, and ``squeeze_query`` records
+            whether the original query input had no explicit query axis.
+        """
         z_query_tokens, squeeze_query = _as_query_tokens(z_query, "z_query")
         x_query_tokens, _ = _as_query_tokens(x_query, "x_query")
         if z_query_tokens.shape[:2] != x_query_tokens.shape[:2]:
@@ -415,10 +604,40 @@ class CovariantCrossAttention(nn.Module):
         level: int = 0,
         mask: torch.Tensor | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """Compute hyperbolic covariant cross-attention.
+        """Compute hyperbolic cross-attention with geometric transport.
 
         The query inputs may be a single latent ``[B, D]`` or a bank of query
         latents ``[B, Q, D]``. Keys and values always use ``[B, N, D]``.
+
+        The computation proceeds as follows:
+        1. Build Christoffel-aware multi-head queries and plain projected keys/values.
+        2. Transport keys from each key position to each query position with
+           :class:`WilsonLineApprox`.
+        3. Score transported keys against queries, divide by a hyperbolic
+           temperature, and apply an optional mask.
+        4. Softmax the scores, optionally screen them, and aggregate values.
+        5. Optionally apply chiral projection and the final output projection.
+
+        Args:
+            z_query: Query positions shaped ``[batch, d_latent]`` or
+                ``[batch, n_queries, d_latent]``.
+            z_key: Key positions shaped ``[batch, n_keys, d_latent]``.
+            x_query: Query features aligned with ``z_query``.
+            x_key: Key features of shape ``[batch, n_keys, d_model]``.
+            x_value: Value features of shape ``[batch, n_keys, d_model]``.
+            v_query: Optional query-aligned feature-space velocity term.
+            v_query_geom: Optional query-aligned latent-space velocity term.
+            grad_V: Optional query-aligned gradient used only when chirality is
+                enabled.
+            level: Hierarchy level passed to the screening module.
+            mask: Optional boolean or boolean-like mask shaped ``[batch, n_keys]``
+                or ``[batch, n_queries, n_keys]``.
+
+        Returns:
+            A pair ``(output, attention)``. ``output`` has shape
+            ``[batch, d_model]`` or ``[batch, n_queries, d_model]`` depending on
+            the query layout. ``attention`` is the head-averaged attention over
+            keys with the corresponding query layout.
         """
         if z_key.dim() != 3:
             msg = "z_key must have shape [B, N, d_latent]."
@@ -492,13 +711,20 @@ class CovariantCrossAttention(nn.Module):
 
 
 class CovariantAttention(CovariantCrossAttention):
-    """Backward-compatible alias for single-query hyperbolic covariant attention."""
+    """Backward-compatible alias for :class:`CovariantCrossAttention`."""
 
 
 class GeodesicCrossAttention(nn.Module):
-    """Hyperbolic BAOAB integrator driven by covariant cross-attention heads."""
+    """BAOAB-style latent integrator assembled from covariant attention heads.
+
+    Despite the name, this class is not a plain cross-attention block. It uses
+    four attention heads to generate the ``B-A-O-A-B`` updates for momentum and
+    position, plus an optional learned thermostat correction during the ``O``
+    step. Latent positions are kept inside the Poincare ball after each drift.
+    """
 
     def __init__(self, config: GeodesicConfig) -> None:
+        """Build the BAOAB sub-heads and feature encoders from ``config``."""
         super().__init__()
         self.config = config
         self.dt = config.dt
@@ -538,7 +764,19 @@ class GeodesicCrossAttention(nn.Module):
         context_x: torch.Tensor,
         context_force: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One BAOAB step on the Poincare ball."""
+        """Advance position and momentum by one BAOAB-style update.
+
+        Args:
+            z: Current latent positions of shape ``[batch, d_latent]``.
+            p: Current latent momenta of shape ``[batch, d_latent]``.
+            context_z: Context positions used as keys for the attention heads.
+            context_x: Context features used during the ``A`` drift substeps.
+            context_force: Context force-like features used during the ``B``
+                momentum substeps.
+
+        Returns:
+            The updated ``(z, p)`` pair after ``B-A-O-A-B`` integration.
+        """
         h = self.dt
         force_features = self.grad_encoder(context_force)
 
@@ -608,13 +846,13 @@ class GeodesicCrossAttention(nn.Module):
         return z, p
 
     def _project_to_disk(self, z: torch.Tensor, max_norm: float = 0.999) -> torch.Tensor:
-        """Project positions to the interior of the Poincare ball."""
+        """Clamp latent positions to the interior of the Poincare ball."""
         norm = torch.norm(z, dim=-1, keepdim=True).clamp(min=1e-8)
         return torch.where(norm > max_norm, z * max_norm / norm, z)
 
 
 class GeodesicBAOAB(GeodesicCrossAttention):
-    """Backward-compatible alias for the documented GeodesicCrossAttention."""
+    """Backward-compatible alias for :class:`GeodesicCrossAttention`."""
 
 
 __all__ = [

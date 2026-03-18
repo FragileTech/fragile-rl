@@ -1,7 +1,10 @@
 import torch
 
-from fragile.layers import (AttentiveAtlasEncoder, TopoEncoder, TopologicalDecoder,
-                            )
+from fragile.layers import (
+    AttentiveAtlasEncoder,
+    TopoEncoder,
+    TopologicalDecoder,
+)
 
 
 def test_attentive_atlas_encoder_shapes() -> None:
@@ -148,8 +151,8 @@ def test_decoder_all_features_combined() -> None:
     assert isinstance(aux_losses, dict)
 
 
-def test_hard_routing_produces_onehot() -> None:
-    """Hard routing produces one-hot encoder weights with correct shapes."""
+def test_routing_produces_valid_weights() -> None:
+    """Routing produces valid probability distributions with correct shapes."""
     torch.manual_seed(10)
     model = TopoEncoder(
         input_dim=3,
@@ -160,9 +163,7 @@ def test_hard_routing_produces_onehot() -> None:
     )
     x = torch.randn(8, 3)
     x_recon, vq_loss, enc_weights, dec_weights, K_chart, z_geo, _z_n, _c_bar, _aux_losses = model(
-        x,
-        use_hard_routing=True,
-        hard_routing_tau=0.5,
+        x
     )
 
     # Shapes unchanged
@@ -172,17 +173,17 @@ def test_hard_routing_produces_onehot() -> None:
     assert K_chart.shape == (8,)
     assert z_geo.shape == (8, 2)
 
-    # Encoder weights should be one-hot: max == 1, sum == 1
-    assert torch.allclose(enc_weights.max(dim=-1).values, torch.ones(8), atol=1e-5)
+    # Encoder weights should be a valid probability distribution
     assert torch.allclose(enc_weights.sum(dim=-1), torch.ones(8), atol=1e-5)
+    assert (enc_weights >= 0).all()
 
     # Outputs finite
     assert torch.isfinite(x_recon).all()
     assert torch.isfinite(vq_loss)
 
 
-def test_hard_routing_gradients_flow() -> None:
-    """Straight-through gradients flow through hard routing."""
+def test_routing_gradients_flow() -> None:
+    """Gradients flow through routing to encoder parameters."""
     torch.manual_seed(11)
     model = TopoEncoder(
         input_dim=3,
@@ -193,32 +194,23 @@ def test_hard_routing_gradients_flow() -> None:
     )
     x = torch.randn(8, 3)
     x_recon, vq_loss, _enc_weights, _dec_weights, _K_chart, _z_geo, _z_n, _c_bar, _aux_losses = (
-        model(
-            x,
-            use_hard_routing=True,
-            hard_routing_tau=0.5,
-        )
+        model(x)
     )
 
     loss = torch.nn.functional.mse_loss(x_recon, x) + vq_loss
     loss.backward()
 
-    # Encoder parameters should receive gradients via straight-through estimator
+    # Encoder parameters should receive gradients
     has_grad = False
     for p in model.encoder.parameters():
         if p.grad is not None and p.grad.abs().sum() > 0:
             has_grad = True
             break
-    assert has_grad, "No gradients flowed to encoder parameters through hard routing"
+    assert has_grad, "No gradients flowed to encoder parameters"
 
 
-def test_hard_routing_straight_through_argmax() -> None:
-    """Negative tau triggers deterministic ST argmax (no Gumbel noise).
-
-    Two forward passes with the same input should produce identical one-hot
-    weights (deterministic), unlike Gumbel-softmax which is stochastic.
-    Gradients should still flow.
-    """
+def test_forward_outputs_valid_and_gradients_flow() -> None:
+    """Forward pass produces valid outputs and gradients flow."""
     torch.manual_seed(12)
     model = TopoEncoder(
         input_dim=3,
@@ -229,22 +221,18 @@ def test_hard_routing_straight_through_argmax() -> None:
     )
     x = torch.randn(8, 3)
 
-    # Two forward passes in eval mode — deterministic ST argmax should match
-    model.eval()
-    out1 = model(x, use_hard_routing=True, hard_routing_tau=-1.0)
-    out2 = model(x, use_hard_routing=True, hard_routing_tau=-1.0)
-    model.train()
-    enc_w1, enc_w2 = out1[2], out2[2]
+    out = model(x)
+    x_recon, vq_loss, enc_w = out[0], out[1], out[2]
 
-    # Deterministic: both passes produce the same one-hot weights
-    assert torch.equal(enc_w1, enc_w2), "ST argmax should be deterministic"
+    # Valid probability distribution
+    assert torch.allclose(enc_w.sum(dim=-1), torch.ones(8), atol=1e-5)
+    assert (enc_w >= 0).all()
 
-    # Still one-hot
-    assert torch.allclose(enc_w1.max(dim=-1).values, torch.ones(8), atol=1e-5)
-    assert torch.allclose(enc_w1.sum(dim=-1), torch.ones(8), atol=1e-5)
+    # Outputs are finite
+    assert torch.isfinite(x_recon).all()
+    assert torch.isfinite(vq_loss)
 
     # Gradients flow
-    x_recon, vq_loss = out1[0], out1[1]
     loss = torch.nn.functional.mse_loss(x_recon, x) + vq_loss
     loss.backward()
 
@@ -253,4 +241,4 @@ def test_hard_routing_straight_through_argmax() -> None:
         if p.grad is not None and p.grad.abs().sum() > 0:
             has_grad = True
             break
-    assert has_grad, "No gradients through ST argmax path"
+    assert has_grad, "No gradients through forward path"

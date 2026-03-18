@@ -23,7 +23,7 @@ from fragile.checkpoints import (
     count_parameters,
 )
 from fragile.layers import FactorizedJumpOperator, TopoEncoder
-from fragile.layers.topology import compute_jump_consistency_loss
+from fragile.layers.jump_operator import compute_jump_consistency_loss
 from fragile.losses.encoder import (
     compute_phase1_loss,
     compute_router_information_metrics,

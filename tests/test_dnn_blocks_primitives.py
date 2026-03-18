@@ -74,4 +74,3 @@ def test_isotropic_block_approximate_shapes() -> None:
 
     assert out.shape == (2, 12)
     assert torch.isfinite(out).all()
-

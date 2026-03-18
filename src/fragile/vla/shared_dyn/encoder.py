@@ -26,8 +26,6 @@ class SharedDynAtlasEncoder(AttentiveAtlasEncoder):
     """
 
     def __init__(self, **kwargs):
-        # Ensure no separate dynamics codebook is allocated.
-        kwargs["dyn_codes_per_chart"] = 0
         super().__init__(**kwargs)
 
     # -- dynamics_vq override ------------------------------------------
@@ -74,11 +72,8 @@ class SharedDynTopoEncoder(TopoEncoder):
             "codes_per_chart": kwargs.get("codes_per_chart", 21),
             "bundle_size": kwargs.get("bundle_size", None),
             "covariant_attn": kwargs.get("covariant_attn", True),
-            "covariant_attn_tensorization": kwargs.get("covariant_attn_tensorization", "full"),
-            "covariant_attn_rank": kwargs.get("covariant_attn_rank", 8),
             "covariant_attn_tau_min": kwargs.get("covariant_attn_tau_min", 1e-2),
             "covariant_attn_denom_min": kwargs.get("covariant_attn_denom_min", 1e-3),
-            "covariant_attn_use_transport": kwargs.get("covariant_attn_use_transport", True),
             "covariant_attn_transport_eps": kwargs.get("covariant_attn_transport_eps", 1e-3),
             "soft_equiv_metric": kwargs.get("soft_equiv_metric", False),
             "soft_equiv_bundle_size": kwargs.get("soft_equiv_bundle_size", None),
@@ -87,15 +82,8 @@ class SharedDynTopoEncoder(TopoEncoder):
             "soft_equiv_zero_self_mixing": kwargs.get("soft_equiv_zero_self_mixing", False),
             "soft_equiv_soft_assign": kwargs.get("soft_equiv_soft_assign", True),
             "soft_equiv_temperature": kwargs.get("soft_equiv_temperature", 1.0),
-            "conv_backbone": kwargs.get("conv_backbone", False),
-            "img_channels": kwargs.get("img_channels", 1),
-            "img_size": kwargs.get("img_size", 28),
-            "conv_channels": kwargs.get("conv_channels", 0),
             "commitment_beta": kwargs.get("commitment_beta", 0.25),
             "codebook_loss_weight": kwargs.get("codebook_loss_weight", 1.0),
-            # dyn_codes_per_chart is forced to 0 inside SharedDynAtlasEncoder
-            "dyn_commitment_beta": kwargs.get("dyn_commitment_beta", 0.25),
-            "dyn_codebook_loss_weight": kwargs.get("dyn_codebook_loss_weight", 1.0),
         }
 
         # Replace the parent's AttentiveAtlasEncoder with our

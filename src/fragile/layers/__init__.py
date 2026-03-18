@@ -11,6 +11,10 @@ from .attention import (
     WilsonLineApprox,
 )
 from .gauge import ConformalMetric
+from .jump_operator import (
+    compute_jump_consistency_loss,
+    FactorizedJumpOperator,
+)
 from .lorentzian import (
     CausalMask,
     LorentzianConfig,
@@ -26,16 +30,6 @@ from .primitives import (
     SpectralLinear,
 )
 from .topoencoder import AttentiveAtlasEncoder, TopoEncoder, TopologicalDecoder
-from .topology import (
-    class_modulated_jump_rate,
-    compute_jump_consistency_loss,
-    compute_orthogonality_loss,
-    compute_separation_loss,
-    compute_topology_loss,
-    FactorizedJumpOperator,
-    InvariantChartClassifier,
-    SupervisedTopologyLoss,
-)
 
 
 __all__ = [
@@ -52,7 +46,6 @@ __all__ = [
     "GeodesicConfig",
     "GeodesicCrossAttention",
     "HyperbolicTransport",
-    "InvariantChartClassifier",
     "IsotropicBlock",
     "LorentzianConfig",
     "LorentzianMemoryAttention",
@@ -61,14 +54,9 @@ __all__ = [
     "NormGatedGELU",
     "SoftEquivariantLayer",
     "SpectralLinear",
-    "SupervisedTopologyLoss",
     "TemporalChristoffelQuery",
     "TopoEncoder",
     "TopologicalDecoder",
     "WilsonLineApprox",
-    "class_modulated_jump_rate",
     "compute_jump_consistency_loss",
-    "compute_orthogonality_loss",
-    "compute_separation_loss",
-    "compute_topology_loss",
 ]

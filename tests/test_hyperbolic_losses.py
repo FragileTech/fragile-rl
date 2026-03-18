@@ -176,8 +176,8 @@ def test_code_usage_band_loss_respects_explicit_hard_indices() -> None:
     assert loss_explicit.item() < loss_default.item()
 
 
-def test_hard_routing_keeps_live_soft_router_weights() -> None:
-    """Hard routing should still expose soft probabilities for loss terms."""
+def test_encoder_exposes_live_soft_router_weights() -> None:
+    """Encoder should expose soft probabilities for loss terms."""
     torch.manual_seed(13)
     model = TopoEncoder(
         input_dim=3,
@@ -187,11 +187,7 @@ def test_hard_routing_keeps_live_soft_router_weights() -> None:
         codes_per_chart=5,
     )
     x = torch.randn(8, 3)
-    _, _, enc_weights, _, _, _, _, _, _ = model(
-        x,
-        use_hard_routing=True,
-        hard_routing_tau=-1.0,
-    )
+    _, _, _enc_weights, _, _, _, _, _, _ = model(x)
 
     soft_live = model.encoder._last_soft_router_weights_live
 
@@ -199,7 +195,6 @@ def test_hard_routing_keeps_live_soft_router_weights() -> None:
     assert soft_live.requires_grad
     assert torch.allclose(soft_live.sum(dim=-1), torch.ones(8), atol=1e-5)
     assert ((soft_live > 0.0) & (soft_live < 1.0)).any()
-    assert not torch.allclose(soft_live, enc_weights)
 
 
 def test_chart_center_geometry_losses_respect_mean_radius_and_separation() -> None:
@@ -264,7 +259,6 @@ def test_encoder_optimizer_groups_split_chart_centers_and_codebooks() -> None:
         latent_dim=2,
         num_charts=4,
         codes_per_chart=5,
-        dyn_codes_per_chart=2,
     )
     jump_op = FactorizedJumpOperator(num_charts=4, latent_dim=2)
 
@@ -280,7 +274,6 @@ def test_encoder_optimizer_groups_split_chart_centers_and_codebooks() -> None:
     assert len(groups) == 3
     assert id(model.encoder.chart_centers) in ids_by_lr[1e-4]
     assert id(model.encoder.codebook) in ids_by_lr[5e-4]
-    assert id(model.encoder.codebook_dyn) in ids_by_lr[5e-4]
     assert id(next(iter(jump_op.parameters()))) in ids_by_lr[1e-3]
 
     grouped_ids = set().union(*ids_by_lr.values())
@@ -300,7 +293,7 @@ def test_primitive_encoder_caches_v_local_for_phase1_losses() -> None:
         codes_per_chart=5,
     )
     x = torch.randn(6, 3)
-    model(x, use_hard_routing=True, hard_routing_tau=-1.0)
+    model(x)
 
     assert hasattr(model.encoder, "_last_v_local")
     assert model.encoder._last_v_local.shape == (6, 2)

@@ -16,6 +16,7 @@ from fragile.layers.gauge import poincare_exp_map, project_to_ball
 from fragile.rl import train_dreamer
 from fragile.rl.train_dreamer import _sync_rl_atlas
 
+
 B = 4
 D = 8
 A = 6
@@ -217,8 +218,8 @@ class RecordingEncoder:
         self.calls: list[tuple[bool, float]] = []
         self.obs_seen: list[torch.Tensor] = []
 
-    def __call__(self, obs_t, *, hard_routing, hard_routing_tau):
-        self.calls.append((hard_routing, hard_routing_tau))
+    def __call__(self, obs_t, *, routing_tau=1.0, **_kwargs):
+        self.calls.append((False, routing_tau))
         self.obs_seen.append(obs_t.clone())
         batch = obs_t.shape[0]
         rw = torch.zeros(batch, self.num_charts, device=obs_t.device, dtype=obs_t.dtype)
@@ -311,13 +312,11 @@ def action_model():
 @pytest.fixture
 def jump_op():
 
-
     return FactorizedJumpOperator(num_charts=K, latent_dim=D)
 
 
 @pytest.fixture
 def action_jump_op():
-
 
     return FactorizedJumpOperator(num_charts=K, latent_dim=D)
 
@@ -1757,7 +1756,7 @@ class TestRolloutCollection:
             hard_routing_tau=0.7,
         )
 
-        assert model.encoder.calls == [(True, 0.7)]
+        assert model.encoder.calls == [(False, 0.7)]
         torch.testing.assert_close(model.encoder.obs_seen[0], torch.ones(1, OBS_DIM))
         assert episode["action_latents"].shape == (2, D)
         assert episode["action_router_weights"].shape == (2, K)
@@ -1832,7 +1831,7 @@ class TestRolloutCollection:
             hard_routing_tau=0.7,
         )
 
-        assert model.encoder.calls == [(True, 0.7)]
+        assert model.encoder.calls == [(False, 0.7)]
         assert metrics["eval/reward_mean"] == pytest.approx(1.0)
 
 
@@ -2020,10 +2019,9 @@ class TestImagination:
                 z_geo,
                 *,
                 router_weights,
-                hard_routing,
-                hard_routing_tau,
+                routing_tau=1.0,
             ):
-                del router_weights, hard_routing, hard_routing_tau
+                del router_weights, routing_tau
                 return z_geo[:, :A], None, None
 
         class FakeWorldModel:
@@ -2181,11 +2179,10 @@ class TestImagination:
                 z_geo,
                 *,
                 router_weights,
-                hard_routing,
-                hard_routing_tau,
+                routing_tau=1.0,
             ):
                 del router_weights
-                routing_calls.append(("decoder", hard_routing, hard_routing_tau))
+                routing_calls.append(("decoder", routing_tau))
                 return z_geo[:, :A], None, None
 
         class FakeWorldModel:
@@ -2295,11 +2292,11 @@ class TestImagination:
         assert routing_calls == [
             ("symbolize", False, 0.7),
             ("actor", False, 0.7),
-            ("decoder", False, 0.7),
+            ("decoder", 0.7),
             ("symbolize", False, 0.7),
             ("symbolize", False, 0.7),
             ("actor", False, 0.7),
-            ("decoder", False, 0.7),
+            ("decoder", 0.7),
             ("symbolize", False, 0.7),
         ]
 

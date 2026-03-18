@@ -332,11 +332,13 @@ def poincare_hyperbolic_score(
     tau = poincare_temperature(z, key_dim, tau_min, tau_denom_min)
     return -dist / tau.unsqueeze(1)
 
+
 def as_tangent(z: Tensor, assume_tangent: bool) -> Tensor:
     """Return tangent vectors; map from ball if needed."""
     if assume_tangent:
         return z
     return log_map_zero(project_to_ball(z))
+
 
 class ConformalMetric(nn.Module):
     """Poincare ball/disk conformal metric utilities."""
@@ -439,4 +441,3 @@ class RiskAdaptiveConformalMetric(ConformalMetric):
     ) -> torch.Tensor:
         lambda_z = self.conformal_factor(z, risk_tensor)
         return math.sqrt(d_k) / lambda_z
-

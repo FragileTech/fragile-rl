@@ -28,8 +28,8 @@ from fragile.checkpoints import (
 )
 from fragile.layers import FactorizedJumpOperator
 from fragile.layers.gauge import hyperbolic_distance, mobius_add, project_to_ball
+from fragile.layers.jump_operator import compute_jump_consistency_loss
 from fragile.layers.topoencoder import TopoEncoder
-from fragile.layers.topology import compute_jump_consistency_loss
 from fragile.losses.encoder import (
     _deterministic_st_router_weights,
     compute_phase1_loss,

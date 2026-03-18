@@ -5,24 +5,18 @@ from fragile.layers import (
     AreaLawScreening,
     ChiralProjector,
     ChristoffelQuery,
-    class_modulated_jump_rate,
     compute_jump_consistency_loss,
-    compute_orthogonality_loss,
-    compute_separation_loss,
-    compute_topology_loss,
     ConformalMetric,
     CovariantAttention,
     FactorizedJumpOperator,
     GeodesicConfig,
     GeodesicCrossAttention,
     HyperbolicTransport,
-    InvariantChartClassifier,
     IsotropicBlock,
     LorentzianConfig,
     LorentzianMemoryAttention,
     LorentzianMetric,
     SpectralLinear,
-    SupervisedTopologyLoss,
     TemporalChristoffelQuery,
 )
 from fragile.layers.gauge import (
@@ -33,48 +27,15 @@ from fragile.layers.gauge import (
     parallel_transport,
 )
 
-def test_supervised_topology_loss_and_jump_rate() -> None:
-    torch.manual_seed(3)
-    lambda_base = torch.ones(3, 3)  # [N_c, N_c]
-    chart_logits = torch.tensor([[5.0, 0.0], [0.0, 5.0], [5.0, 0.0]])  # [N_c, C]
-    lambda_sup = class_modulated_jump_rate(lambda_base, chart_logits, gamma_sep=2.0)
 
-    assert lambda_sup.shape == (3, 3)
-    assert lambda_sup[0, 1] < lambda_base[0, 1]
-
-    loss_fn = SupervisedTopologyLoss(num_charts=3, num_classes=2)
-    chart_assignments = torch.softmax(torch.randn(4, 3), dim=-1)  # [B, N_c]
-    class_labels = torch.tensor([0, 1, 0, 1])  # [B]
-    embeddings = torch.randn(4, 5)  # [B, D]
-
-    total_loss, loss_dict = loss_fn(chart_assignments, class_labels, embeddings)
-
-    assert total_loss.ndim == 0
-    assert set(loss_dict.keys()) >= {
-        "loss_total",
-        "loss_route",
-        "loss_purity",
-        "loss_balance",
-        "loss_metric",
-    }
-
-
-def test_topology_helpers_and_jump_consistency() -> None:
+def test_jump_consistency_loss() -> None:
     torch.manual_seed(4)
     batch = 6
     num_charts = 3
     dim = 4
 
     weights = torch.softmax(torch.randn(batch, num_charts), dim=-1)
-    loss_entropy, loss_balance = compute_topology_loss(weights, num_charts)
-    assert loss_entropy.ndim == 0
-    assert loss_balance.ndim == 0
 
-    chart_outputs = [torch.randn(batch, dim) for _ in range(num_charts)]
-    loss_sep = compute_separation_loss(chart_outputs, weights, margin=0.5)
-    assert loss_sep.ndim == 0
-
-    # Test Möbius-based jump operator (default, O(n))
     jump_op = FactorizedJumpOperator(num_charts=num_charts, latent_dim=dim, use_mobius=True)
     z_n_by_chart = torch.randn(batch, num_charts, dim) * 0.5  # Keep inside ball
     loss_jump, info = compute_jump_consistency_loss(
@@ -87,13 +48,6 @@ def test_topology_helpers_and_jump_consistency() -> None:
 
     assert loss_jump.ndim == 0
     assert "num_overlaps" in info
-
-    dummy = nn.Sequential(
-        SpectralLinear(dim, dim, bias=False),
-        IsotropicBlock(dim, dim, bundle_size=1),
-    )
-    orth_loss = compute_orthogonality_loss([dummy])
-    assert orth_loss.ndim == 0
 
 
 def test_mobius_jump_operator() -> None:
@@ -129,36 +83,6 @@ def test_mobius_jump_operator() -> None:
     z_global = jump_op.lift_to_global(z_n, source_idx)
     z_back = jump_op.project_from_global(z_global, source_idx)
     assert torch.allclose(z_back, z_n, atol=0.1)
-
-
-def test_invariant_chart_classifier_rotation_invariance() -> None:
-    torch.manual_seed(5)
-    batch = 8
-    num_charts = 4
-    num_classes = 3
-    latent_dim = 6
-    bundle_size = 3
-
-    classifier = InvariantChartClassifier(
-        num_charts=num_charts,
-        num_classes=num_classes,
-        latent_dim=latent_dim,
-        bundle_size=bundle_size,
-    )
-
-    router_weights = torch.softmax(torch.randn(batch, num_charts), dim=-1)
-    z_geo = torch.randn(batch, latent_dim)
-
-    q1, _ = torch.linalg.qr(torch.randn(bundle_size, bundle_size))
-    q2, _ = torch.linalg.qr(torch.randn(bundle_size, bundle_size))
-    q = torch.block_diag(q1, q2)
-    z_geo_rot = z_geo @ q
-
-    logits = classifier(router_weights, z_geo)
-    logits_rot = classifier(router_weights, z_geo_rot)
-
-    assert logits.shape == (batch, num_classes)
-    assert torch.allclose(logits, logits_rot, atol=1e-5)
 
 
 def test_lorentzian_modules() -> None:

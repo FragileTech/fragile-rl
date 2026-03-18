@@ -282,7 +282,7 @@ class TestGeometricWorldModel:
 
     def test_bind_chart_centers_reuses_phase1_atlas(self):
         """All chart-conditioned submodules should share the frozen Phase 1 atlas."""
-        from fragile.core.layers.atlas import _project_to_ball
+        from fragile.layers.gauge import project_to_ball
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
@@ -292,7 +292,7 @@ class TestGeometricWorldModel:
             d_model=D_MODEL,
         )
         phase1_centers = torch.randn(K, D) * 5.0
-        expected = _project_to_ball(phase1_centers)
+        expected = project_to_ball(phase1_centers)
 
         m.bind_chart_centers(phase1_centers, freeze=True)
 
@@ -453,13 +453,13 @@ class TestRiskAdaptiveConformalMetric:
     """Tests for the risk-adaptive conformal metric."""
 
     def test_import(self):
-        from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+        from fragile.layers.gauge import RiskAdaptiveConformalMetric
 
         assert RiskAdaptiveConformalMetric is not None
 
     def test_no_risk_matches_base(self):
         """With risk_tensor=None, should return same as ConformalMetric."""
-        from fragile.core.layers.gauge import (
+        from fragile.layers.gauge import (
             ConformalMetric,
             RiskAdaptiveConformalMetric,
         )
@@ -474,7 +474,7 @@ class TestRiskAdaptiveConformalMetric:
 
     def test_risk_increases_conformal_factor(self):
         """Non-zero risk tensor should increase the conformal factor."""
-        from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+        from fragile.layers.gauge import RiskAdaptiveConformalMetric
 
         z = torch.randn(B, D) * 0.3
         metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=0.1)
@@ -486,7 +486,7 @@ class TestRiskAdaptiveConformalMetric:
 
     def test_alpha_zero_matches_base(self):
         """With alpha=0, risk tensor should have no effect."""
-        from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+        from fragile.layers.gauge import RiskAdaptiveConformalMetric
 
         z = torch.randn(B, D) * 0.3
         metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=0.0)
@@ -498,7 +498,7 @@ class TestRiskAdaptiveConformalMetric:
 
     def test_metric_inv_shape(self):
         """metric_inv should return [B, D, D] with risk tensor."""
-        from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+        from fragile.layers.gauge import RiskAdaptiveConformalMetric
 
         z = torch.randn(B, D) * 0.3
         metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=0.1)
@@ -509,7 +509,7 @@ class TestRiskAdaptiveConformalMetric:
 
     def test_temperature_with_risk(self):
         """Temperature should decrease with risk (higher lambda -> lower tau)."""
-        from fragile.core.layers.gauge import RiskAdaptiveConformalMetric
+        from fragile.layers.gauge import RiskAdaptiveConformalMetric
 
         z = torch.randn(B, D) * 0.3
         metric = RiskAdaptiveConformalMetric(risk_coupling_alpha=0.5)
@@ -620,7 +620,7 @@ class TestRiskMetricIntegration:
 
     def test_alpha_zero_is_standard_metric(self, device):
         """risk_metric_alpha=0 should use ConformalMetric, not RiskAdaptive."""
-        from fragile.core.layers.gauge import ConformalMetric
+        from fragile.layers.gauge import ConformalMetric
         from fragile.vla.covariant_world_model import GeometricWorldModel
 
         m = GeometricWorldModel(
@@ -1079,7 +1079,7 @@ class TestPoincareLogMap:
 
     def test_inverse_of_exp_map(self):
         """log_z(exp_z(v)) should recover v (round-trip)."""
-        from fragile.core.layers.gauge import poincare_exp_map, poincare_log_map
+        from fragile.layers.gauge import poincare_exp_map, poincare_log_map
 
         z = torch.randn(B, D) * 0.3
         v = torch.randn(B, D) * 0.1  # small tangent vector
@@ -1092,7 +1092,7 @@ class TestPoincareLogMap:
 
     def test_zero_tangent_gives_basepoint(self):
         """exp_z(0) = z, so log_z(z) should be ~0."""
-        from fragile.core.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map
 
         z = torch.randn(B, D) * 0.3
         v = poincare_log_map(z, z)
@@ -1102,7 +1102,7 @@ class TestPoincareLogMap:
 
     def test_output_shape(self):
         """Output should be [B, D] tangent vector."""
-        from fragile.core.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map
 
         z = torch.randn(B, D) * 0.3
         y = torch.randn(B, D) * 0.3
@@ -1112,7 +1112,7 @@ class TestPoincareLogMap:
 
     def test_near_boundary(self):
         """Should be finite even near the Poincare ball boundary."""
-        from fragile.core.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map
 
         z = torch.randn(B, D) * 0.3
         y = torch.randn(B, D)
@@ -1122,7 +1122,7 @@ class TestPoincareLogMap:
 
     def test_distance_consistency(self):
         """||log_z(y)||_z should approximately equal d(z, y)."""
-        from fragile.core.layers.gauge import (
+        from fragile.layers.gauge import (
             hyperbolic_distance,
             poincare_log_map,
         )
