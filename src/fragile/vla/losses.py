@@ -1,8 +1,6 @@
 """Backward-compat shim. Losses moved to fragile.losses.*."""
 
 # Encoder losses (originally defined here or re-exported from hyperbolic_losses)
-# Re-export _project_to_ball for any code that imported it from here
-from fragile.losses._helpers import _project_to_ball  # noqa: F401
 from fragile.losses.encoder import (  # noqa: F401
     _deterministic_st_router_weights,
     combine_quality_targets,

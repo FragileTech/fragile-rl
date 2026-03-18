@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 
 import torch
-from torch import nn
+from torch import nn, Tensor
 
 
 # =============================================================================
@@ -329,9 +329,14 @@ def poincare_hyperbolic_score(
     denom = (1.0 - z_sq) * (1.0 - c_sq)
     arg = 1.0 + 2.0 * dist_sq / (denom + eps)
     dist = torch.acosh(arg.clamp(min=1.0 + eps))  # [B, N_c]
-    tau = _poincare_temperature(z, key_dim, tau_min, tau_denom_min)
+    tau = poincare_temperature(z, key_dim, tau_min, tau_denom_min)
     return -dist / tau.unsqueeze(1)
 
+def as_tangent(z: Tensor, assume_tangent: bool) -> Tensor:
+    """Return tangent vectors; map from ball if needed."""
+    if assume_tangent:
+        return z
+    return log_map_zero(project_to_ball(z))
 
 class ConformalMetric(nn.Module):
     """Poincare ball/disk conformal metric utilities."""
@@ -434,3 +439,4 @@ class RiskAdaptiveConformalMetric(ConformalMetric):
     ) -> torch.Tensor:
         lambda_z = self.conformal_factor(z, risk_tensor)
         return math.sqrt(d_k) / lambda_z
+

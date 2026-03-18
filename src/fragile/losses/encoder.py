@@ -22,7 +22,7 @@ from fragile.layers.gauge import (  # noqa: F401
     log_map_zero,
     mobius_add,
 )
-from fragile.losses._helpers import _as_tangent, _project_to_ball  # noqa: F401
+from fragile.layers.gauge import as_tangent, project_to_ball  # noqa: F401
 
 
 if TYPE_CHECKING:
@@ -357,7 +357,7 @@ def compute_codebook_centering_loss(codebook: Tensor) -> Tensor:
     Args:
         codebook: [N_c, K, D] codebook deltas
     """
-    codebook = _project_to_ball(codebook)
+    codebook = project_to_ball(codebook)
     centers_tan = log_map_zero(codebook).mean(dim=1)  # [N_c, D]
     return (centers_tan**2).sum(dim=1).mean()
 
@@ -369,7 +369,7 @@ def compute_chart_center_mean_loss(chart_centers: Tensor) -> Tensor:
     centers to coincide. The tangent mean ``mean(log_0(c_k))`` is the natural
     origin-centered analogue of zero-centering the per-chart codebook deltas.
     """
-    chart_centers = _project_to_ball(chart_centers)
+    chart_centers = project_to_ball(chart_centers)
     atlas_mean = log_map_zero(chart_centers).mean(dim=0)
     return atlas_mean.pow(2).sum()
 
@@ -388,7 +388,7 @@ def compute_chart_center_radius_loss(
     if chart_centers.numel() == 0:
         return torch.tensor(0.0, device=chart_centers.device, dtype=chart_centers.dtype)
 
-    chart_centers = _project_to_ball(chart_centers)
+    chart_centers = project_to_ball(chart_centers)
     origin = torch.zeros_like(chart_centers)
     radii = hyperbolic_distance(chart_centers, origin)
     beta = max(float(barrier_beta), 1e-6)
@@ -406,7 +406,7 @@ def compute_chart_center_separation_loss(
     if num_charts < 2:
         return torch.tensor(0.0, device=chart_centers.device, dtype=chart_centers.dtype)
 
-    chart_centers = _project_to_ball(chart_centers)
+    chart_centers = project_to_ball(chart_centers)
     ci = chart_centers.unsqueeze(1).expand(num_charts, num_charts, -1)
     cj = chart_centers.unsqueeze(0).expand(num_charts, num_charts, -1)
     distances = hyperbolic_distance(
@@ -422,7 +422,7 @@ def compute_chart_center_separation_loss(
 
 def compute_residual_scale_loss(z_n: Tensor, assume_tangent: bool = True) -> Tensor:
     """Penalize residual gauge scale to preserve macro/meso hierarchy."""
-    z_tan = _as_tangent(z_n, assume_tangent)
+    z_tan = as_tangent(z_n, assume_tangent)
     return (z_tan**2).sum(dim=1).mean()
 
 
@@ -488,8 +488,8 @@ def compute_code_usage_band_loss(
     if h_low is None:
         h_low = math.log(max(0.75 * num_codes, 1.0))
 
-    v_exp = _project_to_ball(v_local).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
-    cb_exp = _project_to_ball(codebook).unsqueeze(0)  # [1, N_c, K, D]
+    v_exp = project_to_ball(v_local).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
+    cb_exp = project_to_ball(codebook).unsqueeze(0)  # [1, N_c, K, D]
     dist_sq = hyperbolic_distance(v_exp, cb_exp) ** 2  # [B, N_c, K]
 
     soft_assign = F.softmax(-dist_sq / max(temperature, 1e-6), dim=-1)
@@ -722,8 +722,8 @@ def compute_jump_consistency_loss(
     z_pred_flat = jump_op(flat_src, flat_src_idx, flat_tgt_idx)  # [B*A, D]
 
     # Hyperbolic distance (vectorized)
-    z_pred_flat = _project_to_ball(z_pred_flat)
-    z_target_flat = _project_to_ball(z_targets.reshape(B * A, D))
+    z_pred_flat = project_to_ball(z_pred_flat)
+    z_target_flat = project_to_ball(z_targets.reshape(B * A, D))
     error_flat = hyperbolic_distance(z_pred_flat, z_target_flat).pow(2)  # [B*A]
 
     # Reshape and compute per-pair weighted loss
@@ -800,8 +800,8 @@ def compute_vq_geodesic_loss(
     commitment_cost: float = 0.25,
 ) -> Tensor:
     """VQ loss using geodesic distance d_H instead of tangent-space approx."""
-    _project_to_ball(z_q_all)
-    v_proj = _project_to_ball(v_local.unsqueeze(1).expand_as(z_q_all))
+    project_to_ball(z_q_all)
+    v_proj = project_to_ball(v_local.unsqueeze(1).expand_as(z_q_all))
 
     # Codebook loss: codes -> encoder output
     d_codebook = hyperbolic_distance(z_q_all, v_proj.detach())  # [B, N_c]
@@ -828,7 +828,7 @@ def compute_hyperbolic_uniformity_loss(z_geo: Tensor, eps: float = 1e-6) -> Tens
     d_ij = hyperbolic_distance(z_i, z_j)        # pairwise geodesic
     L = log(mean_{i!=j} exp(-tau_i * d_ij))     # log-sum-exp repulsion
     """
-    z = _project_to_ball(z_geo)
+    z = project_to_ball(z_geo)
     B, D = z.shape
     if B < 2:
         return torch.tensor(0.0, device=z.device)
@@ -878,7 +878,7 @@ def compute_hyperbolic_contrastive_loss(
     L_neg = mean_{y_i!=y_j}(ReLU(margin - d_ij)^2)
     L = L_pos + L_neg
     """
-    z = _project_to_ball(z_geo)
+    z = project_to_ball(z_geo)
     B, D = z.shape
     if B < 2:
         return torch.tensor(0.0, device=z.device)
@@ -946,7 +946,7 @@ def compute_radial_calibration_loss(
     shell matching so high-quality samples can occupy a radial range rather than
     collapsing to a single shell.
     """
-    z = _project_to_ball(z_geo)
+    z = project_to_ball(z_geo)
     confidence = compute_routing_confidence(router_weights, num_charts, eps=eps)
 
     mix = min(max(float(quality_mix), 0.0), 1.0)
@@ -959,7 +959,7 @@ def compute_radial_calibration_loss(
         radial_target = (1.0 - base_weight) * gated_target + base_weight * quality
 
     if center_points is not None:
-        centers = _project_to_ball(center_points)
+        centers = project_to_ball(center_points)
         rho = hyperbolic_distance(z, centers)
         r = None
     else:
@@ -1112,7 +1112,7 @@ def compute_codebook_spread_loss(
         codebook: [N_c, K, D] codebook parameters
         margin: minimum geodesic distance between codes
     """
-    codebook_proj = _project_to_ball(codebook)  # [N_c, K, D]
+    codebook_proj = project_to_ball(codebook)  # [N_c, K, D]
     N_c, K, D = codebook_proj.shape
     device = codebook.device
 
@@ -1212,7 +1212,7 @@ def compute_symbol_calibration_loss(
         L_kc = Var(r_kc)
     L = mean over active symbols
     """
-    z = _project_to_ball(z_geo)
+    z = project_to_ball(z_geo)
     device = z.device
 
     total_var = torch.tensor(0.0, device=device)
@@ -1275,8 +1275,8 @@ def compute_code_collapse_penalty(
         return torch.tensor(0.0, device=v_local.device)
 
     # Project both to Poincaré ball and compute hyperbolic distances [B, N_c, K]
-    v_exp = _project_to_ball(v_local).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
-    cb_exp = _project_to_ball(codebook).unsqueeze(0)  # [1, N_c, K, D]
+    v_exp = project_to_ball(v_local).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, D]
+    cb_exp = project_to_ball(codebook).unsqueeze(0)  # [1, N_c, K, D]
     dist_sq = hyperbolic_distance(v_exp, cb_exp) ** 2  # [B, N_c, K]
 
     # Soft code assignments per chart
@@ -1423,7 +1423,7 @@ def compute_phase1_loss(
     ):
         selected_chart = torch.argmax(enc_router_weights.detach(), dim=1)
         selected_code = indices_stack.gather(1, selected_chart.unsqueeze(1)).squeeze(1)
-        codebook_proj = _project_to_ball(atlas_encoder.codebook)
+        codebook_proj = project_to_ball(atlas_encoder.codebook)
         selected_codes = codebook_proj[selected_chart, selected_code]
         per_sample_vq_error = hyperbolic_distance(v_local, selected_codes).pow(2)
         vq_quality_abs = compute_error_quality_targets(
@@ -1535,8 +1535,8 @@ def compute_phase1_loss(
         if radial_center is not None:
             metrics["local_radius_mean"] = (
                 hyperbolic_distance(
-                    _project_to_ball(z_geo),
-                    _project_to_ball(radial_center),
+                    project_to_ball(z_geo),
+                    project_to_ball(radial_center),
                 )
                 .mean()
                 .item()
@@ -1545,7 +1545,7 @@ def compute_phase1_loss(
             origin = torch.zeros_like(v_local)
             metrics["local_radius_mean"] = (
                 hyperbolic_distance(
-                    _project_to_ball(v_local),
+                    project_to_ball(v_local),
                     origin,
                 )
                 .mean()
@@ -1710,11 +1710,11 @@ def compute_phase1_loss(
 __all__ = [
     # KEEP losses
     "SupervisedTopologyLoss",
-    "_as_tangent",
+    "as_tangent",
     # Extracted from vla/losses.py
     "_deterministic_st_router_weights",
     # Helpers
-    "_project_to_ball",
+    "project_to_ball",
     "compute_chart_center_mean_loss",
     "compute_chart_center_radius_loss",
     "compute_chart_center_separation_loss",
