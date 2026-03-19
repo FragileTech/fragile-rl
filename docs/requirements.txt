@@ -1,5 +1,5 @@
 # Pin to JupyterBook 1.x for Sphinx-based builds
-jupyter-book>=1.0.0,<2.0.0
+jupyter-book>=1.0.0,<3.0.0
 sphinx-proof
 sphinxcontrib-mermaid
 sphinxcontrib-bibtex
