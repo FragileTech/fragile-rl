@@ -820,10 +820,66 @@ def compute_markov_world_model_alignment_loss(
     )
 
 
+def compute_macro_auxiliary_loss(
+    model: MacroTransitionModel,
+    state_probs: torch.Tensor,
+    action_probs: torch.Tensor,
+    reward_target: torch.Tensor,
+    continuation_target: torch.Tensor,
+    *,
+    weight_reward: float,
+    weight_continuation: float,
+    metric_prefix: str = "model",
+) -> tuple[torch.Tensor, dict[str, float]]:
+    """Fit the reward and continuation tables on detached symbolic replay targets."""
+    zero = reward_target.new_zeros(())
+    total = zero
+    metrics: dict[str, float] = {}
+
+    if model.reward_table is not None and float(weight_reward) != 0.0:
+        reward_pred = model.reward_from_probs(state_probs, action_probs)
+        reward_loss = F.smooth_l1_loss(reward_pred, reward_target)
+        total = total + float(weight_reward) * reward_loss
+        metrics.update({
+            f"{metric_prefix}/reward_loss": float(reward_loss.detach()),
+            f"{metric_prefix}/reward_pred_mean": float(reward_pred.mean().detach()),
+            f"{metric_prefix}/reward_target_mean": float(reward_target.mean().detach()),
+        })
+    else:
+        metrics.update({
+            f"{metric_prefix}/reward_loss": 0.0,
+            f"{metric_prefix}/reward_pred_mean": 0.0,
+            f"{metric_prefix}/reward_target_mean": float(reward_target.mean().detach()),
+        })
+
+    if model.continuation_logits is not None and float(weight_continuation) != 0.0:
+        continuation_pred = model.continuation_from_probs(state_probs, action_probs)
+        continuation_loss = F.binary_cross_entropy(
+            continuation_pred.clamp(min=1e-6, max=1.0 - 1e-6),
+            continuation_target,
+        )
+        total = total + float(weight_continuation) * continuation_loss
+        metrics.update({
+            f"{metric_prefix}/continuation_loss": float(continuation_loss.detach()),
+            f"{metric_prefix}/continuation_pred_mean": float(continuation_pred.mean().detach()),
+            f"{metric_prefix}/continuation_target_mean": float(continuation_target.mean().detach()),
+        })
+    else:
+        metrics.update({
+            f"{metric_prefix}/continuation_loss": 0.0,
+            f"{metric_prefix}/continuation_pred_mean": 0.0,
+            f"{metric_prefix}/continuation_target_mean": float(continuation_target.mean().detach()),
+        })
+
+    metrics[f"{metric_prefix}/aux_loss"] = float(total.detach())
+    return total, metrics
+
+
 __all__ = [
     "MacroTransitionModel",
     "compose_absolute_macro_dictionary",
     "compute_distribution_alignment_loss",
+    "compute_macro_auxiliary_loss",
     "compute_markov_shape_loss",
     "compute_markov_transition_loss",
     "compute_markov_world_model_alignment_loss",

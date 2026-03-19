@@ -837,19 +837,27 @@ class FragileAgentTrainer:
             mask = mask.to(self.device)
         return obs, act, mask
 
-    def init_code_activity_accumulator(self) -> dict[str, list[set[int]]]:
-        """Create mutable per-chart code-usage sets for obs and act."""
+    def init_code_activity_accumulator(self) -> dict[str, torch.Tensor]:
+        """Create mutable per-chart code-count histograms for obs and act."""
         return {
-            "obs": [set() for _ in range(self.agent.config.obs_encoder.num_charts)],
-            "act": [set() for _ in range(self.agent.config.act_encoder.num_charts)],
+            "obs": torch.zeros(
+                self.agent.config.obs_encoder.num_charts,
+                self.agent.config.obs_encoder.codes_per_chart,
+                dtype=torch.long,
+            ),
+            "act": torch.zeros(
+                self.agent.config.act_encoder.num_charts,
+                self.agent.config.act_encoder.codes_per_chart,
+                dtype=torch.long,
+            ),
         }
 
     def update_code_activity_accumulator(
         self,
-        accumulator: dict[str, list[set[int]]] | None,
+        accumulator: dict[str, torch.Tensor] | None,
         forward: dict[str, Any],
     ) -> None:
-        """Fold one batch of hard chart/code assignments into an activity accumulator."""
+        """Fold one batch of hard chart/code assignments into histogram counts."""
         if accumulator is None:
             return
 
@@ -858,25 +866,21 @@ class FragileAgentTrainer:
         act_chart = forward["act"]["chart_idx_valid"].reshape(-1).detach().cpu()
         act_code = forward["act"]["code_idx_valid"].reshape(-1).detach().cpu()
 
-        for chart in range(len(accumulator["obs"])):
-            mask = obs_chart == chart
-            if mask.any():
-                accumulator["obs"][chart].update(int(code) for code in obs_code[mask].tolist())
-        for chart in range(len(accumulator["act"])):
-            mask = act_chart == chart
-            if mask.any():
-                accumulator["act"][chart].update(int(code) for code in act_code[mask].tolist())
+        for chart, code in zip(obs_chart.tolist(), obs_code.tolist(), strict=False):
+            accumulator["obs"][int(chart), int(code)] += 1
+        for chart, code in zip(act_chart.tolist(), act_code.tolist(), strict=False):
+            accumulator["act"][int(chart), int(code)] += 1
 
     def finalize_code_activity(
         self,
-        accumulator: dict[str, list[set[int]]] | None,
-    ) -> dict[str, list[int]]:
-        """Convert a mutable activity accumulator into per-chart counts."""
+        accumulator: dict[str, torch.Tensor] | None,
+    ) -> dict[str, list[list[int]]]:
+        """Convert a mutable activity accumulator into per-chart histograms."""
         if accumulator is None:
             return {"obs": [], "act": []}
         return {
-            "obs": [len(codes) for codes in accumulator["obs"]],
-            "act": [len(codes) for codes in accumulator["act"]],
+            "obs": accumulator["obs"].tolist(),
+            "act": accumulator["act"].tolist(),
         }
 
     def _phase1_valid_positions(self, encoded: dict[str, torch.Tensor]) -> torch.Tensor | None:

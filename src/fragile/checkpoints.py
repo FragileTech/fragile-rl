@@ -7,6 +7,7 @@ import math
 import os
 import pathlib
 import tempfile
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 import numpy as np
@@ -16,6 +17,9 @@ from torch import nn, optim
 
 if TYPE_CHECKING:
     from fragile.agent import FragileAgentTrainer
+    from fragile.rl.env_helpers import ObservationNormalizer
+    from fragile.rl.macro_data import ActionPrototypeTable
+    from fragile.rl.replay_buffer import SequenceReplayBuffer
 
 
 def _atomic_save(obj: object, path: str) -> None:
@@ -244,4 +248,89 @@ def load_geometry_resume_checkpoint(
         ckpt.get("best_eval_metric_name"),
         ckpt.get("best_eval_metric_value"),
         ckpt.get("best_eval_epoch"),
+    )
+
+
+@dataclass
+class MacroRLResumeState:
+    """Return value of :func:`load_macro_rl_resume_checkpoint`."""
+
+    replay: SequenceReplayBuffer
+    obs_normalizer: ObservationNormalizer | None
+    action_prototypes: ActionPrototypeTable | None
+    env_steps: int
+    update_steps: int
+    start_epoch: int
+
+
+def load_macro_rl_resume_checkpoint(
+    resume_path: str,
+    trainer: FragileAgentTrainer,
+    q_network: nn.Module,
+    target_q_network: nn.Module,
+    q_optimizer: optim.Optimizer,
+    replay: SequenceReplayBuffer,
+    *,
+    device: torch.device,
+) -> MacroRLResumeState:
+    """Restore full macro-RL state from a checkpoint.
+
+    Mutates *trainer*, *q_network*, *target_q_network*, and *q_optimizer*
+    in place, then returns the remaining mutable state that the caller
+    must rebind.
+    """
+    from fragile.rl.env_helpers import ObservationNormalizer
+    from fragile.rl.macro_data import ActionPrototypeTable, replay_buffer_from_state
+
+    ckpt = load_checkpoint(resume_path)
+
+    # --- trainer / encoder state ---
+    trainer.agent.load_state_dict(ckpt["agent_state"])
+    load_optimizer_state(trainer.encoder_optimizer, ckpt.get("encoder_optimizer"), device)
+    load_optimizer_state(trainer.probe_optimizer, ckpt.get("probe_optimizer"), device)
+    load_optimizer_state(trainer.markov_optimizer, ckpt.get("markov_optimizer"), device)
+    if trainer.encoder_scheduler is not None and ckpt.get("encoder_scheduler") is not None:
+        trainer.encoder_scheduler.load_state_dict(ckpt["encoder_scheduler"])
+
+    # --- Q networks ---
+    q_network.load_state_dict(ckpt["q_state"])
+    target_q_network.load_state_dict(ckpt.get("target_q_state", ckpt["q_state"]))
+    load_optimizer_state(q_optimizer, ckpt.get("q_optimizer"), device)
+
+    # --- replay buffer ---
+    replay_state = ckpt.get("replay_buffer")
+    if replay_state is not None:
+        replay = replay_buffer_from_state(replay_state)
+
+    # --- observation normalizer ---
+    obs_normalizer: ObservationNormalizer | None = None
+    obs_state = ckpt.get("obs_normalizer")
+    if obs_state is not None:
+        obs_normalizer = ObservationNormalizer.from_state_dict(obs_state, device)
+
+    # --- action prototypes ---
+    action_prototypes: ActionPrototypeTable | None = None
+    prototype_state = ckpt.get("action_prototypes")
+    if prototype_state is not None:
+        action_prototypes = ActionPrototypeTable.from_state_dict(prototype_state)
+
+    # --- scalar counters ---
+    trainer.global_step = int(
+        ckpt.get("trainer_global_step", ckpt.get("global_step", 0)),
+    )
+    env_steps = int(ckpt.get("env_steps", 0))
+    update_steps = int(ckpt.get("update_steps", trainer.global_step))
+    start_epoch = max(int(ckpt.get("epoch", -1)) + 1, 0)
+
+    print(
+        f"Resumed from {resume_path} "
+        f"(epoch {ckpt.get('epoch', '?')}, updates {update_steps}, env_steps {env_steps})",
+    )
+    return MacroRLResumeState(
+        replay=replay,
+        obs_normalizer=obs_normalizer,
+        action_prototypes=action_prototypes,
+        env_steps=env_steps,
+        update_steps=update_steps,
+        start_epoch=start_epoch,
     )

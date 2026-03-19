@@ -239,11 +239,12 @@ def test_train_geometry_smoke_writes_checkpoints_and_logs_metrics(
     assert (output_dir / "geometry_epoch_00000.pt").exists()
     assert (output_dir / "geometry_final.pt").exists()
     assert "Train metrics:" in output
-    assert "train obs active codes/chart:" in output
-    assert "train act active codes/chart:" in output
+    assert "train obs codes/chart:" in output
+    assert "train act codes/chart:" in output
     assert "Eval metrics:" in output
-    assert "eval obs active codes/chart:" in output
-    assert "eval act active codes/chart:" in output
+    assert "eval obs codes/chart:" in output
+    assert "eval act codes/chart:" in output
+    assert "/" in output and "[" in output and "]" in output
     assert "split=test" in output
     assert "loss:" in output
     assert "markov:" in output
@@ -332,10 +333,10 @@ def test_train_geometry_eval_every_decouples_eval_from_logging(tmp_path, capsys)
     output = capsys.readouterr().out
     assert output.count("Geometry E") == 3
     assert output.count("Train metrics:") == 3
-    assert output.count("train obs active codes/chart:") == 3
-    assert output.count("train act active codes/chart:") == 3
-    assert output.count("eval obs active codes/chart:") == 2
-    assert output.count("eval act active codes/chart:") == 2
+    assert output.count("train obs codes/chart:") == 3
+    assert output.count("train act codes/chart:") == 3
+    assert output.count("eval obs codes/chart:") == 2
+    assert output.count("eval act codes/chart:") == 2
     assert "eval=skipped" in output
     assert "Eval metrics: skipped (runs every 10 epochs)" in output
 

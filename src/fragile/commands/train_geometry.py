@@ -11,7 +11,6 @@ This command replaces the old hand-written Phase-1 loop with a simpler stack:
 
 from __future__ import annotations
 
-from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -32,6 +31,7 @@ from fragile.checkpoints import (
     load_geometry_resume_checkpoint,
     save_geometry_checkpoint,
 )
+from fragile.metrics import average_metrics, format_metric_value, print_metric_groups
 from fragile.vla.extract_features import VLAFeatureDataset
 
 
@@ -40,46 +40,6 @@ def _resolve_device(device_arg: str) -> torch.device:
     if device_arg == "auto":
         return torch.device("cuda" if torch.cuda.is_available() else "cpu")
     return torch.device(device_arg)
-
-
-def _average_metrics(metric_list: list[dict[str, float]]) -> dict[str, float]:
-    """Average scalar metric dictionaries over one epoch."""
-    if not metric_list:
-        return {}
-    averaged: dict[str, float] = {}
-    keys = set().union(*(metrics.keys() for metrics in metric_list))
-    for key in keys:
-        values = [metrics[key] for metrics in metric_list if key in metrics]
-        if values:
-            averaged[key] = float(sum(values) / len(values))
-    return averaged
-
-
-def _format_metric_value(value: float) -> str:
-    """Format metric values compactly for CLI output."""
-    value = float(value)
-    if value == 0.0:
-        return "0"
-    abs_value = abs(value)
-    if abs_value >= 1e4 or abs_value < 1e-3:
-        return f"{value:.3e}"
-    return f"{value:.4f}"
-
-
-def _print_metric_groups(title: str, metrics: dict[str, float]) -> None:
-    """Print every metric grouped by its prefix."""
-    print(f"{title}:")
-    grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
-    for key, value in sorted(metrics.items()):
-        prefix, sep, rest = key.partition("/")
-        label = rest if sep else key
-        grouped[prefix].append((label, value))
-
-    for prefix in sorted(grouped):
-        parts = " ".join(
-            f"{name}={_format_metric_value(value)}" for name, value in grouped[prefix]
-        )
-        print(f"  {prefix}: {parts}")
 
 
 def _trainer_batch(batch: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -136,69 +96,61 @@ def _dataset_stats(
     return mean, std
 
 
+def _print_code_activity(
+    prefix: str,
+    code_activity: dict[str, list[Any]],
+    trainer: FragileAgentTrainer,
+) -> None:
+    """Print per-chart code usage in `num_active/num_total [p0, ...]` format."""
+
+    def _format_chart_distribution(chart_counts: Any, total_codes: int) -> str:
+        if isinstance(chart_counts, (int, float)):
+            active = int(chart_counts)
+            distribution = ", ".join(
+                (
+                    f"{int(round(100.0 / float(active))):02d}"
+                    if idx < active and active > 0
+                    else "00"
+                )
+                for idx in range(int(total_codes))
+            )
+            return f"{active}/{int(total_codes)} [{distribution}]"
+        if torch.is_tensor(chart_counts):
+            counts = chart_counts.detach().cpu().to(dtype=torch.float32)
+        else:
+            counts = torch.as_tensor(chart_counts, dtype=torch.float32)
+        active = int((counts > 0).sum().item())
+        probs = counts / counts.sum().clamp_min(1.0)
+        distribution = ", ".join(
+            f"{int(round(100.0 * float(value))):02d}" for value in probs.tolist()
+        )
+        return f"{active}/{int(total_codes)} [{distribution}]"
+
+    obs_total = trainer.agent.config.obs_encoder.codes_per_chart
+    act_total = trainer.agent.config.act_encoder.codes_per_chart
+    print(f"  {prefix} obs codes/chart:")
+    for chart_idx, chart_counts in enumerate(code_activity["obs"]):
+        print(f"    c{chart_idx:02d} {_format_chart_distribution(chart_counts, obs_total)}")
+    print(f"  {prefix} act codes/chart:")
+    for chart_idx, chart_counts in enumerate(code_activity["act"]):
+        print(f"    c{chart_idx:02d} {_format_chart_distribution(chart_counts, act_total)}")
+
+
 def _collect_code_activity(
     trainer: FragileAgentTrainer,
     loader: DataLoader,
-) -> dict[str, list[int]]:
-    """Collect per-chart active code counts for observation and action encoders."""
-    obs_num_charts = trainer.agent.config.obs_encoder.num_charts
-    act_num_charts = trainer.agent.config.act_encoder.num_charts
-    obs_codes = [set() for _ in range(obs_num_charts)]
-    act_codes = [set() for _ in range(act_num_charts)]
+) -> dict[str, list[Any]]:
+    """Compatibility helper for tests and profiling.
 
-    was_training = trainer.agent.training
-    trainer.agent.eval()
-    with torch.no_grad():
-        routing_tau = trainer.routing_tau_for_step(training=False)
-        for batch in loader:
-            adapted = _trainer_batch(batch)
-            obs = adapted["obs"].to(trainer.device)
-            act = adapted["act"].to(trainer.device)
-            forward = trainer.agent.forward_batch(
-                obs,
-                act,
-                routing_tau=routing_tau,
-                macro_chart_tau=trainer.config.macro_chart_tau,
-                macro_code_tau=trainer.config.macro_code_tau,
-            )
-
-            obs_chart = forward["obs"]["chart_idx_valid"].reshape(-1).detach().cpu()
-            obs_code = forward["obs"]["code_idx_valid"].reshape(-1).detach().cpu()
-            act_chart = forward["act"]["chart_idx_valid"].reshape(-1).detach().cpu()
-            act_code = forward["act"]["code_idx_valid"].reshape(-1).detach().cpu()
-
-            for chart in range(obs_num_charts):
-                mask = obs_chart == chart
-                if mask.any():
-                    obs_codes[chart].update(int(code) for code in obs_code[mask].tolist())
-            for chart in range(act_num_charts):
-                mask = act_chart == chart
-                if mask.any():
-                    act_codes[chart].update(int(code) for code in act_code[mask].tolist())
-
-    if was_training:
-        trainer.agent.train()
-
-    return {
-        "obs": [len(codes) for codes in obs_codes],
-        "act": [len(codes) for codes in act_codes],
-    }
-
-
-def _print_code_activity(
-    prefix: str,
-    code_activity: dict[str, list[int]],
-    trainer: FragileAgentTrainer,
-) -> None:
-    """Print per-chart active-code counts with a train/eval label."""
-    print(
-        f"  {prefix} obs active codes/chart: "
-        f"{code_activity['obs']} / {trainer.agent.config.obs_encoder.codes_per_chart}",
-    )
-    print(
-        f"  {prefix} act active codes/chart: "
-        f"{code_activity['act']} / {trainer.agent.config.act_encoder.codes_per_chart}",
-    )
+    The main geometry loop no longer rescans loaders for code usage, but the
+    profiling tests still time this helper explicitly. Keep it as a thin,
+    opt-in wrapper around `eval_step` so those tests can continue to benchmark
+    the old extra-pass path without affecting the normal runtime.
+    """
+    code_activity_acc = trainer.init_code_activity_accumulator()
+    for batch in loader:
+        trainer.eval_step(_trainer_batch(batch), code_activity_accumulator=code_activity_acc)
+    return trainer.finalize_code_activity(code_activity_acc)
 
 
 def _metric_improved(
@@ -224,7 +176,7 @@ def _run_train_epoch(
     loader: DataLoader,
     *,
     epoch: int,
-) -> tuple[dict[str, float], dict[str, list[int]]]:
+) -> tuple[dict[str, float], dict[str, list[Any]]]:
     """Run one training epoch and average the per-batch metrics plus code activity."""
     batch_metrics = []
     code_activity_acc = trainer.init_code_activity_accumulator()
@@ -238,7 +190,7 @@ def _run_train_epoch(
         )
     if trainer.encoder_scheduler is not None:
         trainer.encoder_scheduler.step()
-    return _average_metrics(batch_metrics), trainer.finalize_code_activity(code_activity_acc)
+    return average_metrics(batch_metrics), trainer.finalize_code_activity(code_activity_acc)
 
 
 def _run_eval_epoch(
@@ -246,10 +198,10 @@ def _run_eval_epoch(
     loader: DataLoader,
     *,
     epoch: int,
-) -> tuple[dict[str, float], dict[str, list[int]]]:
+) -> tuple[dict[str, float], dict[str, list[Any]]]:
     """Run one evaluation epoch and return averaged metrics plus code activity."""
     code_activity_acc = trainer.init_code_activity_accumulator()
-    metrics = _average_metrics(
+    metrics = average_metrics(
         [
             trainer.eval_step(
                 _trainer_batch(batch),
@@ -505,7 +457,7 @@ class GeometryTrainingRunner:
         # --- Epoch loop ---
         last_train_metrics: dict[str, float] = {}
         last_eval_metrics: dict[str, float] = {}
-        last_eval_code_activity: dict[str, list[int]] = {"obs": [], "act": []}
+        last_eval_code_activity: dict[str, list[Any]] = {"obs": [], "act": []}
         last_epoch = start_epoch - 1
         epoch_iter = tqdm(
             range(start_epoch, self.epochs),
@@ -520,7 +472,7 @@ class GeometryTrainingRunner:
                 trainer, train_loader, epoch=epoch
             )
             # Update tqdm postfix with key metrics
-            postfix = {"loss": _format_metric_value(train_metrics.get("loss/main", 0.0))}
+            postfix = {"loss": format_metric_value(train_metrics.get("loss/main", 0.0))}
             should_eval = (epoch % self.eval_every == 0) or (epoch == self.epochs - 1)
             if should_eval:
                 eval_metrics, code_activity = _run_eval_epoch(trainer, eval_loader, epoch=epoch)
@@ -556,7 +508,7 @@ class GeometryTrainingRunner:
                         )
                         print(
                             "  New best eval checkpoint: "
-                            f"{best_eval_metric_name}={_format_metric_value(eval_score)} "
+                            f"{best_eval_metric_name}={format_metric_value(eval_score)} "
                             f"at epoch {epoch}",
                         )
                     else:
@@ -566,28 +518,28 @@ class GeometryTrainingRunner:
                 code_activity = last_eval_code_activity
 
             if should_eval:
-                postfix["eval"] = _format_metric_value(eval_metrics.get("loss/main", 0.0))
+                postfix["eval"] = format_metric_value(eval_metrics.get("loss/main", 0.0))
             if best_eval_metric_value is not None:
-                postfix["best"] = _format_metric_value(best_eval_metric_value)
+                postfix["best"] = format_metric_value(best_eval_metric_value)
             epoch_iter.set_postfix(postfix)
 
             should_log = (epoch % self.log_every == 0) or (epoch == self.epochs - 1)
             if should_log:
                 eval_display = (
-                    _format_metric_value(eval_metrics.get("loss/main", 0.0))
+                    format_metric_value(eval_metrics.get("loss/main", 0.0))
                     if should_eval
                     else "skipped"
                 )
                 print(
                     f"Geometry E{epoch:05d} | "
-                    f"train={_format_metric_value(train_metrics.get('loss/main', 0.0))} | "
+                    f"train={format_metric_value(train_metrics.get('loss/main', 0.0))} | "
                     f"eval={eval_display} | "
                     f"step={trainer.global_step}",
                 )
-                _print_metric_groups("Train metrics", train_metrics)
+                print_metric_groups("Train metrics", train_metrics)
                 _print_code_activity("train", train_code_activity, trainer)
                 if should_eval:
-                    _print_metric_groups("Eval metrics", eval_metrics)
+                    print_metric_groups("Eval metrics", eval_metrics)
                     _print_code_activity("eval", code_activity, trainer)
                 else:
                     print(f"Eval metrics: skipped (runs every {self.eval_every} epochs)")
@@ -621,7 +573,7 @@ class GeometryTrainingRunner:
                     f"no improvement in {best_eval_metric_name} for "
                     f"{evals_since_improvement} evals "
                     f"(best epoch {best_eval_epoch}, "
-                    f"value={_format_metric_value(best_eval_metric_value or 0.0)}).",
+                    f"value={format_metric_value(best_eval_metric_value or 0.0)}).",
                 )
                 break
 

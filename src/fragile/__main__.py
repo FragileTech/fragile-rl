@@ -122,6 +122,29 @@ def vla_geometry(args):
 
 
 @run.command(
+    "macro-rl",
+    context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
+)
+@click.argument("args", nargs=-1, type=click.UNPROCESSED)
+def macro_rl(args):
+    """Train the standalone off-policy macro RL agent.
+
+    Uses Hydra-style key=value overrides, e.g.:
+        uv run fragile macro-rl epochs=200 domain=cartpole task=swingup
+    """
+    import sys
+
+    from fragile.commands.train_macro_rl import main
+
+    original_argv = sys.argv
+    sys.argv = ["fragile-macro-rl", *args]
+    try:
+        main()
+    finally:
+        sys.argv = original_argv
+
+
+@run.command(
     "dataset",
     context_settings={"ignore_unknown_options": True, "allow_extra_args": True},
 )
