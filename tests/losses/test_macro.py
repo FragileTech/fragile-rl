@@ -12,14 +12,15 @@ import torch
 from torch import nn
 
 from fragile.losses.macro import (
+    _state_index,
+    _validate_hard_symbol_inputs,
     AbsoluteEnclosureProbe,
     compose_absolute_macro_state,
     compose_absolute_structured_state,
     compute_absolute_enclosure_loss,
     zeno_loss,
-    _state_index,
-    _validate_hard_symbol_inputs,
 )
+
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -96,7 +97,9 @@ class TestValidation:
 
     def test_wrong_codebook_dim(self, chart_centers, chart_idx, code_idx):
         with pytest.raises(ValueError, match="codebook must have shape"):
-            _validate_hard_symbol_inputs(chart_centers, torch.randn(N_OBS_CHARTS, D), chart_idx, code_idx)
+            _validate_hard_symbol_inputs(
+                chart_centers, torch.randn(N_OBS_CHARTS, D), chart_idx, code_idx
+            )
 
     def test_codebook_chart_count_mismatch(self, chart_centers, chart_idx, code_idx):
         bad_codebook = torch.randn(N_OBS_CHARTS + 1, CODES_PER_CHART, D)
@@ -110,23 +113,33 @@ class TestValidation:
 
     def test_chart_idx_wrong_dim(self, chart_centers, codebook, code_idx):
         with pytest.raises(ValueError, match="chart_idx and code_idx must both have shape"):
-            _validate_hard_symbol_inputs(chart_centers, codebook, torch.zeros(B, 1, dtype=torch.long), code_idx)
+            _validate_hard_symbol_inputs(
+                chart_centers, codebook, torch.zeros(B, 1, dtype=torch.long), code_idx
+            )
 
     def test_batch_size_mismatch(self, chart_centers, codebook, chart_idx):
         with pytest.raises(ValueError, match="same batch size"):
-            _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, torch.zeros(B + 1, dtype=torch.long))
+            _validate_hard_symbol_inputs(
+                chart_centers, codebook, chart_idx, torch.zeros(B + 1, dtype=torch.long)
+            )
 
     def test_z_n_wrong_dim(self, chart_centers, codebook, chart_idx, code_idx):
         with pytest.raises(ValueError, match="z_n must have shape"):
-            _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B))
+            _validate_hard_symbol_inputs(
+                chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B)
+            )
 
     def test_z_n_batch_mismatch(self, chart_centers, codebook, chart_idx, code_idx):
         with pytest.raises(ValueError, match="z_n must match"):
-            _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B + 1, D))
+            _validate_hard_symbol_inputs(
+                chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B + 1, D)
+            )
 
     def test_z_n_latent_dim_mismatch(self, chart_centers, codebook, chart_idx, code_idx):
         with pytest.raises(ValueError, match="z_n must match"):
-            _validate_hard_symbol_inputs(chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B, D + 1))
+            _validate_hard_symbol_inputs(
+                chart_centers, codebook, chart_idx, code_idx, z_n=torch.randn(B, D + 1)
+            )
 
 
 # ---------------------------------------------------------------------------
@@ -186,17 +199,27 @@ class TestComposeAbsoluteStructuredState:
 
     def test_zero_nuisance_matches_macro(self, chart_centers, codebook, chart_idx, code_idx):
         z_n_zero = torch.zeros(B, D)
-        u_struct = compose_absolute_structured_state(chart_centers, codebook, chart_idx, code_idx, z_n_zero)
+        u_struct = compose_absolute_structured_state(
+            chart_centers, codebook, chart_idx, code_idx, z_n_zero
+        )
         u_macro = compose_absolute_macro_state(chart_centers, codebook, chart_idx, code_idx)
         assert torch.allclose(u_struct, u_macro, atol=1e-5)
 
     def test_nuisance_changes_state(self, chart_centers, codebook, chart_idx, code_idx, z_n):
         z_n_zero = torch.zeros(B, D)
         u_no_nuisance = compose_absolute_structured_state(
-            chart_centers, codebook, chart_idx, code_idx, z_n_zero,
+            chart_centers,
+            codebook,
+            chart_idx,
+            code_idx,
+            z_n_zero,
         )
         u_with_nuisance = compose_absolute_structured_state(
-            chart_centers, codebook, chart_idx, code_idx, z_n,
+            chart_centers,
+            codebook,
+            chart_idx,
+            code_idx,
+            z_n,
         )
         assert not torch.allclose(u_no_nuisance, u_with_nuisance, atol=1e-4)
 
@@ -333,8 +356,15 @@ class TestComputeAbsoluteEnclosureLoss:
         return torch.randn(N_ACT_CHARTS, CODES_PER_CHART, D) * 0.2
 
     def test_returns_three_elements(
-        self, probe, chart_centers, codebook, chart_idx, code_idx, z_n,
-        act_chart_centers, act_codebook,
+        self,
+        probe,
+        chart_centers,
+        codebook,
+        chart_idx,
+        code_idx,
+        z_n,
+        act_chart_centers,
+        act_codebook,
     ):
         torch.manual_seed(40)
         act_chart_idx = torch.randint(0, N_ACT_CHARTS, (B,))
@@ -370,8 +400,15 @@ class TestComputeAbsoluteEnclosureLoss:
         assert isinstance(diag, dict)
 
     def test_diagnostics_keys(
-        self, probe, chart_centers, codebook, chart_idx, code_idx, z_n,
-        act_chart_centers, act_codebook,
+        self,
+        probe,
+        chart_centers,
+        codebook,
+        chart_idx,
+        code_idx,
+        z_n,
+        act_chart_centers,
+        act_codebook,
     ):
         torch.manual_seed(41)
         act_chart_idx = torch.randint(0, N_ACT_CHARTS, (B,))
@@ -401,17 +438,34 @@ class TestComputeAbsoluteEnclosureLoss:
         )
 
         expected_keys = {
-            "acc_base", "acc_obs", "acc_act", "acc_both",
-            "defect_acc_obs", "defect_acc_act", "defect_acc_both",
-            "ce_base", "ce_obs", "ce_act", "ce_both",
-            "defect_ce_obs", "defect_ce_act", "defect_ce_both",
-            "loss_encoder", "loss_probe",
+            "acc_base",
+            "acc_obs",
+            "acc_act",
+            "acc_both",
+            "defect_acc_obs",
+            "defect_acc_act",
+            "defect_acc_both",
+            "ce_base",
+            "ce_obs",
+            "ce_act",
+            "ce_both",
+            "defect_ce_obs",
+            "defect_ce_act",
+            "defect_ce_both",
+            "loss_encoder",
+            "loss_probe",
         }
         assert set(diag.keys()) == expected_keys
 
     def test_encoder_loss_has_gradients(
-        self, probe, chart_centers, codebook, chart_idx, code_idx,
-        act_chart_centers, act_codebook,
+        self,
+        probe,
+        chart_centers,
+        codebook,
+        chart_idx,
+        code_idx,
+        act_chart_centers,
+        act_codebook,
     ):
         torch.manual_seed(42)
         z_n = nn.Parameter(torch.randn(B, D) * 0.1)
@@ -446,8 +500,15 @@ class TestComputeAbsoluteEnclosureLoss:
         assert act_z_tex.grad is not None and act_z_tex.grad.abs().sum() > 0
 
     def test_obs_codes_per_chart_override(
-        self, probe, chart_centers, codebook, chart_idx, code_idx, z_n,
-        act_chart_centers, act_codebook,
+        self,
+        probe,
+        chart_centers,
+        codebook,
+        chart_idx,
+        code_idx,
+        z_n,
+        act_chart_centers,
+        act_codebook,
     ):
         torch.manual_seed(43)
         act_chart_idx = torch.randint(0, N_ACT_CHARTS, (B,))
@@ -526,6 +587,7 @@ class TestZenoLoss:
         w_prev = torch.ones(1, 4) / 4.0
         loss = zeno_loss(w_t, w_prev, mode="jsd")
         import math
+
         assert loss.item() <= math.log(2) + 1e-5
 
     def test_kl_not_symmetric(self):

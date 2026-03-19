@@ -48,6 +48,19 @@ class SupervisedTopologyLoss(nn.Module):
         margin: float = 1.0,
         temperature: float = 1.0,
     ):
+        """Initialize SupervisedTopologyLoss.
+
+        Args:
+            num_charts: Number of charts (atlas partitions) in the model.
+            num_classes: Number of target classes for supervision.
+            lambda_purity: Weight for the purity loss term (Definition 25.4.1).
+            lambda_balance: Weight for the balance loss term (Definition 25.4.3).
+            lambda_metric: Weight for the metric contrastive loss term
+                (Definition 25.4.4).
+            margin: Hinge margin for the metric contrastive loss.
+            temperature: Temperature for softmax over the chart-to-class
+                mapping.
+        """
         super().__init__()
         self.num_charts = num_charts
         self.num_classes = num_classes
@@ -62,7 +75,12 @@ class SupervisedTopologyLoss(nn.Module):
 
     @property
     def p_y_given_k(self) -> Tensor:
-        """P(Y|K) distribution [N_c, C]."""
+        """Compute the conditional probability distribution P(Y|K).
+
+        Returns:
+            Tensor: Softmax-normalized chart-to-class probabilities of shape
+                ``[num_charts, num_classes]``.
+        """
         return F.softmax(self.chart_to_class / self.temperature, dim=1)
 
     def forward(
@@ -71,10 +89,30 @@ class SupervisedTopologyLoss(nn.Module):
         y_true: Tensor,  # [B] class labels
         z_latent: Tensor | None = None,  # [B, D] optional for metric loss
     ) -> dict[str, Tensor]:
-        """
-        Compute supervised topology losses.
+        """Compute supervised topology losses.
 
-        Returns dict with individual losses and total.
+        Combines route alignment, purity, balance, and metric contrastive
+        losses into a single total loss (Definition 25.4.6).
+
+        Args:
+            router_weights: Soft chart routing probabilities of shape
+                ``[B, num_charts]``, where B is the batch size.
+            y_true: Ground-truth class labels of shape ``[B]``.
+            z_latent: Optional latent embeddings of shape ``[B, D]``. Currently
+                unused but reserved for future metric loss variants.
+
+        Returns:
+            dict[str, Tensor]: Dictionary with the following scalar tensor
+                entries:
+
+                - ``"loss_total"``: Weighted sum of all sub-losses.
+                - ``"loss_route"``: Route alignment NLL loss (Definition 25.4.5).
+                - ``"loss_purity"``: Conditional entropy of labels given charts
+                  (Definition 25.4.1).
+                - ``"loss_balance"``: KL divergence of chart usage from uniform
+                  (Definition 25.4.3).
+                - ``"loss_metric"``: Hinge-based contrastive penalty on router
+                  overlap for different-class pairs (Definition 25.4.4).
         """
         B = router_weights.shape[0]
         p_y_k = self.p_y_given_k  # [N_c, C]
@@ -137,11 +175,18 @@ class SupervisedTopologyLoss(nn.Module):
 def compute_diversity_loss(router_weights: Tensor, num_charts: int, eps: float = 1e-6) -> Tensor:
     """Prevent chart collapse by maximizing entropy of mean usage.
 
-    loss_diversity = log(K) - H(K)
-    - Returns 0 when uniform (all charts equally used)
-    - Returns positive when collapsed (one chart dominates)
+    Computes ``log(K) - H(K)`` where H(K) is the entropy of average chart
+    usage across the batch. Returns 0 when usage is perfectly uniform and
+    a positive value when one chart dominates.
 
-    Overhead: ~1% (simple statistics).
+    Args:
+        router_weights: Soft routing probabilities of shape
+            ``[B, num_charts]``.
+        num_charts: Total number of charts K.
+        eps: Small constant added inside log for numerical stability.
+
+    Returns:
+        Tensor: Scalar diversity loss ``log(K) - H(K)``.
     """
     mean_usage = router_weights.mean(dim=0)
     H_K = -(mean_usage * torch.log(mean_usage + eps)).sum()
@@ -155,10 +200,18 @@ def compute_chart_collapse_penalty(
 ) -> Tensor:
     """Direct penalty on chart usage concentration.
 
-    penalty = max(p_k) - 1/K where p_k = mean chart probability across batch.
-    Returns 0 when perfectly uniform, positive when one chart dominates.
+    Computes ``max(p_k) - 1/K`` where ``p_k`` is the mean chart probability
+    across the batch. Returns 0 when usage is perfectly uniform and a positive
+    value when one chart dominates. Fully differentiable through
+    ``router_weights``.
 
-    Fully differentiable through router_weights.
+    Args:
+        router_weights: Soft routing probabilities of shape
+            ``[B, num_charts]``.
+        num_charts: Total number of charts K.
+
+    Returns:
+        Tensor: Scalar collapse penalty.
     """
     mean_usage = router_weights.mean(dim=0)  # [N_c]
     return mean_usage.max() - 1.0 / num_charts
@@ -174,12 +227,26 @@ def compute_code_collapse_penalty(
     """Differentiable penalty for code usage collapse.
 
     Computes soft code assignment probabilities from hyperbolic distances
-    between v_local and codebook in the Poincaré ball, weighted by router.
-    Penalizes low code entropy *within each chart* instead of building one
-    global histogram over code indices shared across charts.
+    between ``v_local`` and ``codebook`` in the Poincare ball, weighted by
+    the router. Penalizes low code entropy *within each chart* instead of
+    building one global histogram over code indices shared across charts.
 
-    Unlike per_chart_code_entropy (which uses bincount -> zero gradients),
-    this stays differentiable through both the encoder outputs and the codebook.
+    Unlike ``compute_per_chart_code_entropy_loss`` (which uses bincount and
+    therefore has zero gradients), this stays differentiable through both the
+    encoder outputs and the codebook.
+
+    Args:
+        v_local: Encoder output embeddings of shape ``[B, D]``.
+        codebook: Codebook embeddings of shape ``[num_charts, K, D]`` where
+            K is the number of codes per chart.
+        router_weights: Soft routing probabilities of shape
+            ``[B, num_charts]``.
+        temperature: Temperature scaling for the softmax over code distances.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Tensor: Scalar code collapse penalty. Returns 0.0 when K < 2 or
+            when no charts have non-negligible mass.
     """
     _N_c, K, _D = codebook.shape
     if K < 2:
@@ -221,19 +288,20 @@ def compute_code_entropy_loss(
 ) -> Tensor:
     """Maximize entropy of code usage within batch (micro-diversity).
 
-    Prevents "index collapse" where a chart routes perfectly but
-    maps every point to a single code index.
+    Prevents "index collapse" where a chart routes perfectly but maps every
+    point to a single code index. Uses ``bincount`` so gradients do not flow
+    through this loss.
 
     Reference: Node 11 (ComplexCheck), Section 15.1 (Mixing Rate).
 
     Args:
-        indices_stack: [B, N_charts] - code indices chosen per chart
-        num_codes: Number of codes per chart
+        indices_stack: Code indices chosen per chart, of shape
+            ``[B, num_charts]`` with integer values in ``[0, num_codes)``.
+        num_codes: Number of codes per chart.
 
     Returns:
-        loss: (max_entropy - H) where H is empirical code entropy
-
-    Overhead: ~1% (just counting indices in batch).
+        Tensor: Scalar loss equal to ``log(num_codes) - H`` where H is the
+            empirical entropy of the flattened code index distribution.
     """
     device = indices_stack.device
 
@@ -261,23 +329,27 @@ def compute_per_chart_code_entropy_loss(
     num_charts: int,
     num_codes: int,
 ) -> Tensor:
-    """Maximize code entropy WITHIN each chart separately.
+    """Maximize code entropy within each chart separately.
 
-    Unlike global code entropy, this ensures each chart uses
-    all its codes uniformly, not just globally balanced.
+    Unlike global code entropy, this ensures each chart uses all its codes
+    uniformly, not just that codes are globally balanced. The global code
+    entropy can be satisfied even if each chart only uses a subset of codes;
+    per-chart entropy forces every chart to utilize all its codes.
 
-    The global code entropy can be satisfied even if each chart
-    only uses a subset of codes. Per-chart entropy forces every
-    chart to utilize all its codes.
+    Uses ``bincount`` so gradients do not flow through this loss.
 
     Args:
-        indices_stack: [B, num_charts] - code indices per chart
-        K_chart: [B] - hard chart assignment for each sample
-        num_charts: Number of charts
-        num_codes: Codes per chart
+        indices_stack: Code indices per chart, of shape
+            ``[B, num_charts]`` with integer values in ``[0, num_codes)``.
+        K_chart: Hard chart assignment for each sample, of shape ``[B]``
+            with integer values in ``[0, num_charts)``.
+        num_charts: Total number of charts.
+        num_codes: Number of codes per chart.
 
     Returns:
-        loss: Mean (max_entropy - H_c) across charts
+        Tensor: Scalar loss equal to the mean of ``log(num_codes) - H_c``
+            across all active charts (those with at least 2 assigned
+            samples). Returns 0.0 if no chart is active.
     """
     device = indices_stack.device
     max_entropy = math.log(num_codes)
@@ -313,7 +385,20 @@ def compute_per_chart_code_entropy_loss(
 
 
 def compute_residual_scale_loss(z_n: Tensor, assume_tangent: bool = True) -> Tensor:
-    """Penalize residual gauge scale to preserve macro/meso hierarchy."""
+    """Penalize residual gauge scale to preserve macro/meso hierarchy.
+
+    Computes the mean squared norm of the tangent representation of ``z_n``,
+    encouraging small residuals in the gauge-equivariant decomposition.
+
+    Args:
+        z_n: Residual embeddings of shape ``[B, D]``.
+        assume_tangent: If True, treat ``z_n`` as already living in the
+            tangent space (skip projection). Passed through to
+            ``as_tangent``.
+
+    Returns:
+        Tensor: Scalar mean squared tangent-space norm.
+    """
     z_tan = as_tangent(z_n, assume_tangent)
     return (z_tan**2).sum(dim=1).mean()
 
@@ -325,7 +410,20 @@ def compute_orthogonality_loss(
 ) -> Tensor:
     """Penalize anisotropy using singular-value spread (basis-invariant).
 
-    Uses log-variance of singular values. Skip large matrices by default.
+    Iterates over all 2-D weight parameters in ``model``, computes the SVD,
+    and returns the mean log-variance of singular values. Matrices larger
+    than ``max_svd_dim`` along either axis are skipped to control cost.
+
+    Args:
+        model: PyTorch module whose weight matrices are regularized.
+        max_svd_dim: Maximum allowed dimension (rows or cols) for a weight
+            matrix to be included in the SVD computation.
+        eps: Clamping floor for singular values before taking log.
+
+    Returns:
+        Tensor: Scalar mean log-variance of singular values across all
+            eligible weight matrices. Returns 0.0 if no eligible layers
+            are found.
     """
     loss = torch.tensor(0.0, device=next(model.parameters()).device)
     n_layers = 0
@@ -364,7 +462,25 @@ def compute_vq_geodesic_loss(
     router_weights: Tensor,  # [B, N_c] soft routing
     commitment_cost: float = 0.25,
 ) -> Tensor:
-    """VQ loss using geodesic distance d_H instead of tangent-space approx."""
+    """VQ loss using geodesic (hyperbolic) distance instead of tangent-space approximation.
+
+    Computes the sum of a codebook loss (pulling codes toward encoder outputs)
+    and a commitment loss (pulling encoder outputs toward codes), both measured
+    with squared hyperbolic distance in the Poincare ball and weighted by
+    detached router probabilities.
+
+    Args:
+        z_q_all: Quantized code vectors of shape ``[B, num_charts, D]``.
+        v_local: Encoder output embeddings of shape ``[B, D]``.
+        router_weights: Soft routing probabilities of shape
+            ``[B, num_charts]``.
+        commitment_cost: Scalar multiplier for the commitment (encoder to
+            code) loss term.
+
+    Returns:
+        Tensor: Scalar VQ loss equal to
+            ``codebook_loss + commitment_cost * commitment_loss``.
+    """
     project_to_ball(z_q_all)
     v_proj = project_to_ball(v_local.unsqueeze(1).expand_as(z_q_all))
 
@@ -389,14 +505,28 @@ def compute_hyperbolic_contrastive_loss(
     labels: Tensor,
     margin: float = 2.0,
 ) -> Tensor:
-    """Contrastive loss in geodesic space.
+    """Contrastive loss in geodesic (hyperbolic) space.
 
-    O(B^2 D) complexity. Schedule: epoch 50+.
+    Pulls same-class pairs together and pushes different-class pairs apart
+    using pairwise hyperbolic distances in the Poincare ball. Has O(B^2 D)
+    complexity; recommended schedule is epoch 50+.
 
-    d_ij = hyperbolic_distance(z_i, z_j)
-    L_pos = mean_{y_i=y_j}(d_ij^2)
-    L_neg = mean_{y_i!=y_j}(ReLU(margin - d_ij)^2)
-    L = L_pos + L_neg
+    Loss formula::
+
+        d_ij = hyperbolic_distance(z_i, z_j)
+        L_pos = mean_{y_i == y_j}(d_ij^2)
+        L_neg = mean_{y_i != y_j}(ReLU(margin - d_ij)^2)
+        L = L_pos + L_neg
+
+    Args:
+        z_geo: Embeddings of shape ``[B, D]`` to be projected onto the
+            Poincare ball before distance computation.
+        labels: Integer class labels of shape ``[B]``.
+        margin: Minimum desired geodesic distance between embeddings of
+            different classes.
+
+    Returns:
+        Tensor: Scalar contrastive loss. Returns 0.0 when B < 2.
     """
     z = project_to_ball(z_geo)
     B, D = z.shape
@@ -440,16 +570,30 @@ def compute_symbol_purity_loss(
     num_codes: int,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Conditional entropy H(Y | chart, code) -- encourage pure symbols.
+    """Conditional entropy H(Y | chart, code) to encourage pure symbols.
 
-    Schedule: epoch 100+.
+    For each (chart k, code c) pair, computes the label entropy of samples
+    assigned to that symbol and weights it by the symbol's empirical
+    probability. Recommended schedule is epoch 100+.
 
-    For each (chart k, code c):
-        mask = (K_chart == k) & (indices_stack[:, k] == c)
-        P(y|k,c) = histogram of labels[mask] / count
-        H(Y|k,c) = entropy of P(y|k,c)
-        P(k,c) = count / total
-    L = sum_{k,c} P(k,c) * H(Y|k,c)
+    Args:
+        K_chart: Hard chart assignment for each sample, of shape ``[B]``
+            with integer values in ``[0, num_charts)``.
+        indices_stack: Code indices per chart, of shape
+            ``[B, num_charts]`` with integer values in ``[0, num_codes)``.
+        labels: Ground-truth class labels of shape ``[B]``.
+        router_weights: Soft routing probabilities of shape
+            ``[B, num_charts]``. Not used in the current computation but
+            accepted for API consistency.
+        num_charts: Total number of charts.
+        num_codes: Number of codes per chart.
+        eps: Small constant for numerical stability in log and
+            normalization.
+
+    Returns:
+        Tensor: Scalar purity loss equal to
+            ``sum_{k,c} P(k,c) * H(Y | k, c)``. Returns 0.0 when no
+            (chart, code) symbol has at least 2 samples.
     """
     device = K_chart.device
     B = K_chart.shape[0]
@@ -491,12 +635,24 @@ def compute_symbol_calibration_loss(
 ) -> Tensor:
     """Encourage radial consistency within each symbol (chart, code).
 
-    Schedule: epoch 100+.
+    For each active (chart k, code c) pair, computes the variance of the
+    Poincare-ball radii of the assigned embeddings. The loss is the mean
+    variance across all active symbols. Recommended schedule is epoch 100+.
 
-    For each active (chart k, code c):
-        r_kc = ||z_geo[mask]||    # radii in this symbol
-        L_kc = Var(r_kc)
-    L = mean over active symbols
+    Args:
+        z_geo: Embeddings of shape ``[B, D]`` to be projected onto the
+            Poincare ball.
+        K_chart: Hard chart assignment for each sample, of shape ``[B]``
+            with integer values in ``[0, num_charts)``.
+        indices_stack: Code indices per chart, of shape
+            ``[B, num_charts]`` with integer values in ``[0, num_codes)``.
+        num_charts: Total number of charts.
+        num_codes: Number of codes per chart.
+
+    Returns:
+        Tensor: Scalar calibration loss equal to the mean radius variance
+            across active symbols. Returns 0.0 when no symbol has at least
+            2 samples.
     """
     z = project_to_ball(z_geo)
     device = z.device
@@ -530,7 +686,25 @@ def get_loss_schedule(
     ramp_end: int | None = None,
     final_weight: float = 1.0,
 ) -> float:
-    """Generic warmup schedule. Returns multiplier in [0, final_weight]."""
+    """Generic warmup schedule returning a multiplier in [0, final_weight].
+
+    Returns 0.0 for epochs before ``warmup``, linearly ramps from 0.0 to
+    ``final_weight`` between ``warmup`` and ``ramp_end``, and returns
+    ``final_weight`` for all epochs at or beyond ``ramp_end``. If
+    ``ramp_end`` is None the ramp is skipped and ``final_weight`` is
+    returned immediately after warmup.
+
+    Args:
+        epoch: Current training epoch (0-indexed).
+        warmup: Epoch at which the loss first becomes non-zero.
+        ramp_end: Epoch at which the ramp reaches ``final_weight``. If
+            None, the multiplier jumps to ``final_weight`` right after
+            warmup.
+        final_weight: Maximum multiplier value at the end of the ramp.
+
+    Returns:
+        float: Loss weight multiplier for the current epoch.
+    """
     if epoch < warmup:
         return 0.0
     if ramp_end is None or epoch >= ramp_end:

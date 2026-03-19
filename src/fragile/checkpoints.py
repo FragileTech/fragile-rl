@@ -3,17 +3,18 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 import math
 import os
 import pathlib
 import tempfile
-from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 from sklearn.metrics import adjusted_mutual_info_score
 import torch
 from torch import nn, optim
+
 
 if TYPE_CHECKING:
     from fragile.agent import FragileAgentTrainer

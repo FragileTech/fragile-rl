@@ -3,12 +3,67 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import torch
 
+
 if TYPE_CHECKING:
     from fragile.rl.macro_data import ActionPrototypeTable
+
+
+# Known metric name suffixes that should always display as integers.
+_INTEGER_SUFFIXES = frozenset({
+    "episodes",
+    "steps",
+    "env_steps",
+    "update_steps",
+    "num_valid",
+    "valid_symbols",
+})
+
+# Logical section ordering for macro RL metrics.  Sections not listed here
+# are appended alphabetically after the last group.
+_MACRO_RL_SECTION_ORDER: list[str] = [
+    "collect",
+    "eval",
+    "loss",
+    "q",
+    "obs",
+    "act",
+    "markov",
+    "model",
+    "enclosure",
+    "grad",
+    "param",
+    "replay",
+    "routing",
+    "transitions",
+    "proto",
+]
+
+# Group headers inserted *before* the first section in each group.
+_MACRO_RL_SECTION_LABELS: dict[str, str] = {
+    "collect": "Rollout",
+    "loss": "Losses",
+    "obs": "Encoders",
+    "markov": "Model",
+    "grad": "Optimization",
+    "replay": "Replay & routing",
+}
+
+
+def _is_integer_metric(name: str, value: float) -> bool:
+    """Heuristic: a metric should display as an integer."""
+    if value != value:  # NaN
+        return False
+    for suffix in _INTEGER_SUFFIXES:
+        if name == suffix or name.endswith(f"/{suffix}"):
+            return True
+    # Values that are exact integers and large enough to not be fractions.
+    if value == int(value) and abs(value) >= 1.0:
+        return abs(value) < 1e15
+    return False
 
 
 def average_metrics(metric_list: list[dict[str, float]]) -> dict[str, float]:
@@ -24,9 +79,14 @@ def average_metrics(metric_list: list[dict[str, float]]) -> dict[str, float]:
     return averaged
 
 
-def format_metric_value(value: float) -> str:
-    """Format metric values compactly for CLI logging."""
+def format_metric_value(value: float, name: str = "") -> str:
+    """Format metric values compactly for CLI logging.
+
+    Integer-valued metrics (counts, steps) are rendered without decimals.
+    """
     value = float(value)
+    if _is_integer_metric(name, value):
+        return f"{int(value):,}"
     if value == 0.0:
         return "0"
     abs_value = abs(value)
@@ -35,17 +95,54 @@ def format_metric_value(value: float) -> str:
     return f"{value:.4f}"
 
 
-def print_metric_groups(title: str, metrics: dict[str, float]) -> None:
-    """Print every metric grouped by its prefix."""
+def print_metric_groups(
+    title: str,
+    metrics: dict[str, float],
+    *,
+    section_order: list[str] | None = None,
+    section_labels: dict[str, str] | None = None,
+) -> None:
+    """Print every metric grouped by its prefix.
+
+    Parameters
+    ----------
+    section_order:
+        If given, sections are printed in this order (unlisted sections
+        follow alphabetically).  If ``None``, all sections are alphabetical.
+    section_labels:
+        Mapping from section name to a human-readable group header.  A
+        separator line is printed before each group's first section.
+    """
     print(f"{title}:")
-    grouped: dict[str, list[tuple[str, float]]] = defaultdict(list)
+    grouped: dict[str, list[tuple[str, str, float]]] = defaultdict(list)
     for key, value in sorted(metrics.items()):
         prefix, sep, rest = key.partition("/")
         label = rest if sep else key
-        grouped[prefix].append((label, value))
-    for prefix in sorted(grouped):
+        grouped[prefix].append((label, key, value))
+
+    if section_order is not None:
+        ordered = []
+        seen: set[str] = set()
+        for section in section_order:
+            if section in grouped:
+                ordered.append(section)
+                seen.add(section)
+        for section in sorted(grouped):
+            if section not in seen:
+                ordered.append(section)
+    else:
+        ordered = sorted(grouped)
+
+    labels = section_labels or {}
+    emitted_labels: set[str] = set()
+    for prefix in ordered:
+        if prefix in labels and labels[prefix] not in emitted_labels:
+            lbl = labels[prefix]
+            emitted_labels.add(lbl)
+            print(f"  ── {lbl} {'─' * max(1, 40 - len(lbl))}")
+        items = grouped[prefix]
         parts = " ".join(
-            f"{name}={format_metric_value(value)}" for name, value in grouped[prefix]
+            f"{name}={format_metric_value(value, full_key)}" for name, full_key, value in items
         )
         print(f"  {prefix}: {parts}")
 
@@ -76,7 +173,9 @@ def summarize_collection(
         f"{prefix}/length_mean": float(sum(lengths) / len(lengths)),
         f"{prefix}/random_action_frac": float(sum(random_fracs) / len(random_fracs)),
         f"{prefix}/action_usage_active": float(sum(action_active) / len(action_active)),
-        f"{prefix}/action_usage_perplexity": float(sum(action_perplexity) / len(action_perplexity)),
+        f"{prefix}/action_usage_perplexity": float(
+            sum(action_perplexity) / len(action_perplexity)
+        ),
     }
 
 
@@ -94,7 +193,9 @@ def prototype_metrics(
     counts = prototypes.counts.float()
     num_symbols = float(prototypes.valid.numel())
     valid_count = float(valid.sum().item())
-    mean_count = float(counts[prototypes.valid].mean().item()) if bool(prototypes.valid.any()) else 0.0
+    mean_count = (
+        float(counts[prototypes.valid].mean().item()) if bool(prototypes.valid.any()) else 0.0
+    )
     return {
         "proto/valid_symbols": valid_count,
         "proto/coverage": (valid_count / num_symbols) if num_symbols > 0 else 0.0,
@@ -160,7 +261,7 @@ def format_symbol_distribution(
     total = counts.sum()
     distribution = counts / total.clamp_min(1.0)
     active = int((counts > 0).sum().item())
-    probs = ", ".join(f"{int(round(100.0 * float(value))):02d}" for value in distribution.tolist())
+    probs = ", ".join(f"{round(100.0 * float(value)):02d}" for value in distribution.tolist())
     return f"{active}/{int(total_symbols)} [{probs}]"
 
 
@@ -201,24 +302,48 @@ def log_epoch(
 ) -> None:
     """Print a full epoch log block with metrics and symbol usage."""
     eval_display = (
-        format_metric_value(eval_metrics.get(eval_return_key, 0.0))
-        if should_eval
-        else "skipped"
+        format_metric_value(eval_metrics.get(eval_return_key, 0.0)) if should_eval else "skipped"
     )
     print(
         f"{header} E{epoch:05d} | "
         f"collect={format_metric_value(train_metrics.get(collect_return_key, 0.0))} | "
         f"q={format_metric_value(train_metrics.get(q_loss_key, 0.0))} | "
         f"eval={eval_display} | "
-        f"env_steps={env_steps} | "
-        f"updates={update_steps}",
+        f"env_steps={env_steps:,} | "
+        f"updates={update_steps:,}",
     )
-    print_metric_groups("Train metrics", train_metrics)
+
+    # Collection return summary before the detailed metrics.
+    ret_mean = train_metrics.get("collect/return_mean", 0.0)
+    ret_std = train_metrics.get("collect/return_std", 0.0)
+    ep_len = train_metrics.get("collect/length_mean", 0.0)
+    rand_frac = train_metrics.get("collect/random_action_frac", 0.0)
+    print(
+        f"  Collect: return={format_metric_value(ret_mean)}"
+        f" +/- {format_metric_value(ret_std)}"
+        f"  ep_len={format_metric_value(ep_len)}"
+        f"  random={format_metric_value(rand_frac)}",
+    )
+
+    print_metric_groups(
+        "Train metrics",
+        train_metrics,
+        section_order=_MACRO_RL_SECTION_ORDER,
+        section_labels=_MACRO_RL_SECTION_LABELS,
+    )
+
+    print(f"  ── Symbol usage {'─' * 23}")
     print_symbol_usage("train", train_symbol_usage)
+
     if should_eval:
-        print_metric_groups("Eval metrics", eval_metrics)
+        print_metric_groups(
+            "Eval metrics",
+            eval_metrics,
+            section_order=_MACRO_RL_SECTION_ORDER,
+            section_labels=_MACRO_RL_SECTION_LABELS,
+        )
         if eval_symbol_usage is not None:
             print_symbol_usage("eval", eval_symbol_usage)
     else:
         print(f"Eval metrics: skipped (runs every {eval_every} epochs)")
-    print("-" * 80)
+    print("─" * 80)

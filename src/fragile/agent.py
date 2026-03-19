@@ -36,9 +36,9 @@ from fragile.losses.encoder import (
 )
 from fragile.losses.macro import AbsoluteEnclosureProbe, compute_absolute_enclosure_loss
 from fragile.losses.markov_model import (
-    MacroTransitionModel,
     compute_markov_shape_loss,
     compute_markov_transition_loss,
+    MacroTransitionModel,
     soft_macro_state_distribution,
 )
 from fragile.losses.old_macro import grl_alpha_schedule
@@ -309,8 +309,12 @@ class FragileAgent(nn.Module):
             msg = "Received a fully masked batch; at least one valid frame is required."
             raise ValueError(msg)
 
-        time_index = torch.arange(horizon, device=x.device, dtype=torch.long).expand(batch_size, -1)
-        last_valid_t = torch.where(mask, time_index, -torch.ones_like(time_index)).max(dim=1).values
+        time_index = torch.arange(horizon, device=x.device, dtype=torch.long).expand(
+            batch_size, -1
+        )
+        last_valid_t = (
+            torch.where(mask, time_index, -torch.ones_like(time_index)).max(dim=1).values
+        )
         anchor_batch = (last_valid_t >= 0).nonzero(as_tuple=True)[0]
         anchor_flat_idx = anchor_batch * horizon + last_valid_t[anchor_batch]
         valid_lookup = torch.full(
@@ -569,10 +573,18 @@ class FragileAgent(nn.Module):
         }
         if transition_valid_idx.numel() > 0:
             transitions.update({
-                "obs_chart_t_valid": _flatten_selected(transitions["obs_chart_t"], transition_valid_idx),
-                "obs_code_t_valid": _flatten_selected(transitions["obs_code_t"], transition_valid_idx),
-                "act_chart_t_valid": _flatten_selected(transitions["act_chart_t"], transition_valid_idx),
-                "act_code_t_valid": _flatten_selected(transitions["act_code_t"], transition_valid_idx),
+                "obs_chart_t_valid": _flatten_selected(
+                    transitions["obs_chart_t"], transition_valid_idx
+                ),
+                "obs_code_t_valid": _flatten_selected(
+                    transitions["obs_code_t"], transition_valid_idx
+                ),
+                "act_chart_t_valid": _flatten_selected(
+                    transitions["act_chart_t"], transition_valid_idx
+                ),
+                "act_code_t_valid": _flatten_selected(
+                    transitions["act_code_t"], transition_valid_idx
+                ),
                 "obs_chart_tp1_valid": _flatten_selected(
                     transitions["obs_chart_tp1"],
                     transition_valid_idx,
@@ -581,12 +593,16 @@ class FragileAgent(nn.Module):
                     transitions["obs_code_tp1"],
                     transition_valid_idx,
                 ),
-                "obs_z_n_t_valid": _flatten_selected(transitions["obs_z_n_t"], transition_valid_idx),
+                "obs_z_n_t_valid": _flatten_selected(
+                    transitions["obs_z_n_t"], transition_valid_idx
+                ),
                 "obs_z_tex_t_valid": _flatten_selected(
                     transitions["obs_z_tex_t"],
                     transition_valid_idx,
                 ),
-                "act_z_n_t_valid": _flatten_selected(transitions["act_z_n_t"], transition_valid_idx),
+                "act_z_n_t_valid": _flatten_selected(
+                    transitions["act_z_n_t"], transition_valid_idx
+                ),
                 "act_z_tex_t_valid": _flatten_selected(
                     transitions["act_z_tex_t"],
                     transition_valid_idx,
@@ -809,7 +825,9 @@ class FragileAgentTrainer:
             max_alpha=self.config.enclosure_alpha_max,
         )
 
-    def _move_batch_to_device(self, batch: Any) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
+    def _move_batch_to_device(
+        self, batch: Any
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor | None]:
         """Support dict or tuple batches and move tensors to the agent device."""
         if isinstance(batch, dict):
             obs = batch.get("obs", batch.get("observation"))
@@ -936,8 +954,12 @@ class FragileAgentTrainer:
             encoded["usage_router_weights_valid"],
             valid_positions,
         )
-        indices_stack_valid = self._select_valid_rows(encoded["indices_stack_valid"], valid_positions)
-        router_scores_valid = self._select_valid_rows(encoded["router_scores_valid"], valid_positions)
+        indices_stack_valid = self._select_valid_rows(
+            encoded["indices_stack_valid"], valid_positions
+        )
+        router_scores_valid = self._select_valid_rows(
+            encoded["router_scores_valid"], valid_positions
+        )
         z_n_valid = self._select_valid_rows(encoded["z_n_valid"], valid_positions)
         z_tex_valid = self._select_valid_rows(encoded["z_tex_valid"], valid_positions)
         z_n_all_valid = self._select_valid_rows(encoded["z_n_all_valid"], valid_positions)
@@ -1108,17 +1130,21 @@ class FragileAgentTrainer:
                     "state_points": forward["macro"]["act"]["state_points"],
                 }
                 if compute_markov_transition:
-                    markov_transition_loss, transition_metrics, pred = compute_markov_transition_loss(
-                        self.agent.macro_model,
-                        transitions["obs_state_probs_t_valid"],
-                        transitions["act_state_probs_t_valid"],
-                        obs_geometry=obs_geometry,
-                        act_geometry=act_geometry,
-                        target_next_state_probs=transitions["obs_state_probs_tp1_valid"].detach(),
-                        target_next_chart_idx=transitions["obs_chart_tp1_valid"],
-                        target_next_code_idx=transitions["obs_code_tp1_valid"],
-                        codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
-                        metric_prefix="markov",
+                    markov_transition_loss, transition_metrics, pred = (
+                        compute_markov_transition_loss(
+                            self.agent.macro_model,
+                            transitions["obs_state_probs_t_valid"],
+                            transitions["act_state_probs_t_valid"],
+                            obs_geometry=obs_geometry,
+                            act_geometry=act_geometry,
+                            target_next_state_probs=transitions[
+                                "obs_state_probs_tp1_valid"
+                            ].detach(),
+                            target_next_chart_idx=transitions["obs_chart_tp1_valid"],
+                            target_next_code_idx=transitions["obs_code_tp1_valid"],
+                            codes_per_chart=self.agent.config.obs_encoder.codes_per_chart,
+                            metric_prefix="markov",
+                        )
                     )
                 else:
                     pred = self.agent.macro_model(
@@ -1298,7 +1324,9 @@ class FragileAgentTrainer:
             for param in group["params"]
             if param.requires_grad
         ]
-        markov_params = [param for param in self.agent.macro_model.parameters() if param.requires_grad]
+        markov_params = [
+            param for param in self.agent.macro_model.parameters() if param.requires_grad
+        ]
 
         encoder_grad_norm = compute_grad_norm(encoder_params)
         encoder_param_norm = compute_param_norm(encoder_params)
@@ -1315,7 +1343,11 @@ class FragileAgentTrainer:
         probe_metrics = {
             "grad/probe_norm": 0.0,
             "param/probe_norm": compute_param_norm(
-                [param for param in self.agent.enclosure_probe.parameters() if param.requires_grad],
+                [
+                    param
+                    for param in self.agent.enclosure_probe.parameters()
+                    if param.requires_grad
+                ],
             ),
         }
         if outputs["probe_loss"].requires_grad and outputs["probe_loss"].detach().item() > 0:
@@ -1387,10 +1419,7 @@ class FragileAgentTrainer:
         global_step: int | None = None,
     ) -> dict[str, float]:
         """Convenience wrapper for one full evaluation epoch."""
-        metrics = [
-            self.eval_step(batch, epoch=epoch, global_step=global_step)
-            for batch in loader
-        ]
+        metrics = [self.eval_step(batch, epoch=epoch, global_step=global_step) for batch in loader]
         return _mean_metrics(metrics)
 
 

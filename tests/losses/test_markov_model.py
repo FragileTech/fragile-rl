@@ -9,7 +9,6 @@ import torch
 import torch.nn.functional as F
 
 from fragile.losses.markov_model import (
-    MacroTransitionModel,
     _flatten_chart_code_probs,
     _masked_mean,
     _normalize_probs,
@@ -24,6 +23,7 @@ from fragile.losses.markov_model import (
     compute_markov_transition_loss,
     compute_markov_world_model_alignment_loss,
     expected_macro_state,
+    MacroTransitionModel,
     soft_macro_state_distribution,
 )
 
@@ -201,7 +201,10 @@ class TestSoftMacroStateDistribution:
             chart_tau=0.1,
             code_tau=0.1,
         )
-        assert sd_cold["state_probs"].max(dim=-1).values.mean() > sd_warm["state_probs"].max(dim=-1).values.mean()
+        assert (
+            sd_cold["state_probs"].max(dim=-1).values.mean()
+            > sd_warm["state_probs"].max(dim=-1).values.mean()
+        )
 
 
 class TestMacroTransitionModel:
@@ -230,9 +233,15 @@ class TestMacroTransitionModel:
             obs_geometry=t.obs_geometry,
             act_geometry=t.act_geometry,
         )
-        torch.testing.assert_close(out["next_state_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0)
-        torch.testing.assert_close(out["next_chart_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0)
-        torch.testing.assert_close(out["next_code_probs"].sum(dim=-1), torch.ones(B, OBS_C), atol=1e-5, rtol=0)
+        torch.testing.assert_close(
+            out["next_state_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0
+        )
+        torch.testing.assert_close(
+            out["next_chart_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0
+        )
+        torch.testing.assert_close(
+            out["next_code_probs"].sum(dim=-1), torch.ones(B, OBS_C), atol=1e-5, rtol=0
+        )
 
     def test_without_residual_is_exactly_factorized(self, t):
         out = t.model(
@@ -251,7 +260,9 @@ class TestMacroTransitionModel:
             obs_geometry=t.obs_geometry,
             act_geometry=t.act_geometry,
         )
-        torch.testing.assert_close(out["next_state_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0)
+        torch.testing.assert_close(
+            out["next_state_probs"].sum(dim=-1), torch.ones(B), atol=1e-5, rtol=0
+        )
         assert "residual_transition_logits" in out
 
     def test_reward_and_continuation_from_probs(self, t):

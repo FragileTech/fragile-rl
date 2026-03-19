@@ -5,11 +5,11 @@ from __future__ import annotations
 import torch
 
 from fragile.rl.macro_control import (
-    MacroQNetwork,
     compute_q_learning_loss,
     epsilon_greedy_macro_action,
     epsilon_greedy_macro_actions,
     hard_update_target,
+    MacroQNetwork,
     soft_update_target,
 )
 

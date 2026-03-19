@@ -315,6 +315,19 @@ def compute_screened_poisson_loss(
 
     # Define V as a function of z using the local chart mixture for each sample.
     def V_func(z_in: torch.Tensor) -> torch.Tensor:
+        """Evaluate the scalar value field at given positions.
+
+        Wraps ``value_net.task_value`` and broadcasts the local router
+        weights to match the (possibly expanded) collocation batch produced
+        by the Hutchinson estimator inside ``hyperbolic_laplacian``.
+
+        Args:
+            z_in: [N, D] positions inside the Poincare ball, where N is
+                either equal to or a multiple of the flattened sample count.
+
+        Returns:
+            [N, 1] scalar value predictions at each position.
+        """
         n_in = z_in.shape[0]
         if n_in == rw_flat.shape[0]:
             rw_in = rw_flat
@@ -354,7 +367,12 @@ def compute_phase2_loss(
         config: VLA configuration.
 
     Returns:
-        total_loss, metrics dict.
+        A tuple of (total_loss, metrics) where:
+            total_loss: Scalar weighted sum of all phase-2 loss components.
+            metrics: Dict mapping loss component names (e.g. "geodesic",
+                "chart_transition", "momentum_reg", "energy_conservation",
+                "hodge", "screened_poisson", "total") to their scalar float
+                values.
     """
     metrics: dict[str, float] = {}
 
@@ -560,8 +578,16 @@ def compute_supervised_wm_loss(
         config: VLAConfig with loss weights.
 
     Returns:
-        total_loss: Scalar loss.
-        metrics: Dict of individual loss components.
+        A tuple of (total_loss, metrics) where:
+            total_loss: Scalar weighted sum of position, endpoint, momentum,
+                Hodge consistency, and energy conservation losses.
+            metrics: Dict mapping loss component names (e.g. "position",
+                "endpoint", "momentum_target", "hodge_perp",
+                "energy_conservation", "mean_momentum", "mean_phi_eff",
+                "hodge_cons", "hodge_sol", "hodge_harm", "geo_miss",
+                "total") to their scalar float values. Diagnostic keys
+                (mean_momentum, geo_miss, etc.) are computed under
+                torch.no_grad.
     """
     metrics: dict[str, float] = {}
 
@@ -669,8 +695,14 @@ def compute_phase2_geodesic_diffusion_loss(
         config: VLAConfig with loss weights and hyperparameters.
 
     Returns:
-        total_loss: Scalar loss.
-        metrics: Dict of aggregated loss components.
+        A tuple of (total_loss, metrics) where:
+            total_loss: Scalar loss averaged over consecutive same-chart
+                pairs, plus chart transition cross-entropy.
+            metrics: Dict mapping aggregated loss component names to their
+                scalar float values. Includes per-pair supervised loss
+                components (e.g. "position", "endpoint", "momentum_target"),
+                "chart_transition" CE, "total", "n_same_chart_pairs",
+                "same_chart_frac", and "chart_accuracy".
     """
     B, H, _ = z_all.shape
     N = getattr(config, "wm_diffusion_substeps", 8)
@@ -767,7 +799,32 @@ def _hodge_conservative_preference_losses(
     hodge_conservative_ratio: torch.Tensor,
     hodge_solenoidal_ratio: torch.Tensor,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Bias dynamics toward conservative explanation once harmonic residue is small."""
+    """Bias dynamics toward conservative explanation once harmonic residue is small.
+
+    Computes a margin loss that penalises the conservative Hodge ratio when
+    it falls below a configurable target, plus an L2 penalty on the solenoidal
+    ratio to encourage the model to explain forces conservatively.
+
+    Args:
+        config: Configuration object with a ``hodge_conservative_target``
+            attribute (float) specifying the desired minimum conservative
+            ratio.
+        hodge_conservative_ratio: [B, ...] tensor of per-sample conservative
+            force ratios from the Hodge decomposition.
+        hodge_solenoidal_ratio: [B, ...] tensor of per-sample solenoidal
+            force ratios from the Hodge decomposition.
+
+    Returns:
+        A tuple of (L_hodge_conservative_margin, L_hodge_solenoidal, metrics)
+        where:
+            L_hodge_conservative_margin: Scalar mean-squared deficit of the
+                conservative ratio below the target.
+            L_hodge_solenoidal: Scalar mean-squared solenoidal ratio penalty.
+            metrics: Dict with keys "wm/L_hodge_conservative_margin",
+                "wm/L_hodge_solenoidal", "geometric/hodge_conservative_deficit",
+                and "geometric/hodge_conservative_target" mapped to their
+                float values.
+    """
     conservative_target = float(config.hodge_conservative_target)
     conservative_deficit = (conservative_target - hodge_conservative_ratio).clamp(min=0.0)
     L_hodge_conservative_margin = conservative_deficit.pow(2).mean()
@@ -797,7 +854,53 @@ def _world_model_closure_losses(
     *,
     zeno_mode: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Measure closure and router smoothness from the observation Markov model."""
+    """Measure closure and router smoothness from the observation Markov model.
+
+    Runs the world model forward on the given initial state and action
+    sequence, then computes chart-transition cross-entropy, Zeno
+    regularisation (router smoothness), and enclosure losses via a
+    gradient-reversal probe. Returns early with zeroed losses when the
+    input sequences are empty.
+
+    Args:
+        config: Configuration object with attributes
+            ``enclosure_grl_warmup_updates`` (int),
+            ``enclosure_grl_alpha_max`` (float), and
+            ``codes_per_chart`` (int).
+        world_model: GeometricWorldModel instance whose ``forward`` method
+            produces chart logits.
+        enclosure_probe: Enclosure probe module with a gradient-reversal
+            layer (``grl``) used for the enclosure adversarial loss.
+        z_0: [B, D] initial latent position.
+        rw_0: [B, K] initial router weights.
+        chart_embed_t: [B, T, E] chart embedding features for the sequence.
+        z_tex_t: [B, T, D_tex] texture latent features for the sequence.
+        action_canonicals: [B, T, A] canonical action vectors.
+        code_t: [B, T] integer code indices at each time step.
+        target_charts: [B, T] ground-truth chart indices for supervision.
+        target_codes: [B, T] ground-truth code indices for the enclosure
+            probe.
+        update_idx: Current training update index, used for GRL alpha
+            scheduling.
+        zeno_mode: Mode string forwarded to ``zeno_loss`` (e.g. "kl",
+            "cosine").
+
+    Returns:
+        A tuple of (L_closure_obs, L_obs_zeno, L_enclosure,
+        L_enclosure_probe, metrics) where:
+            L_closure_obs: Scalar chart-transition cross-entropy loss.
+            L_obs_zeno: Scalar Zeno regularisation loss for router
+                smoothness.
+            L_enclosure: Scalar enclosure loss (main model side).
+            L_enclosure_probe: Scalar enclosure probe loss (adversarial
+                side).
+            metrics: Dict with keys "closure/obs_state_acc",
+                "closure/obs_symbol_acc", "closure/chart_entropy",
+                "closure/enclosure_acc_full", "closure/enclosure_acc_base",
+                "closure/enclosure_defect_acc",
+                "closure/enclosure_defect_ce", and "closure/grl_alpha"
+                mapped to their float values.
+    """
     from fragile.losses.macro import zeno_loss
     from fragile.losses.old_macro import (
         compute_enclosure_loss,

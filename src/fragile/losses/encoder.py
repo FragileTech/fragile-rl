@@ -30,7 +30,16 @@ if TYPE_CHECKING:
 
 
 def compute_routing_entropy(router_weights: Tensor, eps: float = 1e-6) -> Tensor:
-    """Compute mean routing entropy (lower = sharper decisions)."""
+    """Compute mean routing entropy (lower = sharper decisions).
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``,
+            where ``B`` is batch size and ``K`` is the number of charts.
+        eps: Small constant added inside the log for numerical stability.
+
+    Returns:
+        Scalar tensor with the mean entropy across the batch.
+    """
     entropy = -(router_weights * torch.log(router_weights + eps)).sum(dim=1)
     return entropy.mean()
 
@@ -39,7 +48,19 @@ def compute_router_information_metrics(
     router_weights: Tensor,
     eps: float = 1e-6,
 ) -> dict[str, Tensor]:
-    """Compute occupancy/conditional entropies and their mutual information."""
+    """Compute occupancy/conditional entropies and their mutual information.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        eps: Small constant added inside the log for numerical stability.
+
+    Returns:
+        Dictionary with the following keys:
+
+        - ``"H_K"``: Scalar tensor, marginal occupancy entropy H(K).
+        - ``"H_K_given_X"``: Scalar tensor, conditional entropy H(K|X).
+        - ``"I_XK"``: Scalar tensor, mutual information I(X;K) = H(K) - H(K|X).
+    """
     mean_usage = router_weights.mean(dim=0)
     H_K = -(mean_usage * torch.log(mean_usage + eps)).sum()
     H_K_given_X = -(router_weights * torch.log(router_weights + eps)).sum(dim=1).mean()
@@ -54,7 +75,20 @@ def compute_router_information_metrics(
 def compute_router_sharpness_metrics(
     router_weights: Tensor,
 ) -> dict[str, Tensor]:
-    """Summarize per-sample router sharpness from probabilities."""
+    """Summarize per-sample router sharpness from probabilities.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+
+    Returns:
+        Dictionary with the following keys:
+
+        - ``"top1_prob_mean"``: Scalar tensor, mean of the top-1 probability.
+        - ``"top1_prob_p10"``: Scalar tensor, 10th percentile of top-1 probability.
+        - ``"top1_prob_p90"``: Scalar tensor, 90th percentile of top-1 probability.
+        - ``"top2_prob_mean"``: Scalar tensor, mean of the runner-up probability.
+        - ``"top1_gap_mean"``: Scalar tensor, mean gap between top-1 and top-2 probs.
+    """
     top2 = torch.topk(router_weights, k=min(2, router_weights.shape[-1]), dim=-1).values
     top1 = top2[:, 0]
     if top2.shape[-1] > 1:
@@ -78,6 +112,19 @@ def compute_router_score_metrics(
 
     These diagnostics are useful when probabilities saturate or flatten:
     they show whether the underlying logits still have meaningful separation.
+
+    Args:
+        router_scores: Raw (pre-softmax) router logits of shape ``[B, K]``.
+
+    Returns:
+        Dictionary with the following keys:
+
+        - ``"score_gap_mean"``: Scalar tensor, mean gap between top-1 and top-2 scores.
+        - ``"score_gap_p50"``: Scalar tensor, 50th percentile of the score gap.
+        - ``"score_gap_p90"``: Scalar tensor, 90th percentile of the score gap.
+        - ``"score_gap_p99"``: Scalar tensor, 99th percentile of the score gap.
+        - ``"score_std"``: Scalar tensor, standard deviation of all scores.
+        - ``"score_mean_abs"``: Scalar tensor, mean absolute value of all scores.
     """
     top2 = torch.topk(router_scores, k=min(2, router_scores.shape[-1]), dim=-1).values
     top1 = top2[:, 0]
@@ -106,6 +153,13 @@ def compute_router_margin_loss(
     genuine margin over its competitors. This term acts directly on router
     scores, unlike entropy on probabilities which becomes first-order flat near
     a uniform softmax.
+
+    Args:
+        router_scores: Raw (pre-softmax) router logits of shape ``[B, K]``.
+        margin: Minimum desired gap between the top-1 and top-2 scores.
+
+    Returns:
+        Scalar tensor with the mean hinge penalty over the batch.
     """
     top2 = torch.topk(router_scores, k=min(2, router_scores.shape[-1]), dim=-1).values
     top1 = top2[:, 0]
@@ -118,7 +172,15 @@ def compute_router_margin_loss(
 
 
 def compute_hard_routing_nll(router_scores: Tensor) -> Tensor:
-    """Maximize the Gibbs probability of the deterministic hard chart partition."""
+    """Maximize the Gibbs probability of the deterministic hard chart partition.
+
+    Args:
+        router_scores: Raw (pre-softmax) router logits of shape ``[B, K]``.
+
+    Returns:
+        Scalar tensor with the cross-entropy loss between the softmax scores
+        and the argmax-derived hard labels.
+    """
     hard_labels = router_scores.detach().argmax(dim=-1)
     return F.cross_entropy(router_scores, hard_labels)
 
@@ -128,7 +190,21 @@ def _entropy_band_loss(
     h_low: float | None,
     h_high: float | None = None,
 ) -> Tensor:
-    """Penalize entropy outside an optional target band."""
+    """Penalize entropy outside an optional target band.
+
+    Applies a one-sided squared ReLU penalty for entropy below ``h_low``
+    and/or above ``h_high``.
+
+    Args:
+        entropy: Entropy values, arbitrary shape.
+        h_low: Lower entropy bound. If provided, values below this incur a
+            squared penalty.
+        h_high: Upper entropy bound. If provided, values above this incur a
+            squared penalty.
+
+    Returns:
+        Tensor of the same shape as ``entropy`` with per-element penalty values.
+    """
     loss = torch.zeros_like(entropy)
     if h_low is not None:
         loss = loss + F.relu(torch.as_tensor(h_low, device=entropy.device) - entropy).pow(2)
@@ -151,6 +227,23 @@ def compute_chart_usage_band_loss(
     forward values are one-hot chart assignments while gradients flow through the
     underlying softmax scores. That gives the intended semantics for utilization:
     the loss sees actual chart occupancy, not diffuse soft marginals.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        num_charts: Total number of charts ``K``.
+        h_low: Lower bound for the occupancy entropy band. Defaults to
+            ``log(0.9 * num_charts)`` if ``None``.
+        h_high: Upper bound for the occupancy entropy band. ``None`` means no
+            upper penalty.
+        eps: Small constant added inside the log for numerical stability.
+
+    Returns:
+        Tuple of two elements:
+
+        - **loss**: Scalar tensor with the entropy band penalty.
+        - **metrics**: Dictionary with keys ``"H_usage"`` (occupancy entropy),
+          ``"usage_perplexity"`` (exp of the entropy), and ``"usage_active"``
+          (number of charts with non-negligible occupancy).
     """
     if h_low is None:
         h_low = math.log(max(0.9 * num_charts, 1.0))
@@ -180,6 +273,25 @@ def compute_sinkhorn_balanced_chart_loss(
     row marginals are uniform over samples and whose column marginals are uniform
     over charts. Minimizing the cross-entropy from the router scores to this
     detached target encourages globally balanced but locally sharp assignments.
+
+    Args:
+        router_scores: Raw (pre-softmax) router logits of shape ``[B, K]``.
+        epsilon: Entropy regularization strength for the Sinkhorn iterations.
+        num_iters: Number of Sinkhorn iterations.
+        eps: Small constant for numerical stability in normalization.
+
+    Returns:
+        Tuple of two elements:
+
+        - **loss**: Scalar tensor with the cross-entropy loss from the router
+          softmax to the detached Sinkhorn target.
+        - **metrics**: Dictionary with keys ``"ot_target_top1_mean"`` (mean
+          top-1 value of the target distribution), ``"ot_plan_col_l1"``
+          (L1 deviation of column marginals from uniform), and
+          ``"ot_plan_row_l1"`` (L1 deviation of row marginals from uniform).
+
+    Raises:
+        ValueError: If ``router_scores`` does not have exactly 2 dimensions.
     """
     if router_scores.ndim != 2:
         msg = "router_scores must have shape [B, K]."
@@ -235,7 +347,13 @@ def compute_codebook_centering_loss(codebook: Tensor) -> Tensor:
     """Encourage per-chart codebook deltas to be zero-mean.
 
     Args:
-        codebook: [N_c, K, D] codebook deltas
+        codebook: Codebook parameters of shape ``[N_c, K, D]``, where ``N_c``
+            is the number of charts, ``K`` is the number of codes per chart,
+            and ``D`` is the embedding dimension.
+
+    Returns:
+        Scalar tensor with the mean squared tangent-space center norm across
+        charts.
     """
     codebook = project_to_ball(codebook)
     centers_tan = log_map_zero(codebook).mean(dim=1)  # [N_c, D]
@@ -248,6 +366,15 @@ def compute_chart_center_mean_loss(chart_centers: Tensor) -> Tensor:
     This regularizes the global atlas frame without forcing individual chart
     centers to coincide. The tangent mean ``mean(log_0(c_k))`` is the natural
     origin-centered analogue of zero-centering the per-chart codebook deltas.
+
+    Args:
+        chart_centers: Chart center positions of shape ``[K, D]`` on the
+            Poincare ball, where ``K`` is the number of charts and ``D`` is
+            the embedding dimension.
+
+    Returns:
+        Scalar tensor with the squared norm of the tangent-space atlas
+        barycenter.
     """
     chart_centers = project_to_ball(chart_centers)
     atlas_mean = log_map_zero(chart_centers).mean(dim=0)
@@ -264,6 +391,16 @@ def compute_chart_center_radius_loss(
 
     ``radius_max`` is interpreted in geodesic distance from the origin, not as
     a Euclidean ball norm. That avoids under-penalizing boundary drift.
+
+    Args:
+        chart_centers: Chart center positions of shape ``[K, D]`` on the
+            Poincare ball.
+        radius_max: Maximum allowed geodesic distance from the origin.
+        barrier_beta: Steepness parameter for the softplus barrier function.
+
+    Returns:
+        Scalar tensor with the mean squared barrier penalty across chart
+        centers.
     """
     if chart_centers.numel() == 0:
         return torch.tensor(0.0, device=chart_centers.device, dtype=chart_centers.dtype)
@@ -281,7 +418,18 @@ def compute_chart_center_separation_loss(
     chart_centers: Tensor,
     margin: float = 1.0,
 ) -> Tensor:
-    """Keep distinct chart anchors separated in hyperbolic geometry."""
+    """Keep distinct chart anchors separated in hyperbolic geometry.
+
+    Args:
+        chart_centers: Chart center positions of shape ``[K, D]`` on the
+            Poincare ball.
+        margin: Minimum geodesic distance enforced between each pair of chart
+            centers.
+
+    Returns:
+        Scalar tensor with the mean squared hinge penalty over all unique
+        chart-center pairs.
+    """
     num_charts = chart_centers.shape[0]
     if num_charts < 2:
         return torch.tensor(0.0, device=chart_centers.device, dtype=chart_centers.dtype)
@@ -308,13 +456,22 @@ def compute_window_loss(
     """Information-Stability Window (Theorem 15.1.3).
 
     Ensures chart assignment carries information about input:
-    I(X;K) = H(K) - H(K|X) >= eps_ground
+    ``I(X;K) = H(K) - H(K|X) >= eps_ground``.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        eps_ground: Minimum mutual information threshold below which the
+            squared penalty activates.
+        eps: Small constant added inside the log for numerical stability.
 
     Returns:
-        loss: Penalty for insufficient grounding
-        metrics: Dictionary with H(K), H(K|X), I(X;K)
+        Tuple of two elements:
 
-    Overhead: ~2% (entropy statistics).
+        - **loss**: Scalar tensor with the squared ReLU penalty for
+          insufficient mutual information.
+        - **metrics**: Dictionary with keys ``"H_K"`` (marginal occupancy
+          entropy), ``"H_K_given_X"`` (conditional entropy), and ``"I_XK"``
+          (mutual information).
     """
     info = compute_router_information_metrics(router_weights, eps=eps)
     H_K = info["H_K"]
@@ -348,6 +505,29 @@ def compute_code_usage_band_loss(
     The chart occupancy comes from ``router_weights`` and should therefore use the
     hard/ST encoder router. Code occupancy is formed from a straight-through code
     assignment computed from the same distances used by the VQ path.
+
+    Args:
+        v_local: Chart-local latent vectors of shape ``[B, D]``.
+        codebook: Codebook parameters of shape ``[N_c, K, D]``.
+        router_weights: Per-sample routing weights of shape ``[B, N_c]``.
+        hard_code_indices: Pre-computed hard code indices of shape ``[B, N_c]``.
+            If ``None``, argmax of the soft assignment is used.
+        h_low: Lower bound for the per-chart code-usage entropy band.
+            Defaults to ``log(0.75 * K)`` if ``None``.
+        h_high: Upper bound for the per-chart code-usage entropy band.
+            ``None`` means no upper penalty.
+        temperature: Temperature for the soft code assignment softmax.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Tuple of two elements:
+
+        - **loss**: Scalar tensor with the occupancy-weighted entropy band
+          penalty across active charts.
+        - **metrics**: Dictionary with keys ``"H_code_usage"`` (mean per-chart
+          code entropy), ``"code_usage_perplexity"`` (exp of that entropy),
+          and ``"active_code_charts"`` (number of charts with non-negligible
+          occupancy).
     """
     _num_charts, num_codes, _dim = codebook.shape
     if num_codes < 2:
@@ -413,12 +593,16 @@ def compute_jump_consistency_loss(
     so we only learn transitions where evidence exists (overlap regions).
 
     Args:
-        jump_op: The FactorizedJumpOperator module
-        z_n_all_charts: [B, N_c, D] nuisance coords per chart (using each chart's best code)
-        router_weights: [B, N_c] soft routing weights
+        jump_op: The ``FactorizedJumpOperator`` module used to map nuisance
+            coordinates from one chart to another.
+        z_n_all_charts: Nuisance coordinates per chart of shape ``[B, N_c, D]``,
+            where ``B`` is batch size, ``N_c`` is the number of charts, and
+            ``D`` is the embedding dimension.
+        router_weights: Soft routing weights of shape ``[B, N_c]``.
 
     Returns:
-        loss: Mean weighted MSE across all chart pairs
+        Scalar tensor with the mean overlap-weighted squared hyperbolic
+        distance across all active chart pairs.
     """
     B, N_c, D = z_n_all_charts.shape
     device = z_n_all_charts.device
@@ -494,13 +678,14 @@ def get_jump_weight_schedule(
     - Full (ramp_end+): weight = final_weight
 
     Args:
-        epoch: Current epoch
-        warmup_end: Epoch when warmup ends
-        ramp_end: Epoch when ramp ends
-        final_weight: Final jump weight
+        epoch: Current training epoch number.
+        warmup_end: Epoch at which the warmup phase ends and the ramp begins.
+        ramp_end: Epoch at which the ramp phase ends and the full weight is
+            applied.
+        final_weight: Target jump loss weight after the ramp completes.
 
     Returns:
-        Current jump weight
+        The scheduled jump loss weight as a float for the given epoch.
     """
     if epoch < warmup_end:
         return 0.0
@@ -524,9 +709,17 @@ def compute_hyperbolic_uniformity_loss(z_geo: Tensor, eps: float = 1e-6) -> Tens
 
     O(B^2 D) complexity. Schedule: epoch 50+.
 
-    tau_i = sqrt(D) * (1 - ||z_i||^2) / 2     # conformal temperature
-    d_ij = hyperbolic_distance(z_i, z_j)        # pairwise geodesic
-    L = log(mean_{i!=j} exp(-tau_i * d_ij))     # log-sum-exp repulsion
+    Uses a conformal-temperature-weighted log-sum-exp repulsion kernel:
+    ``tau_i = sqrt(D) * (1 - ||z_i||^2) / 2``,
+    ``L = mean_i log(mean_{j!=i} exp(-tau_i * d_ij))``.
+
+    Args:
+        z_geo: Latent embeddings of shape ``[B, D]`` on the Poincare ball.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Scalar tensor with the mean log-sum-exp repulsion loss across all
+        samples.
     """
     z = project_to_ball(z_geo)
     B, D = z.shape
@@ -586,9 +779,6 @@ def compute_radial_calibration_loss(
     to the current chart-mixture barycenter so radius is earned by sample-local
     geometry instead of by pushing the whole atlas frame outward.
 
-    r_i = ||z_i||
-    H_i = -sum_k(w_ik * log(w_ik + eps))    # routing entropy
-    target_i = 1 - H_i / log(num_charts)     # confident → 1, uncertain → 0
     When ``quality_target`` is provided, the confident shell is gated by
     per-sample quality so confident but inaccurate points are pulled inward.
     ``quality_base_weight`` adds a quality-driven basal shell before confidence
@@ -598,6 +788,30 @@ def compute_radial_calibration_loss(
     With ``use_hyperbolic_radius=True``, a band loss is used instead of exact
     shell matching so high-quality samples can occupy a radial range rather than
     collapsing to a single shell.
+
+    Args:
+        z_geo: Latent embeddings of shape ``[B, D]`` on the Poincare ball.
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        num_charts: Total number of charts ``K``.
+        center_points: Optional per-sample chart-mixture barycenters of shape
+            ``[B, D]``. When provided, radius is measured as the hyperbolic
+            distance from each point to its center instead of from the origin.
+        quality_target: Optional per-sample quality scores of shape ``[B]`` in
+            ``[0, 1]`` that gate the radial target.
+        quality_mix: Interpolation weight in ``[0, 1]`` blending pure
+            confidence with quality-gated confidence.
+        quality_base_weight: Weight in ``[0, 1]`` for an unconditional
+            quality-driven basal radial target.
+        rho_max: Maximum geodesic distance used to scale the radial target
+            when ``use_hyperbolic_radius`` is ``True``.
+        rho_band_width: Half-width of the acceptable radial band when
+            ``use_hyperbolic_radius`` is ``True``.
+        use_hyperbolic_radius: If ``True``, use a band loss in geodesic
+            distance instead of Euclidean shell matching.
+        eps: Small constant for numerical stability.
+
+    Returns:
+        Scalar tensor with the mean squared radial calibration penalty.
     """
     z = project_to_ball(z_geo)
     confidence = compute_routing_confidence(router_weights, num_charts, eps=eps)
@@ -638,7 +852,20 @@ def compute_routing_confidence(
     *,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Map routing entropy to a confidence score in [0, 1]."""
+    """Map routing entropy to a confidence score in [0, 1].
+
+    Confidence is defined as ``1 - H / log(K)`` where ``H`` is the per-sample
+    routing entropy and ``K`` is the number of charts.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        num_charts: Total number of charts ``K``.
+        eps: Small constant added inside the log for numerical stability.
+
+    Returns:
+        Tensor of shape ``[B]`` with per-sample confidence values clamped to
+        ``[0, 1]``.
+    """
     H = -(router_weights * torch.log(router_weights + eps)).sum(dim=1)
     log_K = math.log(max(num_charts, 2))
     return (1.0 - H / log_K).clamp(0.0, 1.0)
@@ -650,7 +877,25 @@ def compute_error_quality_targets(
     alpha: float = 2.0,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Turn detached per-sample errors into quality targets in [0, 1]."""
+    """Turn detached per-sample errors into quality targets in [0, 1].
+
+    Quality is computed as ``exp(-alpha * error / mean_error)`` so that
+    low-error samples receive quality close to 1.
+
+    Args:
+        per_sample_error: Per-sample reconstruction or VQ errors of shape
+            ``[B]``.
+        alpha: Steepness parameter controlling how quickly quality decays
+            with increasing error.
+        eps: Small constant to avoid division by zero in mean error.
+
+    Returns:
+        Tensor of shape ``[B]`` with per-sample quality values clamped to
+        ``[0, 1]``.
+
+    Raises:
+        ValueError: If ``per_sample_error`` does not have exactly 1 dimension.
+    """
     if per_sample_error.ndim != 1:
         msg = "per_sample_error must have shape [B]"
         raise ValueError(msg)
@@ -668,6 +913,17 @@ def compute_rank_quality_targets(
     Lower-error samples get higher quality, but the target is based on batch
     ordering instead of absolute scale. This is useful when we care more about
     "better than peers" than "close to zero error".
+
+    Args:
+        per_sample_error: Per-sample errors of shape ``[B]``.
+
+    Returns:
+        Tensor of shape ``[B]`` with rank-based quality values in ``[0, 1]``.
+        The sample with the lowest error receives quality 1.0 and the highest
+        receives 0.0.
+
+    Raises:
+        ValueError: If ``per_sample_error`` does not have exactly 1 dimension.
     """
     if per_sample_error.ndim != 1:
         msg = "per_sample_error must have shape [B]"
@@ -694,7 +950,20 @@ def mix_quality_targets(
     *,
     rank_mix: float = 0.0,
 ) -> Tensor:
-    """Blend absolute and rank-based quality targets into a single score."""
+    """Blend absolute and rank-based quality targets into a single score.
+
+    Args:
+        absolute_quality: Absolute quality scores of shape ``[B]`` in
+            ``[0, 1]``.
+        rank_quality: Rank-based quality scores of shape ``[B]`` in
+            ``[0, 1]``.
+        rank_mix: Interpolation weight in ``[0, 1]``. A value of 0 yields
+            pure absolute quality; 1 yields pure rank quality.
+
+    Returns:
+        Tensor of shape ``[B]`` with blended quality values clamped to
+        ``[0, 1]``.
+    """
     mix = min(max(float(rank_mix), 0.0), 1.0)
     return ((1.0 - mix) * absolute_quality + mix * rank_quality).clamp(0.0, 1.0)
 
@@ -705,7 +974,19 @@ def combine_quality_targets(
     *,
     primary_weight: float = 0.7,
 ) -> Tensor:
-    """Combine two quality signals with a weighted average."""
+    """Combine two quality signals with a weighted average.
+
+    Args:
+        primary_quality: Primary quality scores of shape ``[B]`` in ``[0, 1]``.
+        secondary_quality: Secondary quality scores of shape ``[B]`` in
+            ``[0, 1]``.
+        primary_weight: Weight in ``[0, 1]`` for the primary signal. The
+            secondary signal receives ``1 - primary_weight``.
+
+    Returns:
+        Tensor of shape ``[B]`` with combined quality values clamped to
+        ``[0, 1]``.
+    """
     weight = min(max(float(primary_weight), 0.0), 1.0)
     return (weight * primary_quality + (1.0 - weight) * secondary_quality).clamp(0.0, 1.0)
 
@@ -717,7 +998,19 @@ def compute_confidence_calibration_loss(
     *,
     eps: float = 1e-6,
 ) -> Tensor:
-    """Align router confidence with a detached per-sample quality target."""
+    """Align router confidence with a detached per-sample quality target.
+
+    Args:
+        router_weights: Per-sample routing probability vectors of shape ``[B, K]``.
+        quality_target: Detached per-sample quality scores of shape ``[B]`` in
+            ``[0, 1]``.
+        num_charts: Total number of charts ``K``.
+        eps: Small constant for numerical stability in confidence computation.
+
+    Returns:
+        Scalar tensor with the smooth L1 loss between routing confidence and
+        the quality target.
+    """
     confidence = compute_routing_confidence(router_weights, num_charts, eps=eps)
     return F.smooth_l1_loss(confidence, quality_target.clamp(0.0, 1.0))
 
@@ -733,7 +1026,20 @@ def compute_v_tangent_barrier_loss(
     target_radius: float = 0.9,
     max_norm: float = 0.99,
 ) -> Tensor:
-    """Penalize the pre-squash tangent norm once it enters the saturated tail."""
+    """Penalize the pre-squash tangent norm once it enters the saturated tail.
+
+    Args:
+        v_raw: Pre-squash (tangent-space) latent vectors of shape
+            ``[B, D]`` or ``[..., D]``.
+        target_radius: Desired maximum Euclidean radius in the Poincare ball.
+            Converted to a tangent-space threshold via ``atanh``.
+        max_norm: Upper bound used to keep ``target_radius`` within a safe
+            range for the ``atanh`` conversion.
+
+    Returns:
+        Scalar tensor with the mean squared ReLU penalty for norms exceeding
+        the tangent-space threshold.
+    """
     if v_raw.numel() == 0:
         return torch.tensor(0.0, device=v_raw.device, dtype=v_raw.dtype)
 
@@ -756,14 +1062,18 @@ def compute_codebook_spread_loss(
 
     O(N_c * K^2 * D) complexity. Schedule: epoch 0+.
 
-    For each chart c:
-        d_ij = hyperbolic_distance(codes_c[i], codes_c[j])
-        L_c = mean(ReLU(margin - d_ij))   # hinge on all pairs
-    L = mean_c(L_c)
+    For each chart c, a hinge penalty is applied to all unique code pairs
+    whose geodesic distance falls below the margin.
 
     Args:
-        codebook: [N_c, K, D] codebook parameters
-        margin: minimum geodesic distance between codes
+        codebook: Codebook parameters of shape ``[N_c, K, D]``, where ``N_c``
+            is the number of charts, ``K`` is the number of codes per chart,
+            and ``D`` is the embedding dimension.
+        margin: Minimum geodesic distance enforced between every pair of codes
+            within the same chart.
+
+    Returns:
+        Scalar tensor with the mean hinge penalty averaged across charts.
     """
     codebook_proj = project_to_ball(codebook)  # [N_c, K, D]
     N_c, K, D = codebook_proj.shape
@@ -794,7 +1104,18 @@ def compute_codebook_spread_loss(
 
 
 def _deterministic_st_router_weights(router_scores: torch.Tensor) -> torch.Tensor:
-    """Build deterministic straight-through one-hot router weights from scores."""
+    """Build deterministic straight-through one-hot router weights from scores.
+
+    The forward pass produces one-hot vectors (argmax), while gradients flow
+    through the underlying softmax via the straight-through estimator.
+
+    Args:
+        router_scores: Raw (pre-softmax) router logits of shape ``[B, K]``.
+
+    Returns:
+        Tensor of shape ``[B, K]`` with one-hot forward values and softmax
+        gradients.
+    """
     soft = F.softmax(router_scores, dim=-1)
     one_hot = F.one_hot(router_scores.argmax(dim=-1), router_scores.shape[-1]).to(soft.dtype)
     return one_hot + soft - soft.detach()
@@ -813,11 +1134,14 @@ def orthogonality_loss(zn: torch.Tensor, ztex: torch.Tensor) -> torch.Tensor:
     (columns pre-normalized).
 
     Args:
-        zn: [B, D1] navigational latent (tangent space).
-        ztex: [B, D2] texture latent (tangent space).
+        zn: Navigational latent vectors of shape ``[B, D1]`` in tangent space.
+        ztex: Texture latent vectors of shape ``[B, D2]`` in tangent space.
 
     Returns:
-        Scalar loss in [0, 1].
+        Scalar tensor with the decorrelation loss, bounded in ``[0, 1]``.
+        When ``D1 == D2``, this is the mean squared cosine similarity. When
+        ``D1 != D2``, this is the mean squared entry of the column-normalized
+        cross-correlation matrix.
     """
     if zn.shape[-1] == ztex.shape[-1]:
         # Squared cosine similarity per sample, mean over batch
@@ -853,10 +1177,47 @@ def compute_phase1_loss(
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
     """Assemble Phase 1 (encoder-only) loss from all active terms.
 
+    Gathers reconstruction, VQ, routing, chart-usage, uniformity, radial
+    calibration, codebook, and consistency losses according to the weights
+    specified in ``config``. Losses that do not flow through ``z_n`` are
+    accumulated in ``base_loss``; those that do are in ``zn_reg_loss``.
+
+    Args:
+        x: Original input tensor of shape ``[B, ...]``.
+        x_recon: Reconstructed input tensor of shape ``[B, ...]``.
+        vq_loss: Scalar VQ commitment loss from the encoder forward pass.
+        enc_router_weights: Encoder routing weights of shape ``[B, K]``.
+        dec_router_weights: Decoder routing weights of shape ``[B, K]``.
+        z_geo: Geometric latent embeddings of shape ``[B, D]`` on the
+            Poincare ball.
+        encoder: The encoder module (or a wrapper whose ``.encoder`` attribute
+            holds the atlas encoder).
+        config: VLA configuration object carrying all loss weights and
+            hyper-parameters.
+        router_reg_weights: Soft router weights used for regularization terms.
+            If ``None``, fetched from the atlas encoder's cached attribute.
+        usage_router_weights: Router weights used for chart/code usage
+            measurement. Defaults to ``enc_router_weights`` if ``None``.
+        c_bar: Per-sample chart-mixture barycenters of shape ``[B, D]``.
+            If ``None``, fetched from the atlas encoder's cached attribute.
+        v_local: Chart-local latent vectors of shape ``[B, D]``. If ``None``,
+            fetched from the atlas encoder's cached attribute.
+        indices_stack: Hard code indices of shape ``[B, N_c]``. If ``None``,
+            fetched from the atlas encoder's cached attribute.
+        router_scores: Raw pre-softmax router logits of shape ``[B, K]``.
+            If ``None``, fetched from the atlas encoder's cached attribute.
+
     Returns:
-        base_loss: Scalar loss for terms that do NOT flow through z_n.
-        zn_reg_loss: Scalar loss for z_n regularization (uniformity, radial_cal).
-        metrics: Dict of individual loss components for logging.
+        Tuple of three elements:
+
+        - **base_loss**: Scalar tensor aggregating all loss terms that do NOT
+          flow through ``z_n`` (reconstruction, VQ, routing, codebook, etc.).
+        - **zn_reg_loss**: Scalar tensor aggregating loss terms that flow
+          through ``z_geo`` / ``z_n`` (uniformity, radial calibration).
+        - **metrics**: Dictionary mapping metric names to float values for
+          logging. Includes at minimum ``"total"``, ``"recon"``, ``"vq"``,
+          ``"entropy"``, ``"consistency"``, and default-zero entries for all
+          optional loss terms.
     """
     metrics: dict[str, float] = {}
     atlas_encoder = getattr(encoder, "encoder", encoder)

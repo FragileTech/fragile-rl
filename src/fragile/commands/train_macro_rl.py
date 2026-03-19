@@ -19,9 +19,9 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
+from omegaconf import MISSING
 import torch
 from torch import nn
-from omegaconf import MISSING
 from tqdm import tqdm
 
 from fragile.agent import (
@@ -47,17 +47,22 @@ from fragile.metrics import (
     update_symbol_usage_from_episode_info,
     update_symbol_usage_from_forward,
 )
-from fragile.rl.env_helpers import ObservationNormalizer, _flatten_obs, _infer_action_dim, _make_env
+from fragile.rl.env_helpers import (
+    _flatten_obs,
+    _infer_action_dim,
+    _make_env,
+    ObservationNormalizer,
+)
 from fragile.rl.macro_collect import collect_macro_episodes_batched
 from fragile.rl.macro_control import (
-    MacroQNetwork,
     compute_q_learning_loss,
     hard_update_target,
+    MacroQNetwork,
     soft_update_target,
 )
 from fragile.rl.macro_data import (
-    ActionPrototypeTable,
     action_stats_from_episodes,
+    ActionPrototypeTable,
     prepare_macro_transition_batch_from_forward,
     replay_buffer_state,
     update_action_symbol_prototypes,
@@ -235,16 +240,16 @@ class MacroRLRunner:
     def _setup(
         self,
     ) -> tuple[
-        list[Any],           # train_envs
-        list[Any],           # eval_envs
+        list[Any],  # train_envs
+        list[Any],  # eval_envs
         FragileAgentTrainer,  # trainer
-        MacroQNetwork,        # q_network
-        MacroQNetwork,        # target_q_network
-        torch.optim.Adam,     # q_optimizer
-        SequenceReplayBuffer, # replay
-        torch.device,         # device
-        int,                  # obs_dim
-        int,                  # act_dim
+        MacroQNetwork,  # q_network
+        MacroQNetwork,  # target_q_network
+        torch.optim.Adam,  # q_optimizer
+        SequenceReplayBuffer,  # replay
+        torch.device,  # device
+        int,  # obs_dim
+        int,  # act_dim
     ]:
         """Create environments, agent, trainer, Q-networks, and replay buffer."""
         device = _resolve_device(self.device)
@@ -294,9 +299,16 @@ class MacroRLRunner:
         replay = SequenceReplayBuffer(capacity=self.replay_capacity, seq_len=self.replay_seq_len)
 
         return (
-            train_envs, eval_envs, trainer,
-            q_network, target_q_network, q_optimizer,
-            replay, device, obs_dim, act_dim,
+            train_envs,
+            eval_envs,
+            trainer,
+            q_network,
+            target_q_network,
+            q_optimizer,
+            replay,
+            device,
+            obs_dim,
+            act_dim,
         )
 
     def _print_model_summary(
@@ -344,7 +356,7 @@ class MacroRLRunner:
             act_num_charts=trainer.agent.config.act_encoder.num_charts,
             act_codes_per_chart=trainer.agent.config.act_encoder.codes_per_chart,
         )
-        _eval_episodes, eval_infos = collect_macro_episodes_batched(
+        eval_episodes, eval_infos = collect_macro_episodes_batched(
             eval_envs,
             trainer.agent,
             q_network,
@@ -360,7 +372,7 @@ class MacroRLRunner:
             macro_code_tau=trainer.config.macro_code_tau,
             sigma_motor=0.0,
         )
-        del _eval_episodes
+        del eval_episodes
         for info in eval_infos:
             update_symbol_usage_from_episode_info(
                 eval_symbol_usage,
@@ -604,13 +616,19 @@ class MacroRLRunner:
 
             probe_grad_norm = 0.0
             probe_param_norm = compute_param_norm(
-                [param for param in trainer.agent.enclosure_probe.parameters() if param.requires_grad],
+                [
+                    param
+                    for param in trainer.agent.enclosure_probe.parameters()
+                    if param.requires_grad
+                ],
             )
             if outputs["probe_loss"].requires_grad and outputs["probe_loss"].detach().item() > 0:
                 trainer.probe_optimizer.zero_grad()
                 outputs["probe_loss"].backward()
                 probe_params_live = [
-                    param for param in trainer.agent.enclosure_probe.parameters() if param.requires_grad
+                    param
+                    for param in trainer.agent.enclosure_probe.parameters()
+                    if param.requires_grad
                 ]
                 probe_grad_norm = compute_grad_norm(probe_params_live)
                 if trainer.config.grad_clip > 0:
@@ -669,9 +687,8 @@ class MacroRLRunner:
         eval_metrics: dict[str, float],
     ) -> None:
         """Save a periodic checkpoint if the current epoch requires one."""
-        should_save = (
-            self.save_every > 0
-            and (((epoch + 1) % self.save_every == 0) or (epoch == self.epochs - 1))
+        should_save = self.save_every > 0 and (
+            ((epoch + 1) % self.save_every == 0) or (epoch == self.epochs - 1)
         )
         if should_save:
             _save_macro_rl_checkpoint(
@@ -697,9 +714,16 @@ class MacroRLRunner:
         """Execute the standalone off-policy macro RL loop."""
         self._validate_config()
         (
-            train_envs, eval_envs, trainer,
-            q_network, target_q_network, q_optimizer,
-            replay, device, obs_dim, act_dim,
+            train_envs,
+            eval_envs,
+            trainer,
+            q_network,
+            target_q_network,
+            q_optimizer,
+            replay,
+            device,
+            obs_dim,
+            act_dim,
         ) = self._setup()
 
         obs_normalizer: ObservationNormalizer | None = None
@@ -729,7 +753,10 @@ class MacroRLRunner:
             start_epoch = resumed.start_epoch
         else:
             replay, obs_normalizer, action_prototypes, env_steps = self._seed_replay(
-                train_envs, trainer, replay, device,
+                train_envs,
+                trainer,
+                replay,
+                device,
             )
 
         self._print_model_summary(trainer, q_network, obs_dim=obs_dim, act_dim=act_dim)
@@ -748,7 +775,10 @@ class MacroRLRunner:
         for epoch in epoch_iter:
             last_epoch = epoch
             epsilon = _linear_schedule(
-                self.epsilon_start, self.epsilon_end, epoch, self.epsilon_decay_epochs,
+                self.epsilon_start,
+                self.epsilon_end,
+                epoch,
+                self.epsilon_decay_epochs,
             )
 
             env_steps, action_prototypes, train_symbol_usage, collect_infos = self._collect_epoch(
@@ -784,7 +814,12 @@ class MacroRLRunner:
             should_eval = (epoch % self.eval_every == 0) or (epoch == self.epochs - 1)
             if should_eval:
                 eval_metrics, eval_symbol_usage = self._evaluate(
-                    eval_envs, trainer, q_network, action_prototypes, obs_normalizer, device,
+                    eval_envs,
+                    trainer,
+                    q_network,
+                    action_prototypes,
+                    obs_normalizer,
+                    device,
                 )
                 last_eval_metrics = eval_metrics
             else:

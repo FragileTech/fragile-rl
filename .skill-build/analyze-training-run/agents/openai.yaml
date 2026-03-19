@@ -1,0 +1,4 @@
+interface:
+  display_name: "Training Run Analyst"
+  short_description: "Analyze training logs and convergence"
+  default_prompt: "Use $analyze-training-run to read this training log and produce a convergence report with failures, wins, and fixes."

@@ -21,12 +21,36 @@ class GradientReversalFunction(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, x, alpha):
+        """Pass input through unchanged, saving alpha for the backward pass.
+
+        Args:
+            ctx: Autograd function context for saving tensors between forward
+                and backward.
+            x (torch.Tensor): Input tensor of arbitrary shape.
+            alpha (torch.Tensor): Scalar tensor controlling gradient reversal
+                strength.
+
+        Returns:
+            torch.Tensor: Clone of the input tensor ``x``, unchanged.
+        """
         # Forward is a pure pass-through; the only effect of GRL is in backward.
         ctx.save_for_backward(alpha)
         return x.clone()
 
     @staticmethod
     def backward(ctx, grad_output):
+        """Reverse gradients by multiplying with negative alpha.
+
+        Args:
+            ctx: Autograd function context containing the saved alpha tensor.
+            grad_output (torch.Tensor): Gradient of the loss with respect to
+                the output of ``forward``.
+
+        Returns:
+            tuple[torch.Tensor, None]: A pair where the first element is the
+                negated and alpha-scaled gradient for ``x``, and the second
+                element is ``None`` (no gradient for the ``alpha`` input).
+        """
         (alpha,) = ctx.saved_tensors
         # Multiply by -alpha so the upstream encoder is optimized to *hurt*
         # this probe while the probe itself still learns normally.
@@ -37,10 +61,25 @@ class GradientReversalLayer(nn.Module):
     """Wraps GradientReversalFunction as an nn.Module."""
 
     def __init__(self, alpha: float = 1.0):
+        """Initialize the gradient reversal layer.
+
+        Args:
+            alpha (float): Scaling factor for the reversed gradient. Registered
+                as a non-learnable buffer so it persists in checkpoints.
+        """
         super().__init__()
         self.register_buffer("alpha", torch.tensor(alpha))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """Apply gradient reversal to the input tensor.
+
+        Args:
+            x (torch.Tensor): Input tensor of arbitrary shape.
+
+        Returns:
+            torch.Tensor: Tensor identical to ``x`` in the forward pass. In the
+                backward pass, gradients are negated and scaled by ``alpha``.
+        """
         return GradientReversalFunction.apply(x, self.alpha)
 
 
@@ -85,6 +124,17 @@ class EnclosureProbe(nn.Module):
         hidden_dim: int = 128,
         alpha: float = 1.0,
     ):
+        """Initialize the enclosure probe with full and baseline sub-networks.
+
+        Args:
+            chart_dim (int): Dimension of the chart embedding (c_bar).
+            action_dim (int): Dimension of the action vector.
+            ztex_dim (int): Dimension of the texture residual z_tex.
+            num_charts (int): Number of chart classes in the atlas.
+            codes_per_chart (int): Number of VQ codes per chart.
+            hidden_dim (int): Hidden layer width for both probe MLPs.
+            alpha (float): Initial gradient reversal layer alpha scaling.
+        """
         super().__init__()
         self.grl = GradientReversalLayer(alpha=alpha)
         self.num_states = num_charts * codes_per_chart
@@ -271,6 +321,25 @@ class DynamicsTransitionModel(nn.Module):
         dyn_codes_per_chart: int | None = None,
         hidden_dim: int = 128,
     ):
+        """Initialize the dynamics transition model.
+
+        Args:
+            chart_dim (int): Dimension of the chart embedding.
+            action_dim (int): Dimension of the action vector.
+            num_charts (int): Number of chart classes in the atlas.
+            codes_per_chart (int | None): Number of VQ codes per chart. At
+                least one of ``codes_per_chart`` or ``dyn_codes_per_chart``
+                must be provided.
+            dyn_codes_per_chart (int | None): Alias for ``codes_per_chart``
+                retained for backward compatibility. Must match
+                ``codes_per_chart`` when both are set.
+            hidden_dim (int): Hidden layer width for the transition MLP.
+
+        Raises:
+            ValueError: If neither ``codes_per_chart`` nor
+                ``dyn_codes_per_chart`` is provided, or if both are provided
+                and they disagree.
+        """
         super().__init__()
         if codes_per_chart is None:
             if dyn_codes_per_chart is None:
@@ -300,7 +369,28 @@ class DynamicsTransitionModel(nn.Module):
         code_idx: torch.Tensor | None = None,
         code_features: torch.Tensor | None = None,
     ) -> torch.Tensor:
-        """Returns logits [B, num_states]."""
+        """Predict the next symbolic state given current chart, action, and code.
+
+        Args:
+            chart_embed (torch.Tensor): Chart embedding at time t, shape
+                ``[B, chart_dim]``.
+            action (torch.Tensor): Action vector at time t, shape
+                ``[B, action_dim]``.
+            code_idx (torch.Tensor | None): Current VQ code index, shape
+                ``[B]`` with dtype long. Used to look up a learned embedding
+                when ``code_features`` is not provided.
+            code_features (torch.Tensor | None): Pre-computed quantized
+                dynamics feature vector, shape ``[B, chart_dim]``. When
+                provided, bypasses the embedding lookup from ``code_idx``.
+
+        Returns:
+            torch.Tensor: Logits over the flattened (chart, code) state space,
+                shape ``[B, num_states]`` where
+                ``num_states = num_charts * codes_per_chart``.
+
+        Raises:
+            ValueError: If both ``code_idx`` and ``code_features`` are None.
+        """
         if code_features is None:
             if code_idx is None:
                 msg = "Either code_idx or code_features must be provided."
@@ -325,7 +415,30 @@ def compute_dyn_transition_loss(
     K_code_dyn_tp1: torch.Tensor,
     code_features_t: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """CE loss + accuracy metric for dynamics transition prediction."""
+    """Compute cross-entropy loss and accuracy for dynamics transition prediction.
+
+    Args:
+        model (DynamicsTransitionModel): The dynamics transition model to
+            evaluate.
+        chart_embed_t (torch.Tensor): Chart embedding at time t, shape
+            ``[B, chart_dim]``.
+        action_t (torch.Tensor): Action at time t, shape ``[B, action_dim]``.
+        K_code_dyn_t (torch.Tensor): Current dynamics VQ code index, shape
+            ``[B]`` with dtype long.
+        K_chart_tp1 (torch.Tensor): Ground-truth chart index at time t+1,
+            shape ``[B]``.
+        K_code_dyn_tp1 (torch.Tensor): Ground-truth dynamics code index at
+            time t+1, shape ``[B]``.
+        code_features_t (torch.Tensor | None): Optional pre-computed quantized
+            dynamics features at time t, shape ``[B, D]``. Passed through to
+            the model's ``code_features`` argument.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, float]]: A pair of:
+            - loss: Scalar cross-entropy loss over the flattened symbolic state.
+            - diagnostics: Dict with keys ``"dyn_trans_ce"`` (float, CE loss
+              value) and ``"dyn_trans_acc"`` (float, top-1 accuracy).
+    """
     # As above, flatten the next (chart, code) pair into one categorical target.
     target = K_chart_tp1.long() * model.codes_per_chart + K_code_dyn_tp1.long()
     logits = model(
@@ -396,10 +509,42 @@ def compute_dynamics_markov_loss(
     the frozen macro geometry ``c_bar_t`` plus the trainable dynamics symbol.
     This makes the closure signal trainable without changing the Phase 1 atlas.
 
+    Args:
+        atlas_encoder (torch.nn.Module): Encoder module that exposes a
+            ``dynamics_vq`` method for quantizing chart-local latents into
+            the auxiliary dynamics codebook.
+        dyn_trans_model (DynamicsTransitionModel | None): Dynamics transition
+            model. When ``None``, this function returns zero loss immediately.
+        v_local_all (torch.Tensor): Chart-local latent vectors, shape
+            ``[B, H, D]`` where H is the sequence/horizon length and D is
+            the latent dimension.
+        router_weights_all (torch.Tensor): Soft routing weights for each
+            step, shape ``[B, H, N_c]`` where N_c is the number of charts.
+        chart_embed_all (torch.Tensor): Chart embeddings for all steps,
+            shape ``[B, H, chart_dim]``.
+        chart_targets_all (torch.Tensor): Ground-truth chart indices, shape
+            ``[B, H]``.
+        actions (torch.Tensor): Action vectors for all transitions, shape
+            ``[B, T, action_dim]`` where T >= H-1.
+        transition_weight (float): Scalar weight applied to the transition
+            cross-entropy term.
+        zeno_weight (float): Scalar weight for the Zeno smoothness
+            regularizer. Set to 0.0 to disable.
+        zeno_mode (str): Divergence mode for the Zeno loss, either ``"kl"``
+            or ``"jsd"``.
+
     Returns:
-        total_loss: VQ + weighted transition CE + optional zeno smoothness.
-        metrics: Logged diagnostics for the dynamics-symbol auxiliary.
-        K_code_dyn_all: [B, H] hard dynamics-code assignments, or None.
+        tuple[torch.Tensor, dict[str, float], torch.Tensor | None]: A triple
+            of:
+            - total_loss: Combined VQ commitment loss, weighted transition CE,
+              and optional Zeno smoothness penalty.
+            - metrics: Dict of logged diagnostics with keys ``"dyn_vq"``,
+              ``"dyn_trans_ce"``, ``"dyn_trans_acc"``, ``"dyn_zeno"``,
+              ``"dyn_state_flip_rate"``, ``"dyn_state_entropy"``,
+              ``"dyn_state_max_prob"``, and ``"dyn_code_flip_rate"``.
+            - K_code_dyn_all: Hard dynamics-code assignments of shape
+              ``[B, H]``, or ``None`` when the model is disabled or the
+              sequence is too short.
     """
     zero = v_local_all.new_tensor(0.0)
     metrics = {
@@ -496,12 +641,34 @@ def compute_dynamics_markov_loss(
 def _state_index(
     chart_idx: torch.Tensor, code_idx: torch.Tensor, codes_per_chart: int
 ) -> torch.Tensor:
-    """Flatten `(chart, code)` symbolic state indices."""
+    """Flatten a (chart, code) pair into a single symbolic state index.
+
+    Args:
+        chart_idx (torch.Tensor): Chart indices of arbitrary shape.
+        code_idx (torch.Tensor): Code indices, same shape as ``chart_idx``.
+        codes_per_chart (int): Number of VQ codes per chart, used as the
+            stride when flattening.
+
+    Returns:
+        torch.Tensor: Flattened state indices of the same shape as the inputs,
+            computed as ``chart_idx * codes_per_chart + code_idx``.
+    """
     return chart_idx.long() * int(codes_per_chart) + code_idx.long()
 
 
 def _masked_mean(values: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """Mean over entries where ``mask`` is one."""
+    """Compute the mean of ``values`` over entries where ``mask`` is nonzero.
+
+    Args:
+        values (torch.Tensor): Values to average, arbitrary shape.
+        mask (torch.Tensor): Binary mask of the same shape as ``values``.
+            Entries with mask == 1 are included in the mean; others are
+            excluded.
+
+    Returns:
+        torch.Tensor: Scalar masked mean. Returns 0.0 when no entries are
+            valid (denominator is clamped to 1 to avoid division by zero).
+    """
     denom = mask.sum().clamp(min=1.0)
     return (values * mask).sum() / denom
 
@@ -516,7 +683,48 @@ def _symbolic_transition_supervision_losses(
     codes_per_chart: int,
     metric_prefix: str,
 ) -> tuple[torch.Tensor, torch.Tensor, dict[str, float]]:
-    """Return replay-supervised code and full-symbol losses for a symbolic transition."""
+    """Compute replay-supervised code and full-symbol losses for a symbolic transition.
+
+    Given predicted probability distributions over codes and full symbolic
+    states, this function computes negative-log-likelihood losses against
+    ground-truth targets and returns detailed accuracy metrics.
+
+    Args:
+        state_probs (torch.Tensor): Predicted probabilities over the
+            flattened (chart, code) state space, shape
+            ``[B, T, num_states]`` (or any leading dimensions followed by
+            ``num_states``).
+        code_probs (torch.Tensor): Predicted per-chart code probabilities,
+            shape ``[B, T, num_charts, codes_per_chart]`` (or matching
+            leading dimensions).
+        target_charts (torch.Tensor): Ground-truth chart indices, shape
+            ``[B, T]``.
+        target_codes (torch.Tensor): Ground-truth code indices, shape
+            ``[B, T]``.
+        valid_mask (torch.Tensor): Binary mask indicating valid transitions,
+            shape ``[B, T]``. Only positions with mask == 1 contribute to
+            the loss and metrics.
+        codes_per_chart (int): Number of VQ codes per chart, used to
+            flatten/unflatten (chart, code) pairs.
+        metric_prefix (str): String prefix prepended to all metric keys in
+            the returned diagnostics dict.
+
+    Returns:
+        tuple[torch.Tensor, torch.Tensor, dict[str, float]]: A triple of:
+            - L_code: Scalar masked negative-log-likelihood of the target
+              code given the target chart.
+            - L_symbol: Scalar masked negative-log-likelihood of the target
+              full symbolic state.
+            - metrics: Dict with the following keys (all prefixed by
+              ``metric_prefix``):
+              ``"/L_code"``, ``"/L_symbol"``, ``"/code_nll"``,
+              ``"/symbol_nll"``, ``"/code_acc"`` (code accuracy given target
+              chart), ``"/chart_acc_from_symbol"`` (chart accuracy from
+              argmax of full state), ``"/symbol_acc"`` (full state accuracy),
+              ``"/symbol_code_acc"`` (code accuracy from argmax of full
+              state), ``"/state_entropy"`` (mean entropy of the full-state
+              distribution).
+    """
     # Collapse batch/time axes so the bookkeeping below can operate on one flat
     # list of transitions regardless of the original rollout shape.
     flat_state_probs = state_probs.reshape(-1, state_probs.shape[-1])

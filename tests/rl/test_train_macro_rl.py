@@ -5,8 +5,8 @@ from __future__ import annotations
 import importlib
 from pathlib import Path
 
-import numpy as np
 from hydra.utils import instantiate
+import numpy as np
 from omegaconf import OmegaConf
 
 from fragile.__main__ import run
@@ -64,49 +64,47 @@ def _make_runner(
     **overrides,
 ) -> train_macro_rl_module.MacroRLRunner:
     cfg = OmegaConf.load(CONFIG_PATH)
-    test_overrides = OmegaConf.create(
-        {
-            "output_dir": str(tmp_path / "macro-rl"),
-            "epochs": 1,
-            "seed_episodes": 2,
-            "collect_episodes_per_epoch": 1,
-            "eval_episodes": 1,
-            "num_collect_envs": 2,
-            "num_eval_envs": 2,
-            "updates_per_epoch": 1,
-            "batch_size": 2,
-            "replay_capacity": 64,
-            "max_episode_steps": 4,
-            "device": "cpu",
-            "save_every": 1,
-            "log_every": 1,
-            "eval_every": 1,
-            "sigma_motor": 0.0,
-            "agent": {
-                "enclosure_hidden_dim": 16,
-                "markov_hidden_dim": 16,
-                "obs_encoder": {
-                    "hidden_dim": 24,
-                    "latent_dim": 4,
-                    "num_charts": 2,
-                    "codes_per_chart": 2,
-                    "chart_ot_iters": 4,
-                },
-                "act_encoder": {
-                    "hidden_dim": 24,
-                    "latent_dim": 4,
-                    "num_charts": 2,
-                    "codes_per_chart": 2,
-                    "chart_ot_iters": 4,
-                },
+    test_overrides = OmegaConf.create({
+        "output_dir": str(tmp_path / "macro-rl"),
+        "epochs": 1,
+        "seed_episodes": 2,
+        "collect_episodes_per_epoch": 1,
+        "eval_episodes": 1,
+        "num_collect_envs": 2,
+        "num_eval_envs": 2,
+        "updates_per_epoch": 1,
+        "batch_size": 2,
+        "replay_capacity": 64,
+        "max_episode_steps": 4,
+        "device": "cpu",
+        "save_every": 1,
+        "log_every": 1,
+        "eval_every": 1,
+        "sigma_motor": 0.0,
+        "agent": {
+            "enclosure_hidden_dim": 16,
+            "markov_hidden_dim": 16,
+            "obs_encoder": {
+                "hidden_dim": 24,
+                "latent_dim": 4,
+                "num_charts": 2,
+                "codes_per_chart": 2,
+                "chart_ot_iters": 4,
             },
-            "trainer": {
-                "weight_enclosure_encoder": 0.0,
-                "weight_enclosure_probe": 0.0,
-                "weight_markov_shape": 0.0,
+            "act_encoder": {
+                "hidden_dim": 24,
+                "latent_dim": 4,
+                "num_charts": 2,
+                "codes_per_chart": 2,
+                "chart_ot_iters": 4,
             },
-        }
-    )
+        },
+        "trainer": {
+            "weight_enclosure_encoder": 0.0,
+            "weight_enclosure_probe": 0.0,
+            "weight_markov_shape": 0.0,
+        },
+    })
     merged = OmegaConf.merge(cfg, test_overrides, OmegaConf.create(overrides))
     return instantiate(merged)
 

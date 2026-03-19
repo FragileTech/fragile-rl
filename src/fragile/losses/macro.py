@@ -26,7 +26,18 @@ def _state_index(
     code_idx: torch.Tensor,
     codes_per_chart: int,
 ) -> torch.Tensor:
-    """Flatten ``(chart, code)`` into one symbolic-state class index."""
+    """Flatten ``(chart, code)`` into one symbolic-state class index.
+
+    Args:
+        chart_idx: Hard chart assignment indices of shape ``[B]``.
+        code_idx: Hard code assignment indices of shape ``[B]``.
+        codes_per_chart: Number of codes per chart, used as the stride
+            when flattening the two-level index.
+
+    Returns:
+        torch.Tensor: Flat class indices of shape ``[B]``, computed as
+            ``chart_idx * codes_per_chart + code_idx``.
+    """
     return chart_idx.long() * int(codes_per_chart) + code_idx.long()
 
 
@@ -37,14 +48,35 @@ def _validate_hard_symbol_inputs(
     code_idx: torch.Tensor,
     z_n: torch.Tensor | None = None,
 ) -> None:
-    """Check that chart/code tensors describe hard-routed symbolic states."""
+    """Check that chart/code tensors describe hard-routed symbolic states.
+
+    Validates shapes and dimensional consistency of all inputs required to
+    compose an absolute symbolic or structured state.
+
+    Args:
+        chart_centers: Chart centers in absolute manifold coordinates
+            with expected shape ``[num_charts, latent_dim]``.
+        codebook: Chart-local code centers with expected shape
+            ``[num_charts, codes_per_chart, latent_dim]``.
+        chart_idx: Hard chart assignment indices with expected shape ``[B]``.
+        code_idx: Hard code assignment indices with expected shape ``[B]``.
+        z_n: Optional tangent-space nuisance coordinates with expected shape
+            ``[B, latent_dim]``. When provided, its batch size and latent
+            dimension are also validated.
+
+    Returns:
+        None. Raises ``ValueError`` if any shape or consistency check fails.
+    """
     if chart_centers.dim() != 2:
         msg = "chart_centers must have shape [N_c, D]."
         raise ValueError(msg)
     if codebook.dim() != 3:
         msg = "codebook must have shape [N_c, K, D]."
         raise ValueError(msg)
-    if codebook.shape[0] != chart_centers.shape[0] or codebook.shape[-1] != chart_centers.shape[-1]:
+    if (
+        codebook.shape[0] != chart_centers.shape[0]
+        or codebook.shape[-1] != chart_centers.shape[-1]
+    ):
         msg = "codebook must agree with chart_centers on chart count and latent dimension."
         raise ValueError(msg)
     if chart_idx.dim() != 1 or code_idx.dim() != 1:
@@ -139,7 +171,22 @@ def compose_absolute_structured_state(
 
 
 def _make_probe_mlp(input_dim: int, hidden_dim: int, output_dim: int, dropout: float) -> nn.Module:
-    """Build the small MLP used by each enclosure-probe head."""
+    """Build the small MLP used by each enclosure-probe head.
+
+    Constructs a two-layer MLP with ReLU activation and dropout between the
+    hidden and output layers.
+
+    Args:
+        input_dim: Dimensionality of the input features.
+        hidden_dim: Number of units in the hidden layer.
+        output_dim: Number of output logits (typically the number of
+            symbolic-state classes).
+        dropout: Dropout probability applied after the ReLU activation.
+
+    Returns:
+        nn.Module: An ``nn.Sequential`` module implementing
+            ``Linear -> ReLU -> Dropout -> Linear``.
+    """
     return nn.Sequential(
         nn.Linear(input_dim, hidden_dim),
         nn.ReLU(),
@@ -175,6 +222,29 @@ class AbsoluteEnclosureProbe(nn.Module):
         alpha: float = 1.0,
         dropout: float = 0.1,
     ) -> None:
+        """Initialize the absolute enclosure probe.
+
+        Creates a baseline probe head and three texture-augmented probe heads,
+        each predicting the next observation symbolic state. Gradient reversal
+        layers are applied to the texture inputs so that the encoder is trained
+        adversarially to suppress dynamics-relevant information in textures.
+
+        Args:
+            obs_struct_dim: Dimensionality of observation structured states.
+            act_struct_dim: Dimensionality of action structured states.
+            obs_tex_dim: Dimensionality of observation texture residuals.
+            act_tex_dim: Dimensionality of action texture residuals.
+            num_obs_charts: Number of observation charts (manifold regions).
+            obs_codes_per_chart: Number of discrete codes per observation
+                chart. The total number of prediction classes is
+                ``num_obs_charts * obs_codes_per_chart``.
+            hidden_dim: Number of hidden units in each probe MLP.
+            alpha: Gradient reversal scaling factor applied to texture inputs.
+            dropout: Dropout probability used in each probe MLP.
+
+        Returns:
+            None.
+        """
         super().__init__()
         self.obs_codes_per_chart = obs_codes_per_chart
         self.num_obs_states = num_obs_charts * obs_codes_per_chart
@@ -224,8 +294,13 @@ class AbsoluteEnclosureProbe(nn.Module):
             act_z_tex: Action texture residuals of shape ``[batch, act_tex_dim]``.
 
         Returns:
-            A dictionary containing logits for the baseline, observation-texture,
-            action-texture, and joint-texture heads.
+            dict[str, torch.Tensor]: A dictionary with four keys, each mapping
+                to a logit tensor of shape ``[batch, num_obs_states]``:
+
+                - ``"baseline"``: Logits from the structured-state-only head.
+                - ``"obs"``: Logits from the observation-texture-augmented head.
+                - ``"act"``: Logits from the action-texture-augmented head.
+                - ``"both"``: Logits from the joint-texture-augmented head.
         """
         if u_obs.dim() != 2 or u_act.dim() != 2 or obs_z_tex.dim() != 2 or act_z_tex.dim() != 2:
             msg = "All probe inputs must have shape [B, D]."
@@ -297,7 +372,31 @@ def compute_absolute_enclosure_loss(
         obs_codes_per_chart: Optional override for the observation symbol count.
 
     Returns:
-        ``(loss_encoder, loss_probe, diagnostics)``.
+        tuple[torch.Tensor, torch.Tensor, dict[str, float]]: A three-element
+            tuple ``(loss_encoder, loss_probe, diagnostics)``:
+
+            - ``loss_encoder`` (torch.Tensor): Scalar adversarial encoder loss,
+              the mean cross-entropy over the three texture-bearing heads.
+            - ``loss_probe`` (torch.Tensor): Scalar probe training loss, the
+              mean cross-entropy over all four heads (baseline + three texture).
+            - ``diagnostics`` (dict[str, float]): Monitoring metrics with keys:
+
+              - ``"acc_base"``: Baseline head accuracy.
+              - ``"acc_obs"``: Observation-texture head accuracy.
+              - ``"acc_act"``: Action-texture head accuracy.
+              - ``"acc_both"``: Joint-texture head accuracy.
+              - ``"defect_acc_obs"``: Accuracy gain of obs texture over baseline.
+              - ``"defect_acc_act"``: Accuracy gain of act texture over baseline.
+              - ``"defect_acc_both"``: Accuracy gain of joint texture over baseline.
+              - ``"ce_base"``: Baseline cross-entropy.
+              - ``"ce_obs"``: Observation-texture cross-entropy.
+              - ``"ce_act"``: Action-texture cross-entropy.
+              - ``"ce_both"``: Joint-texture cross-entropy.
+              - ``"defect_ce_obs"``: CE reduction from obs texture vs baseline.
+              - ``"defect_ce_act"``: CE reduction from act texture vs baseline.
+              - ``"defect_ce_both"``: CE reduction from joint texture vs baseline.
+              - ``"loss_encoder"``: Detached encoder loss value.
+              - ``"loss_probe"``: Detached probe loss value.
     """
     if obs_codes_per_chart is None:
         obs_codes_per_chart = probe.obs_codes_per_chart
@@ -372,14 +471,22 @@ def zeno_loss(
 ) -> torch.Tensor:
     """Penalize rapid changes in the soft routing distribution.
 
+    Measures the divergence between consecutive routing weight vectors to
+    encourage temporal smoothness.
+
     Args:
-        w_t: [B, N_c] current routing weights (softmax, has grad).
-        w_t_prev: [B, N_c] previous routing weights (softmax, has grad).
-        mode: "kl" for D_KL(w_t || w_{t-1}), "jsd" for Jensen-Shannon.
-        eps: Floor to prevent log(0).
+        w_t: Current routing weights after softmax, of shape
+            ``[B, num_charts]``. Must sum to 1 along the last dimension.
+        w_t_prev: Previous-timestep routing weights after softmax, of shape
+            ``[B, num_charts]``. Must sum to 1 along the last dimension.
+        mode: Divergence measure to use. ``"kl"`` computes
+            ``D_KL(w_t || w_{t-1})``; ``"jsd"`` computes the
+            Jensen-Shannon divergence between the two distributions.
+        eps: Small floor value clamped onto weights to prevent ``log(0)``.
 
     Returns:
-        Scalar loss, mean over batch.
+        torch.Tensor: Scalar loss (0-dim tensor), the mean divergence over
+            the batch.
     """
     w_t_safe = w_t.clamp(min=eps)
     w_prev_safe = w_t_prev.clamp(min=eps)
@@ -393,6 +500,7 @@ def zeno_loss(
         kl_prev = (w_prev_safe * (w_prev_safe.log() - m.log())).sum(dim=-1)
         return (0.5 * kl_t + 0.5 * kl_prev).mean()
     raise ValueError(f"Unknown zeno_loss mode: {mode}")
+
 
 __all__ = [
     "AbsoluteEnclosureProbe",

@@ -13,7 +13,13 @@ import torch
 from torch import nn
 import torch.nn.functional as F
 
-from fragile.layers.gauge import exp_map_zero, hyperbolic_distance, log_map_zero, mobius_add, project_to_ball
+from fragile.layers.gauge import (
+    exp_map_zero,
+    hyperbolic_distance,
+    log_map_zero,
+    mobius_add,
+    project_to_ball,
+)
 from fragile.layers.primitives import SpectralLinear
 
 
@@ -171,7 +177,9 @@ class ChartTransitionRouter(nn.Module):
         leading_shape = query_point.shape[:-1]
         flat_query = project_to_ball(query_point).reshape(-1, query_point.shape[-1])
         flat_context = context.reshape(-1, context.shape[-1])
-        chart_centers = project_to_ball(chart_centers).to(device=flat_query.device, dtype=flat_query.dtype)
+        chart_centers = project_to_ball(chart_centers).to(
+            device=flat_query.device, dtype=flat_query.dtype
+        )
 
         tau = _routing_temperature(
             flat_query,
@@ -242,11 +250,15 @@ class ConditionalCodeRouter(nn.Module):
         leading_shape = query_point.shape[:-1]
         flat_query = project_to_ball(query_point).reshape(-1, query_point.shape[-1])
         flat_context = context.reshape(-1, context.shape[-1])
-        chart_centers = project_to_ball(chart_centers).to(device=flat_query.device, dtype=flat_query.dtype)
+        chart_centers = project_to_ball(chart_centers).to(
+            device=flat_query.device, dtype=flat_query.dtype
+        )
         codebook = project_to_ball(codebook).to(device=flat_query.device, dtype=flat_query.dtype)
         num_charts, codes_per_chart, _ = codebook.shape
 
-        local_query = project_to_ball(mobius_add(-chart_centers.unsqueeze(0), flat_query.unsqueeze(1)))
+        local_query = project_to_ball(
+            mobius_add(-chart_centers.unsqueeze(0), flat_query.unsqueeze(1))
+        )
         tau = _routing_temperature(
             local_query.reshape(-1, local_query.shape[-1]),
             self.latent_dim,
@@ -258,7 +270,9 @@ class ConditionalCodeRouter(nn.Module):
         base_logits = base_logits / tau.unsqueeze(-1)
 
         context_features = self.context_proj(flat_context)
-        code_keys = self.code_key_proj(log_map_zero(codebook.reshape(num_charts * codes_per_chart, -1)))
+        code_keys = self.code_key_proj(
+            log_map_zero(codebook.reshape(num_charts * codes_per_chart, -1))
+        )
         code_keys = code_keys.reshape(num_charts, codes_per_chart, self.context_dim)
         feature_logits = torch.einsum("bh,nkh->bnk", context_features, code_keys)
         logits = base_logits + self.feature_scale * feature_logits

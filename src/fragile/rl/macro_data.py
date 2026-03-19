@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import torch
 
 from fragile.losses.markov_model import soft_macro_state_distribution
 
-from .env_helpers import ObservationNormalizer, _sample_collection_action
+from .env_helpers import _sample_collection_action, ObservationNormalizer
 from .replay_buffer import SequenceReplayBuffer
+
 
 if TYPE_CHECKING:
     from fragile.agent import FragileAgent
@@ -165,7 +166,9 @@ def transition_valid_mask(dones: torch.Tensor) -> torch.Tensor:
         raise ValueError(msg)
     # Replay windows are sampled from fully valid contiguous sub-sequences, so
     # every adjacent `(t, t+1)` pair is a legitimate transition.
-    return torch.ones(*dones.shape[:-1], dones.shape[-1] - 1, device=dones.device, dtype=torch.bool)
+    return torch.ones(
+        *dones.shape[:-1], dones.shape[-1] - 1, device=dones.device, dtype=torch.bool
+    )
 
 
 def action_stats_from_episodes(
@@ -174,7 +177,9 @@ def action_stats_from_episodes(
     min_std: float = 1e-3,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Compute dataset-level mean/std over real action steps from replay episodes."""
-    real_actions = [episode["actions"][:-1] for episode in episodes if episode["actions"].shape[0] > 1]
+    real_actions = [
+        episode["actions"][:-1] for episode in episodes if episode["actions"].shape[0] > 1
+    ]
     if not real_actions:
         msg = "Need at least one non-empty episode to estimate action stats."
         raise ValueError(msg)
@@ -312,7 +317,9 @@ def fit_action_symbol_prototypes(
     chunk_size: int = 4096,
 ) -> ActionPrototypeTable:
     """Estimate one continuous prototype action per learned macro action symbol."""
-    real_actions = [episode["actions"][:-1] for episode in episodes if episode["actions"].shape[0] > 1]
+    real_actions = [
+        episode["actions"][:-1] for episode in episodes if episode["actions"].shape[0] > 1
+    ]
     action_dim = agent.config.act_encoder.input_dim
     num_actions = agent.num_act_states
     if not real_actions:
@@ -391,7 +398,9 @@ def update_action_symbol_prototypes(
     current_cpu = current.to("cpu")
     means = current_cpu.means.clone()
     update_mask = fresh.valid
-    means[update_mask] = ema * current_cpu.means[update_mask] + (1.0 - ema) * fresh.means[update_mask]
+    means[update_mask] = (
+        ema * current_cpu.means[update_mask] + (1.0 - ema) * fresh.means[update_mask]
+    )
     counts = torch.where(update_mask, fresh.counts, current_cpu.counts)
     valid = current_cpu.valid | fresh.valid
     return ActionPrototypeTable(means=means, counts=counts, valid=valid)
@@ -495,7 +504,9 @@ def action_symbol_to_continuous(
     if prototypes is None or action_idx < 0 or action_idx >= prototypes.means.shape[0]:
         action_mean = np.random.uniform(action_min, action_max).astype(np.float32)
     elif bool(prototypes.valid[action_idx].item()):
-        action_mean = prototypes.means[action_idx].detach().cpu().numpy().astype(np.float32, copy=False)
+        action_mean = (
+            prototypes.means[action_idx].detach().cpu().numpy().astype(np.float32, copy=False)
+        )
     else:
         action_mean = np.random.uniform(action_min, action_max).astype(np.float32)
     return _sample_collection_action(

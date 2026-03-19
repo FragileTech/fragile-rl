@@ -1079,9 +1079,9 @@ class TestPoincareLogMap:
 
     def test_inverse_of_exp_map(self):
         """log_z(exp_z(v)) should recover v (round-trip)."""
-        from fragile.layers.gauge import poincare_exp_map, poincare_log_map
+        from fragile.layers.gauge import poincare_exp_map, poincare_log_map, project_to_ball
 
-        z = torch.randn(B, D) * 0.3
+        z = project_to_ball(torch.randn(B, D) * 0.3)
         v = torch.randn(B, D) * 0.1  # small tangent vector
 
         y = poincare_exp_map(z, v)
@@ -1092,9 +1092,9 @@ class TestPoincareLogMap:
 
     def test_zero_tangent_gives_basepoint(self):
         """exp_z(0) = z, so log_z(z) should be ~0."""
-        from fragile.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map, project_to_ball
 
-        z = torch.randn(B, D) * 0.3
+        z = project_to_ball(torch.randn(B, D) * 0.3)
         v = poincare_log_map(z, z)
         assert torch.allclose(v, torch.zeros_like(v), atol=1e-4), (
             f"log_z(z) not zero: max {v.abs().max()}"
@@ -1102,19 +1102,19 @@ class TestPoincareLogMap:
 
     def test_output_shape(self):
         """Output should be [B, D] tangent vector."""
-        from fragile.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map, project_to_ball
 
-        z = torch.randn(B, D) * 0.3
-        y = torch.randn(B, D) * 0.3
+        z = project_to_ball(torch.randn(B, D) * 0.3)
+        y = project_to_ball(torch.randn(B, D) * 0.3)
         v = poincare_log_map(z, y)
         assert v.shape == (B, D)
         assert torch.isfinite(v).all()
 
     def test_near_boundary(self):
         """Should be finite even near the Poincare ball boundary."""
-        from fragile.layers.gauge import poincare_log_map
+        from fragile.layers.gauge import poincare_log_map, project_to_ball
 
-        z = torch.randn(B, D) * 0.3
+        z = project_to_ball(torch.randn(B, D) * 0.3)
         y = torch.randn(B, D)
         y = y / y.norm(dim=-1, keepdim=True) * 0.95  # near boundary
         v = poincare_log_map(z, y)
@@ -1125,10 +1125,11 @@ class TestPoincareLogMap:
         from fragile.layers.gauge import (
             hyperbolic_distance,
             poincare_log_map,
+            project_to_ball,
         )
 
-        z = torch.randn(B, D) * 0.3
-        y = torch.randn(B, D) * 0.3
+        z = project_to_ball(torch.randn(B, D) * 0.3)
+        y = project_to_ball(torch.randn(B, D) * 0.3)
 
         v = poincare_log_map(z, y)
         # Tangent norm at z: ||v||_z = lambda(z) * ||v||_E

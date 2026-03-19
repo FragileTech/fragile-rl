@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import importlib
 import json
-import time
 from pathlib import Path
+import time
 
 from click.testing import CliRunner
+from hydra.utils import instantiate
+from omegaconf import OmegaConf
 import torch
 from torch.utils.data import DataLoader
 
@@ -16,9 +18,6 @@ from fragile.checkpoints import load_checkpoint
 from fragile.losses.macro import compute_absolute_enclosure_loss
 from fragile.losses.markov_model import compute_markov_transition_loss
 from fragile.vla.extract_features import VLAFeatureDataset
-
-from hydra.utils import instantiate
-from omegaconf import OmegaConf
 
 
 train_geometry_module = importlib.import_module("fragile.commands.train_geometry")
@@ -59,41 +58,39 @@ def _make_runner(
 ) -> train_geometry_module.GeometryTrainingRunner:
     """Build a GeometryTrainingRunner with small test dimensions."""
     cfg = OmegaConf.load(CONFIG_PATH)
-    test_overrides = OmegaConf.create(
-        {
-            "feature_cache_dir": str(cache_dir),
-            "output_dir": str(output_dir),
-            "epochs": 1,
-            "batch_size": 2,
-            "sequence_length": 2,
-            "device": "cpu",
-            "log_every": 1,
-            "save_every": 1,
-            "agent": {
-                "enclosure_hidden_dim": 32,
-                "obs_encoder": {
-                    "hidden_dim": 24,
-                    "latent_dim": 4,
-                    "num_charts": 4,
-                    "codes_per_chart": 4,
-                    "chart_ot_iters": 4,
-                    "w_jump": 0.1,
-                    "w_jump_warmup": 0,
-                    "w_jump_ramp_end": 1,
-                },
-                "act_encoder": {
-                    "hidden_dim": 24,
-                    "latent_dim": 4,
-                    "num_charts": 2,
-                    "codes_per_chart": 3,
-                    "chart_ot_iters": 4,
-                    "w_jump": 0.1,
-                    "w_jump_warmup": 0,
-                    "w_jump_ramp_end": 1,
-                },
+    test_overrides = OmegaConf.create({
+        "feature_cache_dir": str(cache_dir),
+        "output_dir": str(output_dir),
+        "epochs": 1,
+        "batch_size": 2,
+        "sequence_length": 2,
+        "device": "cpu",
+        "log_every": 1,
+        "save_every": 1,
+        "agent": {
+            "enclosure_hidden_dim": 32,
+            "obs_encoder": {
+                "hidden_dim": 24,
+                "latent_dim": 4,
+                "num_charts": 4,
+                "codes_per_chart": 4,
+                "chart_ot_iters": 4,
+                "w_jump": 0.1,
+                "w_jump_warmup": 0,
+                "w_jump_ramp_end": 1,
             },
-        }
-    )
+            "act_encoder": {
+                "hidden_dim": 24,
+                "latent_dim": 4,
+                "num_charts": 2,
+                "codes_per_chart": 3,
+                "chart_ot_iters": 4,
+                "w_jump": 0.1,
+                "w_jump_warmup": 0,
+                "w_jump_ramp_end": 1,
+            },
+        },
+    })
     merged = OmegaConf.merge(cfg, test_overrides, OmegaConf.create(overrides))
     return instantiate(merged)
 
@@ -374,7 +371,7 @@ def test_train_geometry_profile_breakdown(tmp_path, capsys) -> None:
     cache_dir = tmp_path / "features"
     _write_sequence_feature_cache(cache_dir)
 
-    runner, train_loader, eval_loader, trainer, batch = _build_runtime(
+    _runner, _train_loader, _eval_loader, trainer, batch = _build_runtime(
         cache_dir,
         tmp_path / "profile",
     )

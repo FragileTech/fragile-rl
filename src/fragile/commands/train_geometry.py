@@ -15,9 +15,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from omegaconf import MISSING
 import torch
 from torch.utils.data import DataLoader
-from omegaconf import MISSING
 from tqdm import tqdm
 
 from fragile.agent import (
@@ -107,11 +107,7 @@ def _print_code_activity(
         if isinstance(chart_counts, (int, float)):
             active = int(chart_counts)
             distribution = ", ".join(
-                (
-                    f"{int(round(100.0 / float(active))):02d}"
-                    if idx < active and active > 0
-                    else "00"
-                )
+                (f"{round(100.0 / float(active)):02d}" if idx < active and active > 0 else "00")
                 for idx in range(int(total_codes))
             )
             return f"{active}/{int(total_codes)} [{distribution}]"
@@ -121,9 +117,7 @@ def _print_code_activity(
             counts = torch.as_tensor(chart_counts, dtype=torch.float32)
         active = int((counts > 0).sum().item())
         probs = counts / counts.sum().clamp_min(1.0)
-        distribution = ", ".join(
-            f"{int(round(100.0 * float(value))):02d}" for value in probs.tolist()
-        )
+        distribution = ", ".join(f"{round(100.0 * float(value)):02d}" for value in probs.tolist())
         return f"{active}/{int(total_codes)} [{distribution}]"
 
     obs_total = trainer.agent.config.obs_encoder.codes_per_chart
@@ -546,9 +540,8 @@ class GeometryTrainingRunner:
                 print("-" * 80)
             last_train_metrics = train_metrics
 
-            should_save = (
-                self.save_every > 0
-                and (((epoch + 1) % self.save_every == 0) or (epoch == self.epochs - 1))
+            should_save = self.save_every > 0 and (
+                ((epoch + 1) % self.save_every == 0) or (epoch == self.epochs - 1)
             )
             if should_save:
                 save_geometry_checkpoint(

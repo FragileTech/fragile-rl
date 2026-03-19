@@ -3,22 +3,23 @@
 from __future__ import annotations
 
 import math
-from typing import TYPE_CHECKING, Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import torch
 
-from .env_helpers import ObservationNormalizer, _flatten_obs
+from .env_helpers import _flatten_obs, ObservationNormalizer
 from .macro_control import (
-    MacroQNetwork,
     epsilon_greedy_macro_actions,
+    MacroQNetwork,
 )
 from .macro_data import (
-    ActionPrototypeTable,
     action_symbol_to_continuous,
+    ActionPrototypeTable,
     build_macro_episode_dict,
     symbolize_observations,
 )
+
 
 if TYPE_CHECKING:
     from fragile.agent import FragileAgent
@@ -34,7 +35,9 @@ def _action_usage_metrics(
             "action_usage_active": 0.0,
             "action_usage_perplexity": 0.0,
         }
-    counts = torch.bincount(torch.tensor(action_indices, dtype=torch.long), minlength=num_actions).float()
+    counts = torch.bincount(
+        torch.tensor(action_indices, dtype=torch.long), minlength=num_actions
+    ).float()
     probs = counts / counts.sum().clamp(min=1.0)
     active = float((counts > 0).sum().item())
     entropy = -(probs[probs > 0] * probs[probs > 0].log()).sum()
@@ -81,10 +84,12 @@ def _finalize_rollout(
         "action_indices": list(rollout["action_indices"]),
         "obs_state_indices": list(rollout["obs_state_indices"]),
     }
-    metrics.update(_action_usage_metrics(
-        rollout["action_indices"],
-        0 if q_network is None else q_network.num_actions,
-    ))
+    metrics.update(
+        _action_usage_metrics(
+            rollout["action_indices"],
+            0 if q_network is None else q_network.num_actions,
+        )
+    )
     return episode, metrics
 
 
