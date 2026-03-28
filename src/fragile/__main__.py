@@ -130,7 +130,7 @@ def macro_rl(args):
     """Train the standalone off-policy macro RL agent.
 
     Uses Hydra-style key=value overrides, e.g.:
-        uv run fragile macro-rl epochs=200 domain=cartpole task=swingup
+        uv run fragile macro-rl epochs=200 domain=cartpole task=balance
     """
     import sys
 

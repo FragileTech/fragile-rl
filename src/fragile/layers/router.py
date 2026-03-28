@@ -115,6 +115,15 @@ class CovariantChartRouter(nn.Module):
         tensor. In ``forward`` this term is added to the projected latent and
         optional feature projections before comparing against transported chart
         queries.
+
+        Args:
+            z: Latent states of shape ``[batch, latent_dim]``.
+
+        Returns:
+            A tensor of shape ``[batch, key_dim]`` containing the quadratic
+            curvature correction for each sample, obtained by contracting the
+            per-sample outer product ``z z^T`` with the learned parameter
+            ``self.q_gamma``.
         """
         # Quadratic term captures Christoffel-symbol curvature corrections.
         z_outer = z.unsqueeze(2) * z.unsqueeze(1)  # [B, D, D]
@@ -126,6 +135,15 @@ class CovariantChartRouter(nn.Module):
         The radius is clamped to stay inside the unit ball before evaluating
         ``lambda(z) = 2 / (1 - |z|^2 + eps)`` so transport and distance-related
         calculations remain finite close to the boundary.
+
+        Args:
+            z: Latent states of shape ``[batch, latent_dim]``.
+
+        Returns:
+            A tensor of shape ``[batch, 1]`` containing the conformal factor
+            ``lambda(z) = 2 / (1 - |z|^2 + eps)`` for each sample. The
+            trailing dimension is kept so the result broadcasts naturally
+            with per-chart tensors.
         """
         r2 = (z**2).sum(dim=-1, keepdim=True)
         r2 = torch.clamp(r2, max=1.0 - self.transport_eps)
@@ -188,6 +206,15 @@ class CovariantChartRouter(nn.Module):
         boundary, making routing more selective for high-radius latent states.
         Floors on both the denominator and the final value keep the temperature
         finite and nonzero.
+
+        Args:
+            z: Latent states of shape ``[batch, latent_dim]``.
+
+        Returns:
+            A tensor of shape ``[batch]`` containing the routing temperature
+            for each sample, computed as
+            ``sqrt(latent_dim) * (1 - |z|^2) / 2`` and clamped to at least
+            ``self.tau_min``.
         """
         # Router energies are hyperbolic distances in the latent manifold, so
         # their Gibbs temperature should scale with the latent geometry, not

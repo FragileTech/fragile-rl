@@ -250,7 +250,19 @@ def project_to_ball(
     max_norm: float = 0.99,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Project points to interior of the Poincare ball."""
+    """Project points to the interior of the Poincare ball.
+
+    Clamps the norm of each point so that it does not exceed ``max_norm``,
+    keeping all points strictly inside the ball for numerical stability.
+
+    Args:
+        z: [..., D] points that may lie outside or on the boundary of the ball.
+        max_norm: Maximum allowed norm after projection.
+        eps: Small constant to avoid division by zero when computing norms.
+
+    Returns:
+        Projected points with shape [..., D] whose norms are at most ``max_norm``.
+    """
     norm = z.norm(dim=-1, keepdim=True).clamp(min=eps)
     scale = (max_norm / norm).clamp(max=1.0)
     return z * scale
@@ -261,7 +273,20 @@ def smooth_tangent_to_ball(
     max_norm: float = 0.99,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Map unconstrained tangent vectors smoothly into the Poincare ball."""
+    """Map unconstrained tangent vectors smoothly into the Poincare ball.
+
+    Applies a soft saturation (tanh) to the tangent vector norm before
+    mapping through the exponential map at the origin, ensuring the
+    resulting point stays well inside the ball boundary.
+
+    Args:
+        v: [..., D] unconstrained tangent vectors in Euclidean space.
+        max_norm: Maximum norm of the image inside the ball.
+        eps: Small constant to avoid division by zero when computing norms.
+
+    Returns:
+        Points with shape [..., D] inside the Poincare ball with norm < ``max_norm``.
+    """
     tangent_cap = math.atanh(max_norm)
     v_norm = v.norm(dim=-1, keepdim=True).clamp(min=eps)
     tangent_norm = tangent_cap * torch.tanh(v_norm / tangent_cap)
@@ -274,7 +299,21 @@ def poincare_weighted_mean(
     weights: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Approximate hyperbolic barycenter using log/exp maps at the origin."""
+    """Approximate hyperbolic barycenter using log/exp maps at the origin.
+
+    Computes a weighted Frechet mean approximation by lifting points to the
+    tangent space at the origin, computing the weighted average there, and
+    mapping back to the ball.
+
+    Args:
+        points: [N, D] or [B, N, D] points in the Poincare ball. When 2-D the
+            points are broadcast across the batch dimension of ``weights``.
+        weights: [B, N] non-negative weights for each point.
+        eps: Small constant to avoid division by zero during weight normalisation.
+
+    Returns:
+        Weighted barycenter with shape [B, D] in the Poincare ball.
+    """
     if points.dim() == 2:
         points = points.unsqueeze(0).expand(weights.shape[0], -1, -1)
     w = weights.unsqueeze(-1)
@@ -289,7 +328,20 @@ def poincare_weighted_mean_per_chart(
     weights: torch.Tensor,
     eps: float = 1e-6,
 ) -> torch.Tensor:
-    """Per-chart hyperbolic barycenter for codebook soft assignment."""
+    """Per-chart hyperbolic barycenter for codebook soft assignment.
+
+    Similar to :func:`poincare_weighted_mean` but operates over an extra
+    chart (codebook) dimension, computing one barycenter per chart entry.
+
+    Args:
+        points: [N, C, D] codebook points in the Poincare ball, where N is the
+            number of source points and C is the number of charts.
+        weights: [B, N, C] soft-assignment weights for each (point, chart) pair.
+        eps: Small constant to avoid division by zero during weight normalisation.
+
+    Returns:
+        Per-chart barycenters with shape [B, C, D] in the Poincare ball.
+    """
     points_exp = points.unsqueeze(0).expand(weights.shape[0], -1, -1, -1)
     tangent = log_map_zero(points_exp)
     w = weights.unsqueeze(-1)
@@ -304,7 +356,21 @@ def poincare_temperature(
     tau_min: float,
     tau_denom_min: float,
 ) -> torch.Tensor:
-    """Compute position-dependent temperature for Poincare ball."""
+    """Compute position-dependent temperature for the Poincare ball.
+
+    The temperature decreases as points approach the boundary of the ball,
+    making attention scores sharper near the edge where the metric blows up.
+
+    Args:
+        z: [..., D] positions in the Poincare ball.
+        key_dim: Dimensionality of the key vectors used for scaling.
+        tau_min: Minimum allowed temperature to prevent division by zero.
+        tau_denom_min: Minimum clamp for the denominator ``(1 - |z|^2)`` to
+            ensure numerical stability near the boundary.
+
+    Returns:
+        Temperature values with shape [...], clamped to be at least ``tau_min``.
+    """
     r2 = (z**2).sum(dim=-1)
     denom = (1.0 - r2).clamp(min=tau_denom_min)
     tau = math.sqrt(key_dim) * denom / 2.0
@@ -319,7 +385,23 @@ def poincare_hyperbolic_score(
     tau_denom_min: float,
     eps: float,
 ) -> torch.Tensor:
-    """Compute hyperbolic distance-based scores with metric temperature."""
+    """Compute hyperbolic distance-based scores with metric temperature.
+
+    For each input point, computes the negative hyperbolic distance to every
+    center, scaled by a position-dependent temperature. Higher scores indicate
+    closer proximity in hyperbolic space.
+
+    Args:
+        z: [B, D] query points in the Poincare ball.
+        centers: [N_c, D] center (codebook) points in the Poincare ball.
+        key_dim: Key dimensionality used for temperature scaling.
+        tau_min: Minimum temperature clamp passed to :func:`poincare_temperature`.
+        tau_denom_min: Denominator clamp passed to :func:`poincare_temperature`.
+        eps: Small constant for numerical stability in distance computation.
+
+    Returns:
+        Scores with shape [B, N_c] where higher values mean closer distance.
+    """
     z_exp = z.unsqueeze(1)  # [B, 1, D]
     c_exp = centers.unsqueeze(0)  # [1, N_c, D]
     diff = z_exp - c_exp
@@ -334,7 +416,21 @@ def poincare_hyperbolic_score(
 
 
 def as_tangent(z: Tensor, assume_tangent: bool) -> Tensor:
-    """Return tangent vectors; map from ball if needed."""
+    """Return tangent vectors, mapping from the ball if needed.
+
+    When ``assume_tangent`` is True the input is returned as-is. Otherwise
+    the input is treated as a point in the Poincare ball: it is first
+    projected inside the ball and then mapped to the tangent space at the
+    origin via the logarithmic map.
+
+    Args:
+        z: [..., D] either tangent vectors or points in the Poincare ball.
+        assume_tangent: If True, ``z`` is already in tangent space and is
+            returned unchanged. If False, ``z`` is mapped from the ball.
+
+    Returns:
+        Tangent vectors with shape [..., D] at the origin.
+    """
     if assume_tangent:
         return z
     return log_map_zero(project_to_ball(z))
@@ -344,27 +440,36 @@ class ConformalMetric(nn.Module):
     """Poincare ball/disk conformal metric utilities."""
 
     def __init__(self, epsilon: float = 1e-6) -> None:
+        """Initialise the conformal metric module.
+
+        Args:
+            epsilon: Small constant for numerical stability when computing
+                the conformal factor near the ball boundary.
+        """
         super().__init__()
         self.epsilon = epsilon
 
     def conformal_factor(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute conformal factor lambda(z).
+        """Compute conformal factor lambda(z) = 2 / (1 - |z|^2).
 
         Args:
-            z: [B, d] positions
+            z: [B, d] positions inside the Poincare ball.
 
         Returns:
-            lambda_z: [B, 1] conformal factors
+            Conformal factors with shape [B, 1].
         """
         r_sq = (z**2).sum(dim=-1, keepdim=True)
         r_sq = torch.clamp(r_sq, max=1.0 - self.epsilon)
         return 2.0 / (1.0 - r_sq + self.epsilon)
 
     def metric(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute metric tensor G_ij(z).
+        """Compute metric tensor G_ij(z) = lambda(z)^2 * I.
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
 
         Returns:
-            g: [B, d, d] metric tensors
+            Metric tensors with shape [B, d, d].
         """
         _, d = z.shape
         lambda_sq = self.conformal_factor(z) ** 2
@@ -372,10 +477,13 @@ class ConformalMetric(nn.Module):
         return lambda_sq.unsqueeze(-1) * eye
 
     def metric_inv(self, z: torch.Tensor) -> torch.Tensor:
-        """Compute inverse metric tensor G^{ij}(z).
+        """Compute inverse metric tensor G^{ij}(z) = I / lambda(z)^2.
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
 
         Returns:
-            g_inv: [B, d, d] inverse metric tensors
+            Inverse metric tensors with shape [B, d, d].
         """
         _, d = z.shape
         lambda_sq_inv = 1.0 / (self.conformal_factor(z) ** 2 + self.epsilon)
@@ -385,12 +493,15 @@ class ConformalMetric(nn.Module):
     def temperature(self, z: torch.Tensor, d_k: int) -> torch.Tensor:
         """Compute position-dependent attention temperature.
 
+        Temperature is ``sqrt(d_k) / lambda(z)``, decreasing near the ball
+        boundary where the conformal factor diverges.
+
         Args:
-            z: [B, d] positions
-            d_k: key dimension
+            z: [B, d] positions inside the Poincare ball.
+            d_k: Key dimensionality used for scaling.
 
         Returns:
-            tau: [B, 1] temperature values
+            Temperature values with shape [B, 1].
         """
         lambda_z = self.conformal_factor(z)
         return math.sqrt(d_k) / lambda_z
@@ -400,6 +511,14 @@ class RiskAdaptiveConformalMetric(ConformalMetric):
     """Conformal metric adapted by risk tensor: lambda(z,T) = lambda_0(z) * (1 + alpha * ||T||_F)."""
 
     def __init__(self, risk_coupling_alpha: float = 0.1, epsilon: float = 1e-6) -> None:
+        """Initialise the risk-adaptive conformal metric.
+
+        Args:
+            risk_coupling_alpha: Coupling strength that controls how much the
+                Frobenius norm of the risk tensor inflates the conformal factor.
+            epsilon: Small constant for numerical stability when computing
+                the conformal factor near the ball boundary.
+        """
         super().__init__(epsilon=epsilon)
         self.risk_coupling_alpha = risk_coupling_alpha
 
@@ -421,16 +540,50 @@ class RiskAdaptiveConformalMetric(ConformalMetric):
     def conformal_factor(
         self, z: torch.Tensor, risk_tensor: torch.Tensor | None = None
     ) -> torch.Tensor:
+        """Compute risk-adapted conformal factor lambda(z) * (1 + alpha * ||T||_F).
+
+        Multiplies the base Poincare conformal factor by a risk-dependent
+        scaling term so that regions of higher risk have a larger effective
+        curvature.
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
+            risk_tensor: [B, D, D] symmetric risk tensor, or None. When None
+                the base conformal factor is returned unchanged.
+
+        Returns:
+            Risk-scaled conformal factors with shape [B, 1].
+        """
         lam = super().conformal_factor(z)  # [B, 1]
         return lam * self._risk_scale(risk_tensor)
 
     def metric(self, z: torch.Tensor, risk_tensor: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute risk-adapted metric tensor G_ij(z, T) = lambda(z, T)^2 * I.
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
+            risk_tensor: [B, D, D] symmetric risk tensor, or None. When None
+                the metric reduces to the base conformal metric.
+
+        Returns:
+            Metric tensors with shape [B, d, d].
+        """
         _, d = z.shape
         lambda_sq = self.conformal_factor(z, risk_tensor) ** 2
         eye = torch.eye(d, device=z.device, dtype=z.dtype)
         return lambda_sq.unsqueeze(-1) * eye
 
     def metric_inv(self, z: torch.Tensor, risk_tensor: torch.Tensor | None = None) -> torch.Tensor:
+        """Compute inverse of the risk-adapted metric tensor G^{ij}(z, T).
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
+            risk_tensor: [B, D, D] symmetric risk tensor, or None. When None
+                the inverse metric reduces to the base conformal inverse.
+
+        Returns:
+            Inverse metric tensors with shape [B, d, d].
+        """
         _, d = z.shape
         lambda_sq_inv = 1.0 / (self.conformal_factor(z, risk_tensor) ** 2 + self.epsilon)
         eye = torch.eye(d, device=z.device, dtype=z.dtype)
@@ -439,5 +592,19 @@ class RiskAdaptiveConformalMetric(ConformalMetric):
     def temperature(
         self, z: torch.Tensor, d_k: int, risk_tensor: torch.Tensor | None = None
     ) -> torch.Tensor:
+        """Compute risk-adapted position-dependent attention temperature.
+
+        Temperature is inversely proportional to the risk-adapted conformal
+        factor, so regions of higher risk produce sharper attention.
+
+        Args:
+            z: [B, d] positions inside the Poincare ball.
+            d_k: Key dimensionality used for scaling.
+            risk_tensor: [B, D, D] symmetric risk tensor, or None. When None
+                the temperature is identical to the base class result.
+
+        Returns:
+            Temperature values with shape [B, 1].
+        """
         lambda_z = self.conformal_factor(z, risk_tensor)
         return math.sqrt(d_k) / lambda_z

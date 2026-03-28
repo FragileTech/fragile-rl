@@ -16,10 +16,18 @@ from __future__ import annotations
 
 import copy
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
+import json
+import os
 from pathlib import Path
+import platform
+import shlex
+import socket
+import subprocess
+import sys
 from typing import Any
 
-from omegaconf import MISSING
+from omegaconf import MISSING, OmegaConf
 import torch
 from torch import nn
 from tqdm import tqdm
@@ -71,6 +79,9 @@ from fragile.rl.macro_data import (
 from fragile.rl.replay_buffer import SequenceReplayBuffer
 
 
+REPO_ROOT = Path(__file__).resolve().parents[3]
+
+
 def _resolve_device(device_arg: str) -> torch.device:
     """Resolve the requested device string into a concrete torch device."""
     if device_arg == "auto":
@@ -84,6 +95,171 @@ def _linear_schedule(start: float, end: float, step: int, duration: int) -> floa
         return float(end)
     mix = min(max(float(step) / float(duration), 0.0), 1.0)
     return float(start + mix * (end - start))
+
+
+def _utc_now_iso() -> str:
+    """Return a compact UTC timestamp string for manifests."""
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
+
+
+def _jsonable(value: Any) -> Any:
+    """Convert nested runtime values into JSON-safe structures."""
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, torch.device):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _jsonable(val) for key, val in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if value is None or isinstance(value, str | int | float | bool):
+        return value
+    return str(value)
+
+
+def _git_capture(*args: str) -> str | None:
+    """Run one git command against the repo root and return trimmed stdout."""
+    try:
+        result = subprocess.run(
+            ["git", *args],
+            cwd=REPO_ROOT,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+    output = result.stdout.strip()
+    return output or None
+
+
+def _git_metadata() -> dict[str, Any]:
+    """Collect lightweight git metadata for reproducibility."""
+    status = _git_capture("status", "--short")
+    return {
+        "repo_root": str(REPO_ROOT),
+        "commit": _git_capture("rev-parse", "HEAD"),
+        "commit_short": _git_capture("rev-parse", "--short", "HEAD"),
+        "branch": _git_capture("rev-parse", "--abbrev-ref", "HEAD"),
+        "dirty": bool(status),
+        "status_short": [] if status is None else status.splitlines()[:200],
+    }
+
+
+def _system_metadata(device: torch.device | None) -> dict[str, Any]:
+    """Collect host/runtime metadata that is useful when diagnosing runs."""
+    cuda_available = torch.cuda.is_available()
+    metadata = {
+        "python": sys.version.split()[0],
+        "python_executable": sys.executable,
+        "platform": platform.platform(),
+        "hostname": socket.gethostname(),
+        "torch": str(torch.__version__),
+        "cuda_available": cuda_available,
+        "cuda_device_count": int(torch.cuda.device_count()) if cuda_available else 0,
+        "requested_device": None if device is None else str(device),
+        "cwd": os.getcwd(),
+    }
+    if device is not None:
+        metadata["resolved_device"] = str(device)
+        if device.type == "cuda" and cuda_available:
+            metadata["cuda_device_name"] = torch.cuda.get_device_name(device)
+    return metadata
+
+
+def _write_macro_rl_run_artifacts(
+    *,
+    output_dir: Path,
+    resolved_config: dict[str, Any],
+    cli_overrides: list[str],
+    launch_argv: list[str],
+    status: str,
+    started_at_utc: str,
+    config_path: Path,
+    device: torch.device | None = None,
+    obs_dim: int | None = None,
+    act_dim: int | None = None,
+    model_summary: dict[str, int] | None = None,
+    env_steps: int | None = None,
+    update_steps: int | None = None,
+    last_epoch: int | None = None,
+    final_checkpoint: Path | None = None,
+    train_metrics: dict[str, float] | None = None,
+    eval_metrics: dict[str, float] | None = None,
+    error: BaseException | None = None,
+) -> None:
+    """Write a Hydra-like metadata bundle plus a JSON manifest into the run dir."""
+    hydra_dir = output_dir / ".hydra"
+    hydra_dir.mkdir(parents=True, exist_ok=True)
+
+    command = shlex.join(launch_argv) if launch_argv else None
+    metadata = {
+        "schema_version": 1,
+        "status": status,
+        "started_at_utc": started_at_utc,
+        "updated_at_utc": _utc_now_iso(),
+        "config_path": str(config_path),
+        "output_dir": str(output_dir.resolve()),
+        "launch": {
+            "argv": launch_argv,
+            "command": command,
+            "overrides": cli_overrides,
+        },
+        "system": _system_metadata(device),
+        "git": _git_metadata(),
+        "resolved_config": resolved_config,
+        "dimensions": {
+            "obs_dim": obs_dim,
+            "act_dim": act_dim,
+        },
+        "model_summary": model_summary,
+        "progress": {
+            "last_epoch": last_epoch,
+            "env_steps": env_steps,
+            "update_steps": update_steps,
+        },
+        "artifacts": {
+            "final_checkpoint": None if final_checkpoint is None else str(final_checkpoint),
+        },
+        "metrics": {
+            "train": None if train_metrics is None else dict(train_metrics),
+            "eval": None if eval_metrics is None else dict(eval_metrics),
+        },
+        "error": (
+            None
+            if error is None
+            else {
+                "type": type(error).__name__,
+                "message": str(error),
+            }
+        ),
+    }
+
+    (output_dir / "run_metadata.json").write_text(
+        json.dumps(_jsonable(metadata), indent=2, sort_keys=True) + "\n",
+    )
+    OmegaConf.save(config=OmegaConf.create(resolved_config), f=hydra_dir / "config.yaml")
+    OmegaConf.save(config=OmegaConf.create(cli_overrides), f=hydra_dir / "overrides.yaml")
+    OmegaConf.save(
+        config=OmegaConf.create({
+            "runtime": {
+                "status": status,
+                "started_at_utc": started_at_utc,
+                "updated_at_utc": metadata["updated_at_utc"],
+                "config_path": str(config_path),
+                "output_dir": str(output_dir.resolve()),
+                "cwd": os.getcwd(),
+            },
+            "launch": metadata["launch"],
+            "system": metadata["system"],
+            "git": metadata["git"],
+            "dimensions": metadata["dimensions"],
+            "model_summary": model_summary,
+            "progress": metadata["progress"],
+            "artifacts": metadata["artifacts"],
+        }),
+        f=hydra_dir / "hydra.yaml",
+    )
 
 
 def _trainer_batch_from_replay(
@@ -318,8 +494,8 @@ class MacroRLRunner:
         *,
         obs_dim: int,
         act_dim: int,
-    ) -> None:
-        """Print environment info and parameter counts for each module."""
+    ) -> dict[str, int]:
+        """Print environment info and return parameter counts for each module."""
         obs_stack = count_parameters(trainer.agent.obs_encoder) + count_parameters(
             trainer.agent.obs_jump_operator,
         )
@@ -338,6 +514,13 @@ class MacroRLRunner:
         print(f"  Enclosure:  {probe_params:>10,} params")
         print(f"  Markov:     {markov_params:>10,} params")
         print(f"  Q head:     {q_params:>10,} params")
+        return {
+            "obs_stack_params": obs_stack,
+            "act_stack_params": act_stack,
+            "enclosure_params": probe_params,
+            "markov_params": markov_params,
+            "q_head_params": q_params,
+        }
 
     def _evaluate(
         self,
@@ -713,180 +896,264 @@ class MacroRLRunner:
     def run(self) -> None:
         """Execute the standalone off-policy macro RL loop."""
         self._validate_config()
-        (
-            train_envs,
-            eval_envs,
-            trainer,
-            q_network,
-            target_q_network,
-            q_optimizer,
-            replay,
-            device,
-            obs_dim,
-            act_dim,
-        ) = self._setup()
-
-        obs_normalizer: ObservationNormalizer | None = None
-        action_prototypes: ActionPrototypeTable | None = None
-        env_steps = 0
-        update_steps = 0
-        start_epoch = 0
-
         output_dir = Path(self.output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if self.resume:
-            resumed = load_macro_rl_resume_checkpoint(
-                self.resume,
-                trainer,
-                q_network,
-                target_q_network,
-                q_optimizer,
-                replay,
-                device=device,
-            )
-            replay = resumed.replay
-            obs_normalizer = resumed.obs_normalizer
-            action_prototypes = resumed.action_prototypes
-            env_steps = resumed.env_steps
-            update_steps = resumed.update_steps
-            start_epoch = resumed.start_epoch
-        else:
-            replay, obs_normalizer, action_prototypes, env_steps = self._seed_replay(
-                train_envs,
-                trainer,
-                replay,
-                device,
-            )
+        resolved_config = copy.deepcopy(getattr(self, "_resolved_config", self._config_dict()))
+        cli_overrides = list(getattr(self, "_cli_overrides", []))
+        launch_argv = list(getattr(self, "_launch_argv", []))
+        config_path = Path(getattr(self, "_config_path", CONFIG_PATH))
+        started_at_utc = getattr(self, "_run_started_at_utc", _utc_now_iso())
 
-        self._print_model_summary(trainer, q_network, obs_dim=obs_dim, act_dim=act_dim)
+        _write_macro_rl_run_artifacts(
+            output_dir=output_dir,
+            resolved_config=resolved_config,
+            cli_overrides=cli_overrides,
+            launch_argv=launch_argv,
+            status="starting",
+            started_at_utc=started_at_utc,
+            config_path=config_path,
+        )
 
         last_train_metrics: dict[str, float] = {}
         last_eval_metrics: dict[str, float] = {}
-        last_epoch = start_epoch - 1
+        last_epoch = -1
+        env_steps = 0
+        update_steps = 0
+        obs_dim = 0
+        act_dim = 0
+        device: torch.device | None = None
+        model_summary: dict[str, int] | None = None
 
-        epoch_iter = tqdm(
-            range(start_epoch, self.epochs),
-            desc="MacroRL",
-            unit="epoch",
-            initial=start_epoch,
-            total=self.epochs,
-        )
-        for epoch in epoch_iter:
-            last_epoch = epoch
-            epsilon = _linear_schedule(
-                self.epsilon_start,
-                self.epsilon_end,
-                epoch,
-                self.epsilon_decay_epochs,
-            )
-
-            env_steps, action_prototypes, train_symbol_usage, collect_infos = self._collect_epoch(
-                epoch=epoch,
-                epsilon=epsilon,
-                train_envs=train_envs,
-                trainer=trainer,
-                q_network=q_network,
-                action_prototypes=action_prototypes,
-                replay=replay,
-                obs_normalizer=obs_normalizer,
-                device=device,
-                env_steps=env_steps,
-            )
-
-            update_steps, train_metrics = self._train_epoch(
-                epoch=epoch,
-                epsilon=epsilon,
-                trainer=trainer,
-                q_network=q_network,
-                target_q_network=target_q_network,
-                q_optimizer=q_optimizer,
-                replay=replay,
-                obs_normalizer=obs_normalizer,
-                action_prototypes=action_prototypes,
-                device=device,
-                env_steps=env_steps,
-                update_steps=update_steps,
-                train_symbol_usage=train_symbol_usage,
-                collect_infos=collect_infos,
-            )
-
-            should_eval = (epoch % self.eval_every == 0) or (epoch == self.epochs - 1)
-            if should_eval:
-                eval_metrics, eval_symbol_usage = self._evaluate(
-                    eval_envs,
-                    trainer,
-                    q_network,
-                    action_prototypes,
-                    obs_normalizer,
-                    device,
-                )
-                last_eval_metrics = eval_metrics
-            else:
-                eval_metrics = last_eval_metrics
-                eval_symbol_usage = None
-
-            postfix = {
-                "return": format_metric_value(train_metrics.get("collect/return_mean", 0.0)),
-                "q": format_metric_value(train_metrics.get("q/loss", 0.0)),
-            }
-            if should_eval:
-                postfix["eval"] = format_metric_value(eval_metrics.get("eval/return_mean", 0.0))
-            epoch_iter.set_postfix(postfix)
-
-            should_log = (epoch % self.log_every == 0) or (epoch == self.epochs - 1)
-            if should_log:
-                log_epoch(
-                    header="MacroRL",
-                    epoch=epoch,
-                    train_metrics=train_metrics,
-                    eval_metrics=eval_metrics,
-                    train_symbol_usage=train_symbol_usage,
-                    eval_symbol_usage=eval_symbol_usage,
-                    env_steps=env_steps,
-                    update_steps=update_steps,
-                    should_eval=should_eval,
-                    eval_every=self.eval_every,
-                )
-
-            self._save_checkpoint_if_needed(
-                epoch=epoch,
-                output_dir=output_dir,
-                trainer=trainer,
-                q_network=q_network,
-                target_q_network=target_q_network,
-                q_optimizer=q_optimizer,
-                replay=replay,
-                obs_normalizer=obs_normalizer,
-                action_prototypes=action_prototypes,
-                env_steps=env_steps,
-                update_steps=update_steps,
-                train_metrics=train_metrics,
-                eval_metrics=eval_metrics,
-            )
-
-            last_train_metrics = train_metrics
-
-        final_path = output_dir / "macro_rl_final.pt"
-        _save_macro_rl_checkpoint(
-            final_path,
-            _build_checkpoint_payload(
-                self,
+        try:
+            (
+                train_envs,
+                eval_envs,
                 trainer,
                 q_network,
                 target_q_network,
                 q_optimizer,
                 replay,
-                obs_normalizer,
-                action_prototypes,
-                epoch=last_epoch,
+                device,
+                obs_dim,
+                act_dim,
+            ) = self._setup()
+
+            obs_normalizer: ObservationNormalizer | None = None
+            action_prototypes: ActionPrototypeTable | None = None
+            start_epoch = 0
+
+            if self.resume:
+                resumed = load_macro_rl_resume_checkpoint(
+                    self.resume,
+                    trainer,
+                    q_network,
+                    target_q_network,
+                    q_optimizer,
+                    replay,
+                    device=device,
+                )
+                replay = resumed.replay
+                obs_normalizer = resumed.obs_normalizer
+                action_prototypes = resumed.action_prototypes
+                env_steps = resumed.env_steps
+                update_steps = resumed.update_steps
+                start_epoch = resumed.start_epoch
+            else:
+                replay, obs_normalizer, action_prototypes, env_steps = self._seed_replay(
+                    train_envs,
+                    trainer,
+                    replay,
+                    device,
+                )
+
+            model_summary = self._print_model_summary(
+                trainer,
+                q_network,
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+            )
+            _write_macro_rl_run_artifacts(
+                output_dir=output_dir,
+                resolved_config=resolved_config,
+                cli_overrides=cli_overrides,
+                launch_argv=launch_argv,
+                status="running",
+                started_at_utc=started_at_utc,
+                config_path=config_path,
+                device=device,
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+                model_summary=model_summary,
                 env_steps=env_steps,
                 update_steps=update_steps,
+                last_epoch=start_epoch - 1,
+            )
+
+            last_epoch = start_epoch - 1
+
+            epoch_iter = tqdm(
+                range(start_epoch, self.epochs),
+                desc="MacroRL",
+                unit="epoch",
+                initial=start_epoch,
+                total=self.epochs,
+            )
+            for epoch in epoch_iter:
+                last_epoch = epoch
+                epsilon = _linear_schedule(
+                    self.epsilon_start,
+                    self.epsilon_end,
+                    epoch,
+                    self.epsilon_decay_epochs,
+                )
+
+                env_steps, action_prototypes, train_symbol_usage, collect_infos = self._collect_epoch(
+                    epoch=epoch,
+                    epsilon=epsilon,
+                    train_envs=train_envs,
+                    trainer=trainer,
+                    q_network=q_network,
+                    action_prototypes=action_prototypes,
+                    replay=replay,
+                    obs_normalizer=obs_normalizer,
+                    device=device,
+                    env_steps=env_steps,
+                )
+
+                update_steps, train_metrics = self._train_epoch(
+                    epoch=epoch,
+                    epsilon=epsilon,
+                    trainer=trainer,
+                    q_network=q_network,
+                    target_q_network=target_q_network,
+                    q_optimizer=q_optimizer,
+                    replay=replay,
+                    obs_normalizer=obs_normalizer,
+                    action_prototypes=action_prototypes,
+                    device=device,
+                    env_steps=env_steps,
+                    update_steps=update_steps,
+                    train_symbol_usage=train_symbol_usage,
+                    collect_infos=collect_infos,
+                )
+
+                should_eval = (epoch % self.eval_every == 0) or (epoch == self.epochs - 1)
+                if should_eval:
+                    eval_metrics, eval_symbol_usage = self._evaluate(
+                        eval_envs,
+                        trainer,
+                        q_network,
+                        action_prototypes,
+                        obs_normalizer,
+                        device,
+                    )
+                    last_eval_metrics = eval_metrics
+                else:
+                    eval_metrics = last_eval_metrics
+                    eval_symbol_usage = None
+
+                postfix = {
+                    "return": format_metric_value(train_metrics.get("collect/return_mean", 0.0)),
+                    "q": format_metric_value(train_metrics.get("q/loss", 0.0)),
+                }
+                if should_eval:
+                    postfix["eval"] = format_metric_value(eval_metrics.get("eval/return_mean", 0.0))
+                epoch_iter.set_postfix(postfix)
+
+                should_log = (epoch % self.log_every == 0) or (epoch == self.epochs - 1)
+                if should_log:
+                    log_epoch(
+                        header="MacroRL",
+                        epoch=epoch,
+                        train_metrics=train_metrics,
+                        eval_metrics=eval_metrics,
+                        train_symbol_usage=train_symbol_usage,
+                        eval_symbol_usage=eval_symbol_usage,
+                        env_steps=env_steps,
+                        update_steps=update_steps,
+                        should_eval=should_eval,
+                        eval_every=self.eval_every,
+                    )
+
+                self._save_checkpoint_if_needed(
+                    epoch=epoch,
+                    output_dir=output_dir,
+                    trainer=trainer,
+                    q_network=q_network,
+                    target_q_network=target_q_network,
+                    q_optimizer=q_optimizer,
+                    replay=replay,
+                    obs_normalizer=obs_normalizer,
+                    action_prototypes=action_prototypes,
+                    env_steps=env_steps,
+                    update_steps=update_steps,
+                    train_metrics=train_metrics,
+                    eval_metrics=eval_metrics,
+                )
+
+                last_train_metrics = train_metrics
+
+            final_path = output_dir / "macro_rl_final.pt"
+            _save_macro_rl_checkpoint(
+                final_path,
+                _build_checkpoint_payload(
+                    self,
+                    trainer,
+                    q_network,
+                    target_q_network,
+                    q_optimizer,
+                    replay,
+                    obs_normalizer,
+                    action_prototypes,
+                    epoch=last_epoch,
+                    env_steps=env_steps,
+                    update_steps=update_steps,
+                    train_metrics=last_train_metrics,
+                    eval_metrics=last_eval_metrics,
+                ),
+            )
+            _write_macro_rl_run_artifacts(
+                output_dir=output_dir,
+                resolved_config=resolved_config,
+                cli_overrides=cli_overrides,
+                launch_argv=launch_argv,
+                status="completed",
+                started_at_utc=started_at_utc,
+                config_path=config_path,
+                device=device,
+                obs_dim=obs_dim,
+                act_dim=act_dim,
+                model_summary=model_summary,
+                env_steps=env_steps,
+                update_steps=update_steps,
+                last_epoch=last_epoch,
+                final_checkpoint=final_path,
                 train_metrics=last_train_metrics,
                 eval_metrics=last_eval_metrics,
-            ),
-        )
-        print(f"Final checkpoint saved to {final_path}")
+            )
+            print(f"Final checkpoint saved to {final_path}")
+        except Exception as exc:
+            _write_macro_rl_run_artifacts(
+                output_dir=output_dir,
+                resolved_config=resolved_config,
+                cli_overrides=cli_overrides,
+                launch_argv=launch_argv,
+                status="failed",
+                started_at_utc=started_at_utc,
+                config_path=config_path,
+                device=device,
+                obs_dim=obs_dim if obs_dim > 0 else None,
+                act_dim=act_dim if act_dim > 0 else None,
+                model_summary=model_summary,
+                env_steps=env_steps,
+                update_steps=update_steps,
+                last_epoch=last_epoch,
+                train_metrics=last_train_metrics or None,
+                eval_metrics=last_eval_metrics or None,
+                error=exc,
+            )
+            raise
 
 
 CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "train_macro_rl.yml"
@@ -894,16 +1161,18 @@ CONFIG_PATH = Path(__file__).resolve().parents[3] / "config" / "train_macro_rl.y
 
 def main() -> None:
     """CLI entrypoint for standalone macro RL."""
-    import sys
-
     from hydra.utils import instantiate
-    from omegaconf import OmegaConf
 
     cfg = OmegaConf.load(CONFIG_PATH)
     if len(sys.argv) > 1:
         cli = OmegaConf.from_cli(sys.argv[1:])
         cfg = OmegaConf.merge(cfg, cli)
     runner: MacroRLRunner = instantiate(cfg)
+    runner._resolved_config = OmegaConf.to_container(cfg, resolve=True)
+    runner._cli_overrides = list(sys.argv[1:])
+    runner._launch_argv = list(sys.argv)
+    runner._config_path = str(CONFIG_PATH)
+    runner._run_started_at_utc = _utc_now_iso()
     runner.run()
 
 

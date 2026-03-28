@@ -10,10 +10,14 @@ from torch import nn
 
 
 def fibonacci_sphere(n: int) -> torch.Tensor:
-    """Generate *n* quasi-uniformly spaced points on S² (Fibonacci lattice).
+    """Generate *n* quasi-uniformly spaced points on S² via a Fibonacci lattice.
 
-    Returns a [n, 3] tensor on the unit sphere. For D != 3, falls back to
-    ``_spread_directions``.
+    Args:
+        n: Number of points to place on the unit sphere.
+
+    Returns:
+        torch.Tensor: A tensor of shape ``[n, 3]`` where each row is a unit
+            vector on S².
     """
     golden = (1 + math.sqrt(5)) / 2
     indices = torch.arange(n, dtype=torch.float32)
@@ -28,8 +32,16 @@ def fibonacci_sphere(n: int) -> torch.Tensor:
 def spread_directions(n: int, dim: int) -> torch.Tensor:
     """Generate *n* spread-out unit directions in R^dim.
 
-    Uses the Fibonacci sphere for dim == 3. Otherwise generates random
+    Uses the Fibonacci sphere for ``dim == 3``. Otherwise generates random
     directions and iteratively repels them (simple Lloyd-like relaxation).
+
+    Args:
+        n: Number of unit directions to generate.
+        dim: Dimensionality of the ambient space.
+
+    Returns:
+        torch.Tensor: A tensor of shape ``[n, dim]`` whose rows are unit
+            vectors approximately maximally spread on the unit sphere.
     """
     if dim == 3:
         return fibonacci_sphere(n)
@@ -55,11 +67,21 @@ def spread_codebook(
     """Initialize codebook entries spread around the local origin.
 
     Each chart gets ``codes_per_chart`` codes arranged as quasi-uniform
-    directions scaled to ``radius`` in the Poincaré ball.  This avoids the
+    directions scaled to ``radius`` in the Poincare ball.  This avoids the
     usual failure mode where all codes start near zero and instantly collapse
     to a single nearest-neighbor.
 
-    Returns [num_charts, codes_per_chart, dim].
+    Args:
+        num_charts: Number of charts (first dimension of the codebook).
+        codes_per_chart: Number of code vectors per chart.
+        dim: Dimensionality of each code vector.
+        radius: Maximum norm for the initialized code vectors. Actual norms
+            are drawn uniformly from ``[radius / 2, radius]`` so that codes
+            are not confined to a thin shell.
+
+    Returns:
+        torch.Tensor: A tensor of shape ``[num_charts, codes_per_chart, dim]``
+            containing the initialized codebook entries.
     """
     cb = torch.zeros(num_charts, codes_per_chart, dim)
     for c in range(num_charts):
@@ -75,6 +97,28 @@ def resolve_bundle_params(
     latent_dim: int,
     bundle_size: int | None,
 ) -> tuple[int, int]:
+    """Resolve the bundle size and compute the number of bundles.
+
+    If ``bundle_size`` is not provided, it is inferred from ``hidden_dim`` and
+    ``latent_dim``: when ``latent_dim`` evenly divides ``hidden_dim`` the
+    bundle size equals ``latent_dim``; otherwise it defaults to 1.
+
+    Args:
+        hidden_dim: Total hidden dimensionality. Must be divisible by the
+            resolved ``bundle_size``.
+        latent_dim: Latent dimensionality used as a candidate for the bundle
+            size when ``bundle_size`` is ``None``.
+        bundle_size: Explicit bundle size. When ``None``, the value is
+            inferred automatically.
+
+    Returns:
+        tuple[int, int]: A tuple ``(bundle_size, num_bundles)`` where
+            ``num_bundles = hidden_dim // bundle_size``.
+
+    Raises:
+        ValueError: If the resolved ``bundle_size`` is not positive or if
+            ``hidden_dim`` is not divisible by ``bundle_size``.
+    """
     if bundle_size is None:
         if latent_dim > 0 and hidden_dim % latent_dim == 0:
             bundle_size = latent_dim
@@ -90,7 +134,19 @@ def resolve_bundle_params(
 
 
 def init_soft_equiv_layers(layers: nn.ModuleList) -> None:
-    """Initialize soft-equivariant layers to be purely equivariant (no mixing)."""
+    """Initialize soft-equivariant layers to be purely equivariant (no mixing).
+
+    Sets all ``mixing_weights`` in the given layers to zero so that each layer
+    starts as a strictly equivariant operation.
+
+    Args:
+        layers: A ``ModuleList`` of layers, each expected to have a
+            ``mixing_weights`` attribute that is either a single
+            ``torch.Tensor`` or a nested iterable of tensors.
+
+    Returns:
+        None
+    """
     with torch.no_grad():
         for layer in layers:
             if isinstance(layer.mixing_weights, torch.Tensor):

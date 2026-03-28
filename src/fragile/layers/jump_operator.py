@@ -24,6 +24,19 @@ class FactorizedJumpOperator(nn.Module):
         use_spectral: bool = True,
         use_mobius: bool = True,
     ) -> None:
+        """Initialize the factorized jump operator.
+
+        Sets up chart centers in the Poincare ball and learnable rotation
+        matrices (initialized as identity) for gauge transformations.
+
+        Args:
+            num_charts: Number of charts in the atlas.
+            latent_dim: Dimensionality of the latent (nuisance) space.
+            curvature: Curvature parameter of the Poincare ball model.
+            global_rank: Legacy argument, ignored. Kept for API compatibility.
+            use_spectral: Legacy argument, ignored. Kept for API compatibility.
+            use_mobius: Legacy argument, ignored. Kept for API compatibility.
+        """
         super().__init__()
         self.num_charts = num_charts
         self.latent_dim = latent_dim
@@ -38,17 +51,56 @@ class FactorizedJumpOperator(nn.Module):
         )
 
     def _project_to_ball(self, z: torch.Tensor, max_norm: float = 0.99) -> torch.Tensor:
-        """Project points to interior of the Poincaré ball."""
+        """Project points to the interior of the Poincare ball.
+
+        Clamps the norm of each point so that it does not exceed ``max_norm``,
+        keeping all representations strictly inside the ball boundary.
+
+        Args:
+            z: Tensor of shape ``[..., D]`` containing points in the latent space.
+            max_norm: Maximum allowed norm for the projected points. Points with
+                a larger norm are rescaled to this value.
+
+        Returns:
+            torch.Tensor: Tensor of the same shape as ``z`` with all points
+                having norm at most ``max_norm``.
+        """
         norm = z.norm(dim=-1, keepdim=True)
         return torch.where(norm > max_norm, z * max_norm / norm, z)
 
     def lift_to_global(self, z_n: torch.Tensor, chart_idx: torch.Tensor) -> torch.Tensor:
-        """Lift local coordinates to global frame via Möbius subtraction."""
+        """Lift local chart coordinates to the global frame via Mobius subtraction.
+
+        Computes ``(-c_source) oplus z_n`` to translate points from a local
+        chart centred at ``c_source`` back to the origin of the Poincare ball.
+
+        Args:
+            z_n: Tensor of shape ``[B, D]`` containing local nuisance coordinates.
+            chart_idx: Tensor of shape ``[B]`` with integer indices selecting the
+                source chart for each sample.
+
+        Returns:
+            torch.Tensor: Tensor of shape ``[B, D]`` with coordinates expressed
+                in the global (origin-centred) frame.
+        """
         c_source = self._project_to_ball(self.chart_centers[chart_idx])
         return mobius_add(-c_source, z_n, c=self.curvature)
 
     def project_from_global(self, h: torch.Tensor, chart_idx: torch.Tensor) -> torch.Tensor:
-        """Project global coordinates to local chart via Möbius addition."""
+        """Project global coordinates into a local chart via Mobius addition.
+
+        Computes ``c_target oplus h`` to translate points from the global
+        (origin-centred) frame into the local chart centred at ``c_target``.
+
+        Args:
+            h: Tensor of shape ``[B, D]`` containing coordinates in the global frame.
+            chart_idx: Tensor of shape ``[B]`` with integer indices selecting the
+                target chart for each sample.
+
+        Returns:
+            torch.Tensor: Tensor of shape ``[B, D]`` with coordinates expressed
+                in the selected local chart.
+        """
         c_target = self._project_to_ball(self.chart_centers[chart_idx])
         return mobius_add(c_target, h, c=self.curvature)
 
@@ -58,17 +110,28 @@ class FactorizedJumpOperator(nn.Module):
         source_idx: torch.Tensor,
         target_idx: torch.Tensor,
     ) -> torch.Tensor:
-        """Apply chart transition using Möbius transformations.
+        """Apply a chart transition using Mobius transformations.
 
-        Implements: z_target = c_target ⊕ R((-c_source) ⊕ z_source)
+        Implements the transition map:
+        ``z_target = c_target oplus R_target R_source^T ((-c_source) oplus z_source)``
+
+        The procedure is:
+        1. Mobius-subtract the source centre to move to the origin.
+        2. Apply a gauge rotation (source -> target) at the origin.
+        3. Mobius-add the target centre to land in the target chart.
 
         Args:
-            z_n: [B, D] source nuisance coordinates
-            source_idx: [B] source chart indices
-            target_idx: [B] target chart indices
+            z_n: Tensor of shape ``[B, D]`` with source nuisance coordinates
+                inside the Poincare ball.
+            source_idx: Tensor of shape ``[B]`` with integer indices of the
+                source charts.
+            target_idx: Tensor of shape ``[B]`` with integer indices of the
+                target charts.
 
         Returns:
-            z_out: [B, D] target nuisance coordinates
+            torch.Tensor: Tensor of shape ``[B, D]`` with the transformed
+                nuisance coordinates in the target chart, projected to lie
+                inside the Poincare ball.
         """
         source_idx = source_idx.to(device=z_n.device, dtype=torch.long)
         target_idx = target_idx.to(device=z_n.device, dtype=torch.long)
@@ -93,11 +156,21 @@ class FactorizedJumpOperator(nn.Module):
         return self._project_to_ball(z_out)
 
     def get_transition_matrix(self, source: int, target: int) -> tuple[torch.Tensor, torch.Tensor]:
-        """Return affine map (M, b) for chart transition.
+        """Return the affine map ``(M, b)`` approximating a chart transition.
+
+        Computes the linear map ``M = A_target @ B_source`` and the bias
+        ``b = A_target @ c_source + d_target`` that together define the
+        first-order affine approximation of the transition from ``source`` to
+        ``target``.
+
+        Args:
+            source: Integer index of the source chart.
+            target: Integer index of the target chart.
 
         Returns:
-            M: [D, D] linear map
-            b: [D] bias
+            tuple[torch.Tensor, torch.Tensor]: A 2-tuple where the first
+                element is ``M`` of shape ``[D, D]`` (the linear map) and the
+                second element is ``b`` of shape ``[D]`` (the bias vector).
         """
         if isinstance(self.encoders[source], SpectralLinear):
             b_src = self.encoders[source]._spectral_normalized_weight(update_u=False)
@@ -122,7 +195,40 @@ def compute_jump_consistency_loss(
     max_pairs_per_batch: int = 1024,
     metric: ConformalMetric | None = None,
 ) -> tuple[torch.Tensor, dict[str, float]]:
-    """Overlap consistency loss for jump operators."""
+    """Compute overlap consistency loss for jump operators.
+
+    For every sample that belongs to at least two charts (determined by
+    ``router_weights > overlap_threshold``), the function enumerates pairs of
+    overlapping charts and penalises the mismatch between the observed
+    coordinates in chart *j* and the coordinates predicted by applying the
+    jump operator from chart *i* to chart *j*.
+
+    When a ``metric`` is provided the squared error is weighted by the
+    average conformal factor of the two chart representations, giving a
+    geometry-aware loss.
+
+    Args:
+        z_n_by_chart: Tensor of shape ``[B, K, D]`` containing per-chart
+            nuisance coordinates for each sample, where *K* is the number
+            of charts and *D* is the latent dimension.
+        router_weights: Tensor of shape ``[B, K]`` with soft routing
+            weights indicating each sample's membership in each chart.
+        jump_operator: The :class:`FactorizedJumpOperator` used to predict
+            the transition between charts.
+        overlap_threshold: Minimum router weight for a sample to be
+            considered inside a chart.
+        max_pairs_per_batch: Upper bound on the number of chart pairs
+            evaluated per batch to limit computational cost.
+        metric: Optional :class:`ConformalMetric` used to weight the
+            consistency error by the local conformal factor. When ``None``
+            a plain MSE is used.
+
+    Returns:
+        tuple[torch.Tensor, dict[str, float]]: A 2-tuple where the first
+            element is the scalar mean consistency loss and the second is a
+            diagnostics dictionary with keys ``"num_overlaps"``,
+            ``"mean_error"``, and ``"points_in_overlap"``.
+    """
     device = z_n_by_chart.device
 
     in_chart = router_weights > overlap_threshold

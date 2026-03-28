@@ -51,15 +51,30 @@ class SpectralLinear(nn.Module):
             self.register_parameter("bias", None)
 
         self.register_buffer("_u", F.normalize(torch.randn(out_features), dim=0))
+        self.register_buffer(
+            "_cached_weight",
+            torch.empty(out_features, in_features),
+            persistent=False,
+        )
+        self.register_buffer(
+            "_cache_valid",
+            torch.tensor(False, dtype=torch.bool),
+            persistent=False,
+        )
         self.reset_parameters()
 
     def reset_parameters(self) -> None:
-        """Initialize weights with Kaiming uniform and bias with fan-in bounds."""
+        """Initialize weights with Kaiming uniform and bias with fan-in bounds.
+
+        Returns:
+            None
+        """
         nn.init.kaiming_uniform_(self.weight, a=math.sqrt(5))
         if self.bias is not None:
             fan_in, _ = nn.init._calculate_fan_in_and_fan_out(self.weight)
             bound = 1 / math.sqrt(fan_in) if fan_in > 0 else 0.0
             nn.init.uniform_(self.bias, -bound, bound)
+        self._cache_valid.zero_()
 
     def _spectral_normalized_weight(self, update_u: bool = True) -> torch.Tensor:
         """Return the non-expansive weight used by :meth:`forward`.
@@ -87,14 +102,44 @@ class SpectralLinear(nn.Module):
         sigma = torch.dot(u, torch.mv(weight, v)).abs()
         return weight / sigma.clamp(min=1.0)
 
+    @torch.no_grad()
+    def refresh_eval_cache(self) -> None:
+        """Refresh the cached spectrally normalized weight for eval forwards."""
+        cached = self._spectral_normalized_weight(update_u=False)
+        self._cached_weight.copy_(cached)
+        self._cache_valid.fill_(True)
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply the spectrally clamped affine map to ``x``."""
+        """Apply the spectrally clamped affine map to ``x``.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape ``[*, in_features]``.
+
+        Returns:
+            torch.Tensor: Output tensor of shape ``[*, out_features]`` produced
+                by the spectrally normalized linear transformation.
+        """
         # Enforce non-expansive linear map (Lipschitz <= 1) for stability/causality.
-        weight = self._spectral_normalized_weight(update_u=self.training)
+        if self.training:
+            weight = self._spectral_normalized_weight(update_u=True)
+        else:
+            if not bool(self._cache_valid):
+                self.refresh_eval_cache()
+            weight = self._cached_weight
         return F.linear(x, weight, self.bias)
 
+    def train(self, mode: bool = True) -> SpectralLinear:
+        """Invalidate the eval cache whenever the training mode changes."""
+        self._cache_valid.zero_()
+        return super().train(mode)
+
     def extra_repr(self) -> str:
-        """Return a compact summary for ``nn.Module`` string representations."""
+        """Return a compact summary for ``nn.Module`` string representations.
+
+        Returns:
+            str: A comma-separated string listing ``in_features``,
+                ``out_features``, ``bias``, and ``n_power_iterations``.
+        """
         return (
             f"in_features={self.in_features}, out_features={self.out_features}, "
             f"bias={self.bias is not None}, n_power_iterations={self.n_power_iterations}"
@@ -176,7 +221,16 @@ class NormGate(nn.Module):
         raise ValueError(msg)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """Apply norm-based gating to each bundle and preserve input layout."""
+        """Apply norm-based gating to each bundle and preserve input layout.
+
+        Args:
+            x (torch.Tensor): Input tensor of shape ``[batch, n_bundles *
+                bundle_size]`` or ``[batch, n_bundles, bundle_size]``.
+
+        Returns:
+            torch.Tensor: Gated tensor with the same shape as ``x``, where each
+                bundle vector has been scaled by its norm-dependent gate value.
+        """
         bundled, flatten = self._bundle_view(x)
         # Bundle energy acts as a gauge-invariant radial coordinate.
         if self.smooth_norm_eps > 0.0:
@@ -200,7 +254,14 @@ class NormGatedGELU(NormGate):
         n_bundles: int,
         smooth_norm_eps: float = 1e-6,
     ) -> None:
-        """Create a :class:`NormGate` that uses :func:`torch.nn.functional.gelu`."""
+        """Create a :class:`NormGate` that uses :func:`torch.nn.functional.gelu`.
+
+        Args:
+            bundle_size (int): Width of each bundle vector.
+            n_bundles (int): Number of bundles expected in each sample.
+            smooth_norm_eps (float): Smoothing constant added under the square
+                root when computing norms.
+        """
         super().__init__(
             bundle_size=bundle_size,
             n_bundles=n_bundles,
@@ -297,6 +358,16 @@ class IsotropicBlock(nn.Module):
         This is the single-block variant of :meth:`_spectral_normalize_block_bank`.
         The current forward path normalizes the whole bank at once, but this
         helper documents and exposes the per-bundle logic directly.
+
+        Args:
+            weight (torch.Tensor): A square weight matrix of shape
+                ``[bundle_size, bundle_size]`` for the bundle at position ``idx``.
+            idx (int): Index into the ``_block_u`` buffer selecting which cached
+                left singular-vector estimate to use and update.
+
+        Returns:
+            torch.Tensor: The spectrally normalized weight matrix with operator
+                norm at most ``1``, having the same shape as ``weight``.
         """
         u = self._block_u[idx]
         with torch.no_grad():
@@ -360,7 +431,12 @@ class IsotropicBlock(nn.Module):
         return gated.reshape(batch, self.n_bundles * self.bundle_size)
 
     def extra_repr(self) -> str:
-        """Return the key configuration fields for module summaries."""
+        """Return the key configuration fields for module summaries.
+
+        Returns:
+            str: A comma-separated string listing ``in_dim``, ``out_dim``,
+                ``bundle_size``, and ``exact``.
+        """
         return (
             f"in_dim={self.in_dim}, out_dim={self.out_dim}, bundle_size={self.bundle_size}, "
             f"exact={self.exact}"
@@ -501,6 +577,21 @@ class SoftEquivariantLayer(nn.Module):
         This helper is only valid when all bundle dimensions are equal. It
         reshapes flat inputs to ``[batch, n_bundles, bundle_dim]`` and preserves
         already stacked inputs.
+
+        Args:
+            z (torch.Tensor): Either a flat tensor of shape
+                ``[batch, total_dim]`` or a stacked tensor of shape
+                ``[batch, n_bundles, bundle_dim]``.
+
+        Returns:
+            tuple[torch.Tensor, bool]: A pair ``(bundled, was_stacked)`` where
+                ``bundled`` has shape ``[batch, n_bundles, bundle_dim]`` and
+                ``was_stacked`` indicates whether the input was already in
+                stacked form.
+
+        Raises:
+            ValueError: If bundle dimensions are heterogeneous, the tensor
+                rank is unsupported, or shape expectations are violated.
         """
         if self.bundle_dim is None:
             msg = "Bundle dimensions are heterogeneous; expected list-based access."
@@ -519,16 +610,47 @@ class SoftEquivariantLayer(nn.Module):
         raise ValueError(msg)
 
     def split_bundles(self, z: torch.Tensor) -> list[torch.Tensor]:
-        """Public wrapper that returns ``z`` split into bundle tensors."""
+        """Public wrapper that returns ``z`` split into bundle tensors.
+
+        Args:
+            z (torch.Tensor): Either a flat tensor of shape
+                ``[batch, total_dim]`` or a stacked tensor of shape
+                ``[batch, n_bundles, bundle_dim]``.
+
+        Returns:
+            list[torch.Tensor]: A list of ``n_bundles`` tensors, each of shape
+                ``[batch, bundle_dims[i]]``.
+        """
         bundles, _ = self._split_bundles(z)
         return bundles
 
     def cat_bundles(self, bundles: list[torch.Tensor]) -> torch.Tensor:
-        """Concatenate bundle tensors along the feature axis."""
+        """Concatenate bundle tensors along the feature axis.
+
+        Args:
+            bundles (list[torch.Tensor]): A list of ``n_bundles`` tensors, each
+                of shape ``[batch, bundle_dims[i]]``.
+
+        Returns:
+            torch.Tensor: A flat tensor of shape ``[batch, total_dim]`` formed
+                by concatenating all bundle tensors along the last dimension.
+        """
         return torch.cat(bundles, dim=-1)
 
     def _cat_bundles(self, bundles: list[torch.Tensor], stacked: bool) -> torch.Tensor:
-        """Reassemble bundle tensors to match the requested stacked/flat layout."""
+        """Reassemble bundle tensors to match the requested stacked/flat layout.
+
+        Args:
+            bundles (list[torch.Tensor]): A list of ``n_bundles`` tensors, each
+                of shape ``[batch, bundle_dims[i]]``.
+            stacked (bool): If ``True``, stack bundles into a rank-3 tensor of
+                shape ``[batch, n_bundles, bundle_dim]``; otherwise concatenate
+                into a flat tensor of shape ``[batch, total_dim]``.
+
+        Returns:
+            torch.Tensor: The reassembled tensor in either stacked or flat
+                layout depending on ``stacked``.
+        """
         if stacked:
             return torch.stack(bundles, dim=1)
         return torch.cat(bundles, dim=-1)
@@ -592,7 +714,12 @@ class SoftEquivariantLayer(nn.Module):
         return z + z_out
 
     def l1_loss(self) -> torch.Tensor:
-        """Return the L1 penalty over all cross-bundle mixing weights."""
+        """Return the L1 penalty over all cross-bundle mixing weights.
+
+        Returns:
+            torch.Tensor: A scalar tensor containing the sum of absolute values
+                of all elements in the mixing weight parameters.
+        """
         if isinstance(self.mixing_weights, torch.Tensor):
             return torch.sum(torch.abs(self.mixing_weights))
         return sum(
@@ -602,7 +729,12 @@ class SoftEquivariantLayer(nn.Module):
         )
 
     def mixing_strength(self) -> float:
-        """Return the Frobenius norm of all mixing weights as a Python float."""
+        """Return the Frobenius norm of all mixing weights as a Python float.
+
+        Returns:
+            float: The square root of the sum of squared elements across all
+                mixing weight parameters.
+        """
         if isinstance(self.mixing_weights, torch.Tensor):
             total_norm_sq = torch.sum(self.mixing_weights**2)
             return torch.sqrt(total_norm_sq).item()

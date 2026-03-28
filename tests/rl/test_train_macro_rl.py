@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib
+import json
 from pathlib import Path
 
 from hydra.utils import instantiate
@@ -114,6 +115,8 @@ def test_macro_rl_config_loads_and_instantiates() -> None:
     runner = instantiate(cfg)
     assert isinstance(runner, train_macro_rl_module.MacroRLRunner)
     assert runner.domain == "cartpole"
+    assert runner.task == "balance"
+    assert runner.output_dir == "outputs/rl/macro-cartpole-balance"
     assert runner.agent.obs_encoder.num_charts == 8
     assert runner.agent.act_encoder.input_affine_enabled is True
     assert runner.gamma == 0.99
@@ -141,6 +144,10 @@ def test_macro_rl_runner_smoke_writes_checkpoints_and_logs(
     output_dir = Path(runner.output_dir)
     assert (output_dir / "macro_rl_epoch_00000.pt").exists()
     assert (output_dir / "macro_rl_final.pt").exists()
+    assert (output_dir / "run_metadata.json").exists()
+    assert (output_dir / ".hydra" / "config.yaml").exists()
+    assert (output_dir / ".hydra" / "hydra.yaml").exists()
+    assert (output_dir / ".hydra" / "overrides.yaml").exists()
     assert "Train metrics:" in output
     assert "Eval metrics:" in output
     assert "collect:" in output
@@ -154,6 +161,12 @@ def test_macro_rl_runner_smoke_writes_checkpoints_and_logs(
     assert "q_state" in ckpt
     assert "replay_buffer" in ckpt
     assert int(ckpt["epoch"]) == 0
+    metadata = json.loads((output_dir / "run_metadata.json").read_text())
+    assert metadata["status"] == "completed"
+    assert metadata["dimensions"] == {"obs_dim": 3, "act_dim": 2}
+    assert metadata["resolved_config"]["epochs"] == 1
+    saved_cfg = OmegaConf.load(output_dir / ".hydra" / "config.yaml")
+    assert int(saved_cfg.epochs) == 1
 
 
 def test_macro_rl_cli_registers_command() -> None:

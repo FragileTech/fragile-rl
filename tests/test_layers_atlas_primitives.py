@@ -2,6 +2,8 @@ import torch
 
 from fragile.layers import (
     AttentiveAtlasEncoder,
+    SingleChard,
+    SingleChardEncoder,
     TopoEncoder,
     TopologicalDecoder,
 )
@@ -61,6 +63,46 @@ def test_topological_decoder_shapes() -> None:
     assert isinstance(aux_losses, dict)
 
 
+def test_single_chard_encoder_shapes() -> None:
+    torch.manual_seed(21)
+    encoder = SingleChardEncoder(
+        input_dim=3,
+        hidden_dim=16,
+        latent_dim=2,
+        codes_per_chart=7,
+    )
+    x = torch.randn(4, 3)
+    (
+        k_chart,
+        k_code,
+        z_n,
+        z_tex,
+        router_weights,
+        z_geo,
+        vq_loss,
+        indices_stack,
+        z_n_all,
+        c_bar,
+        v_local,
+        z_q,
+    ) = encoder(x)
+
+    assert k_chart.shape == (4,)
+    assert torch.equal(k_chart, torch.zeros_like(k_chart))
+    assert k_code.shape == (4,)
+    assert z_n.shape == (4, 2)
+    assert z_tex.shape == (4, 2)
+    assert router_weights.shape == (4, 1)
+    assert torch.allclose(router_weights, torch.ones_like(router_weights))
+    assert z_geo.shape == (4, 2)
+    assert vq_loss.ndim == 0
+    assert indices_stack.shape == (4, 1)
+    assert z_n_all.shape == (4, 1, 2)
+    assert c_bar.shape == (4, 2)
+    assert v_local.shape == (4, 2)
+    assert z_q.shape == (4, 2)
+
+
 def test_topoencoder_forward_and_losses() -> None:
     torch.manual_seed(2)
     model = TopoEncoder(
@@ -86,6 +128,36 @@ def test_topoencoder_forward_and_losses() -> None:
     consistency = model.compute_consistency_loss(enc_weights, dec_weights)
     assert consistency.ndim == 0
     assert model.compute_perplexity(K_chart) > 0.0
+
+
+def test_single_chard_forward_and_losses() -> None:
+    torch.manual_seed(22)
+    model = SingleChard(
+        input_dim=3,
+        hidden_dim=16,
+        latent_dim=2,
+        codes_per_chart=7,
+    )
+    x = torch.randn(5, 3)
+    x_recon, vq_loss, enc_weights, dec_weights, k_chart, z_geo, z_n, c_bar, aux_losses = model(x)
+
+    assert x_recon.shape == (5, 3)
+    assert vq_loss.ndim == 0
+    assert enc_weights.shape == (5, 1)
+    assert dec_weights.shape == (5, 1)
+    assert torch.allclose(enc_weights, torch.ones_like(enc_weights))
+    assert torch.allclose(dec_weights, torch.ones_like(dec_weights))
+    assert k_chart.shape == (5,)
+    assert torch.equal(k_chart, torch.zeros_like(k_chart))
+    assert z_geo.shape == (5, 2)
+    assert z_n.shape == (5, 2)
+    assert c_bar.shape == (5, 2)
+    assert isinstance(aux_losses, dict)
+
+    consistency = model.compute_consistency_loss(enc_weights, dec_weights)
+    assert consistency.ndim == 0
+    assert consistency.item() == 0.0
+    assert model.compute_perplexity(k_chart) == 1.0
 
 
 def test_decoder_film_conditioning() -> None:

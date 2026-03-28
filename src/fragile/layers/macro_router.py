@@ -24,7 +24,18 @@ from fragile.layers.primitives import SpectralLinear
 
 
 def _normalize_probs(probs: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
-    """Normalize a non-negative tensor along the last axis."""
+    """Normalize a non-negative tensor along the last axis.
+
+    Args:
+        probs: Non-negative tensor of arbitrary shape to be normalized along
+            its last dimension.
+        eps: Small constant to clamp the denominator and avoid division by
+            zero.
+
+    Returns:
+        torch.Tensor: Tensor of the same shape as ``probs`` whose last
+            dimension sums to 1.
+    """
     return probs / probs.sum(dim=-1, keepdim=True).clamp(min=eps)
 
 
@@ -35,7 +46,22 @@ def _routing_temperature(
     tau_min: float = 1e-2,
     tau_denom_min: float = 1e-3,
 ) -> torch.Tensor:
-    """Use the same geometry-derived temperature schedule as the chart router."""
+    """Compute a geometry-derived temperature schedule for the chart router.
+
+    The temperature decreases as points approach the boundary of the Poincare
+    ball, sharpening routing distributions in high-curvature regions.
+
+    Args:
+        z: Points in the Poincare ball of shape ``[..., latent_dim]``.
+        latent_dim: Dimensionality of the hyperbolic space, used for scaling.
+        tau_min: Lower clamp on the returned temperature values.
+        tau_denom_min: Lower clamp on ``(1 - ||z||^2)`` to avoid division
+            instabilities near the ball boundary.
+
+    Returns:
+        torch.Tensor: Per-point temperatures of shape ``[...]`` (the last
+            dimension is reduced).
+    """
     r2 = (z**2).sum(dim=-1)
     denom = (1.0 - r2).clamp(min=tau_denom_min)
     tau = math.sqrt(float(latent_dim)) * denom / 2.0
@@ -43,9 +69,22 @@ def _routing_temperature(
 
 
 class BeliefGeometryEncoder(nn.Module):
-    """Summarize a soft symbolic belief using geometry-derived token features."""
+    """Summarize a soft symbolic belief using geometry-derived token features.
+
+    Combines probability-weighted token projections with a mean tangent
+    projection to produce a fixed-size summary of a belief distribution over
+    atlas symbols.
+    """
 
     def __init__(self, latent_dim: int, hidden_dim: int) -> None:
+        """Initialize the BeliefGeometryEncoder.
+
+        Args:
+            latent_dim: Dimensionality of the tangent-space vectors for each
+                atlas symbol.
+            hidden_dim: Dimensionality of the internal hidden representations
+                and the output summary vector.
+        """
         super().__init__()
         self.latent_dim = int(latent_dim)
         self.hidden_dim = int(hidden_dim)
@@ -68,7 +107,30 @@ class BeliefGeometryEncoder(nn.Module):
         *,
         eps: float = 1e-8,
     ) -> dict[str, torch.Tensor]:
-        """Encode a soft symbolic belief against the atlas symbol geometry."""
+        """Encode a soft symbolic belief against the atlas symbol geometry.
+
+        Args:
+            state_probs: Soft probability distribution over symbols of shape
+                ``[..., num_symbols]``. Will be L1-normalized internally.
+            state_tangent_points: Tangent-space coordinates for each atlas
+                symbol of shape ``[num_symbols, latent_dim]``.
+            eps: Small constant used when normalizing ``state_probs`` to avoid
+                division by zero.
+
+        Returns:
+            dict[str, torch.Tensor]: Dictionary with keys:
+                - ``"summary"``: Fused belief summary of shape
+                  ``[..., hidden_dim]``.
+                - ``"expected_tangent"``: Probability-weighted mean tangent
+                  vector of shape ``[..., latent_dim]``.
+                - ``"token_bank"``: Projected token features of shape
+                  ``[num_symbols, hidden_dim]``.
+
+        Raises:
+            ValueError: If ``state_tangent_points`` is not 2-D, if the
+                number of symbols disagrees between inputs, or if the latent
+                dimension does not match ``self.latent_dim``.
+        """
         if state_tangent_points.dim() != 2:
             msg = "state_tangent_points must have shape [num_symbols, latent_dim]."
             raise ValueError(msg)
@@ -93,13 +155,27 @@ class BeliefGeometryEncoder(nn.Module):
 
 
 class NextStateQueryPredictor(nn.Module):
-    """Fuse observation and action belief summaries into a next-state query."""
+    """Fuse observation and action belief summaries into a next-state query.
+
+    Takes the observation and action belief summaries produced by
+    :class:`BeliefGeometryEncoder` and predicts a query point on the
+    observation Poincare manifold that represents the expected next state.
+    """
 
     def __init__(
         self,
         hidden_dim: int,
         obs_latent_dim: int,
     ) -> None:
+        """Initialize the NextStateQueryPredictor.
+
+        Args:
+            hidden_dim: Dimensionality of the belief summaries produced by
+                :class:`BeliefGeometryEncoder` and of the internal context
+                representation.
+            obs_latent_dim: Dimensionality of the observation manifold where
+                the output query point lives.
+        """
         super().__init__()
         self.hidden_dim = int(hidden_dim)
         self.obs_latent_dim = int(obs_latent_dim)
@@ -116,7 +192,32 @@ class NextStateQueryPredictor(nn.Module):
         obs_summary: torch.Tensor,
         act_summary: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Predict a next observation query point in the observation manifold."""
+        """Predict a next observation query point in the observation manifold.
+
+        The observation and action summaries are fused via concatenation of
+        their sum, difference, and element-wise product, then projected to a
+        tangent vector which is mapped onto the Poincare ball.
+
+        Args:
+            obs_summary: Observation belief summary of shape
+                ``[..., hidden_dim]``.
+            act_summary: Action belief summary of shape
+                ``[..., hidden_dim]``. Must have the same shape as
+                ``obs_summary``.
+
+        Returns:
+            dict[str, torch.Tensor]: Dictionary with keys:
+                - ``"context"``: Fused context vector of shape
+                  ``[..., hidden_dim]``, used downstream by the routers.
+                - ``"query_tangent"``: Predicted tangent vector of shape
+                  ``[..., obs_latent_dim]``.
+                - ``"query_point"``: Predicted query point projected onto the
+                  Poincare ball of shape ``[..., obs_latent_dim]``.
+
+        Raises:
+            ValueError: If ``obs_summary`` and ``act_summary`` do not have the
+                same shape.
+        """
         if obs_summary.shape != act_summary.shape:
             msg = "obs_summary and act_summary must have the same shape."
             raise ValueError(msg)
@@ -140,7 +241,11 @@ class NextStateQueryPredictor(nn.Module):
 
 
 class ChartTransitionRouter(nn.Module):
-    """Score next-chart probabilities against the real observation chart centers."""
+    """Score next-chart probabilities against the real observation chart centers.
+
+    Combines hyperbolic distance-based logits with learned context-key feature
+    logits to produce a soft distribution over observation charts.
+    """
 
     def __init__(
         self,
@@ -151,6 +256,20 @@ class ChartTransitionRouter(nn.Module):
         tau_min: float = 1e-2,
         tau_denom_min: float = 1e-3,
     ) -> None:
+        """Initialize the ChartTransitionRouter.
+
+        Args:
+            latent_dim: Dimensionality of the Poincare ball where chart centers
+                and query points live.
+            context_dim: Dimensionality of the context vector produced by
+                :class:`NextStateQueryPredictor`.
+            feature_scale: Multiplicative weight for the learned feature-based
+                logit term added to the geometric distance logits.
+            tau_min: Lower clamp on the geometry-derived softmax temperature.
+            tau_denom_min: Lower clamp on ``(1 - ||z||^2)`` inside the
+                temperature computation to prevent instabilities near the ball
+                boundary.
+        """
         super().__init__()
         self.latent_dim = int(latent_dim)
         self.context_dim = int(context_dim)
@@ -166,7 +285,36 @@ class ChartTransitionRouter(nn.Module):
         context: torch.Tensor,
         chart_centers: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Compute soft next-chart probabilities from a geometry-aware query."""
+        """Compute soft next-chart probabilities from a geometry-aware query.
+
+        Logits are the sum of a temperature-scaled negative hyperbolic distance
+        term and a learned bilinear feature term, followed by a softmax over
+        charts.
+
+        Args:
+            query_point: Predicted next-state query in the Poincare ball of
+                shape ``[..., latent_dim]``.
+            context: Context vector from :class:`NextStateQueryPredictor` of
+                shape ``[..., context_dim]``. Must share the same leading
+                dimensions as ``query_point``.
+            chart_centers: Observation chart center embeddings of shape
+                ``[num_charts, latent_dim]``.
+
+        Returns:
+            dict[str, torch.Tensor]: Dictionary with keys:
+                - ``"chart_logits"``: Raw logits of shape
+                  ``[..., num_charts]``.
+                - ``"chart_log_probs"``: Log-softmax probabilities of shape
+                  ``[..., num_charts]``.
+                - ``"chart_probs"``: Softmax probabilities of shape
+                  ``[..., num_charts]``.
+                - ``"chart_tau"``: Per-query temperature values of shape
+                  ``[...]``.
+
+        Raises:
+            ValueError: If leading dimensions of ``query_point`` and
+                ``context`` disagree, or if ``chart_centers`` is not 2-D.
+        """
         if query_point.shape[:-1] != context.shape[:-1]:
             msg = "query_point and context must share the same leading shape."
             raise ValueError(msg)
@@ -206,7 +354,12 @@ class ChartTransitionRouter(nn.Module):
 
 
 class ConditionalCodeRouter(nn.Module):
-    """Score chart-local codes given a predicted next observation query."""
+    """Score chart-local codes given a predicted next observation query.
+
+    For each chart, the query point is translated into the chart-local frame
+    via Mobius addition, and logits are computed from both hyperbolic distance
+    and learned feature similarity against the per-chart codebook entries.
+    """
 
     def __init__(
         self,
@@ -217,6 +370,20 @@ class ConditionalCodeRouter(nn.Module):
         tau_min: float = 1e-2,
         tau_denom_min: float = 1e-3,
     ) -> None:
+        """Initialize the ConditionalCodeRouter.
+
+        Args:
+            latent_dim: Dimensionality of the Poincare ball where chart centers
+                and codebook entries live.
+            context_dim: Dimensionality of the context vector produced by
+                :class:`NextStateQueryPredictor`.
+            feature_scale: Multiplicative weight for the learned feature-based
+                logit term added to the geometric distance logits.
+            tau_min: Lower clamp on the geometry-derived softmax temperature.
+            tau_denom_min: Lower clamp on ``(1 - ||z||^2)`` inside the
+                temperature computation to prevent instabilities near the ball
+                boundary.
+        """
         super().__init__()
         self.latent_dim = int(latent_dim)
         self.context_dim = int(context_dim)
@@ -233,7 +400,43 @@ class ConditionalCodeRouter(nn.Module):
         chart_centers: torch.Tensor,
         codebook: torch.Tensor,
     ) -> dict[str, torch.Tensor]:
-        """Compute chart-conditional next-code probabilities from atlas geometry."""
+        """Compute chart-conditional next-code probabilities from atlas geometry.
+
+        For every chart, the query is transported into the local frame via
+        Mobius addition of the negated chart center and scored against that
+        chart's codebook entries using temperature-scaled hyperbolic distance
+        plus a learned feature term.
+
+        Args:
+            query_point: Predicted next-state query in the Poincare ball of
+                shape ``[..., latent_dim]``.
+            context: Context vector from :class:`NextStateQueryPredictor` of
+                shape ``[..., context_dim]``. Must share the same leading
+                dimensions as ``query_point``.
+            chart_centers: Observation chart center embeddings of shape
+                ``[num_charts, latent_dim]``.
+            codebook: Per-chart codebook entries of shape
+                ``[num_charts, codes_per_chart, latent_dim]``.
+
+        Returns:
+            dict[str, torch.Tensor]: Dictionary with keys:
+                - ``"code_logits"``: Raw logits of shape
+                  ``[..., num_charts, codes_per_chart]``.
+                - ``"code_log_probs"``: Log-softmax probabilities of shape
+                  ``[..., num_charts, codes_per_chart]``.
+                - ``"code_probs"``: Softmax probabilities of shape
+                  ``[..., num_charts, codes_per_chart]``.
+                - ``"local_query"``: Chart-local query points of shape
+                  ``[..., num_charts, latent_dim]``.
+                - ``"code_tau"``: Per-query-per-chart temperature values of
+                  shape ``[..., num_charts]``.
+
+        Raises:
+            ValueError: If leading dimensions of ``query_point`` and
+                ``context`` disagree, if ``chart_centers`` is not 2-D, if
+                ``codebook`` is not 3-D, or if the number of charts disagrees
+                between ``chart_centers`` and ``codebook``.
+        """
         if query_point.shape[:-1] != context.shape[:-1]:
             msg = "query_point and context must share the same leading shape."
             raise ValueError(msg)

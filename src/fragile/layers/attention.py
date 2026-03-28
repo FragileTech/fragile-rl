@@ -192,7 +192,16 @@ class WilsonLineApprox(nn.Module):
 
     @staticmethod
     def _skew(basis: torch.Tensor) -> torch.Tensor:
-        """Return the antisymmetric part of a basis tensor."""
+        """Return the antisymmetric part of a basis tensor.
+
+        Args:
+            basis: A square matrix or batch of square matrices of shape
+                ``[..., d, d]``.
+
+        Returns:
+            The antisymmetric component ``(basis - basis^T) / 1``, with the
+            same shape as the input.
+        """
         return basis - basis.transpose(-1, -2)
 
     def _transport_matrices(self, z_query: torch.Tensor, z_key: torch.Tensor) -> torch.Tensor:
@@ -279,7 +288,19 @@ class ChristoffelQuery(nn.Module):
         self.W_Qzv = nn.Parameter(torch.zeros(d_out, d_latent, d_latent))
 
     def _init_christoffel(self, d_latent: int) -> None:
-        """Seed ``W_Q_gamma`` with a small structured Christoffel-like pattern."""
+        """Seed ``W_Q_gamma`` with a small structured Christoffel-like pattern.
+
+        The initialization sets entries to +0.01 where the output index matches
+        either spatial index, and subtracts 0.01 on the diagonal (i == j),
+        mimicking the symmetry structure of Christoffel symbols.
+
+        Args:
+            d_latent: Latent space dimensionality used to bound the loop ranges
+                over the spatial indices of ``W_Q_gamma``.
+
+        Returns:
+            None. The method modifies ``self.W_Q_gamma`` in-place.
+        """
         with torch.no_grad():
             for k in range(min(d_latent, self.W_Q_gamma.shape[0])):
                 for i in range(d_latent):
@@ -388,13 +409,23 @@ class AreaLawScreening(nn.Module):
     """Exponentially damp attention using a hyperbolic string-area proxy."""
 
     def __init__(self, config: GeodesicConfig) -> None:
-        """Initialize the learnable screening strength from ``config.g_s``."""
+        """Initialize the learnable screening strength from ``config.g_s``.
+
+        Args:
+            config: Geometry configuration whose ``g_s`` field sets the initial
+                screening coefficient via ``log_sigma = log(g_s ** 2)``.
+        """
         super().__init__()
         self.log_sigma = nn.Parameter(torch.log(torch.tensor(config.g_s**2)))
 
     @property
     def sigma(self) -> torch.Tensor:
-        """Return the positive screening coefficient."""
+        """Return the positive screening coefficient.
+
+        Returns:
+            A scalar tensor containing ``exp(log_sigma)``, guaranteed to be
+            positive.
+        """
         return torch.exp(self.log_sigma)
 
     def string_area(
@@ -724,7 +755,18 @@ class GeodesicCrossAttention(nn.Module):
     """
 
     def __init__(self, config: GeodesicConfig) -> None:
-        """Build the BAOAB sub-heads and feature encoders from ``config``."""
+        """Build the BAOAB sub-heads and feature encoders from ``config``.
+
+        Creates five covariant attention heads (B1, A1, O, A2, B2) and the
+        linear encoders that map latent positions, velocities, gradients, and
+        noise into the feature space consumed by those heads.
+
+        Args:
+            config: Shared hyperparameters providing model dimensions
+                (``d_model``, ``d_latent``), integrator constants (``dt``,
+                ``gamma_friction``, ``T_c``), and the learned-thermostat flag
+                (``use_learned_thermostat``, ``thermostat_residual_scale``).
+        """
         super().__init__()
         self.config = config
         self.dt = config.dt
@@ -846,7 +888,20 @@ class GeodesicCrossAttention(nn.Module):
         return z, p
 
     def _project_to_disk(self, z: torch.Tensor, max_norm: float = 0.999) -> torch.Tensor:
-        """Clamp latent positions to the interior of the Poincare ball."""
+        """Clamp latent positions to the interior of the Poincare ball.
+
+        Points whose norm exceeds ``max_norm`` are rescaled to lie on the
+        boundary; all other points are left unchanged.
+
+        Args:
+            z: Latent positions of shape ``[batch, d_latent]``.
+            max_norm: Maximum allowed Euclidean norm. Defaults to 0.999 to
+                keep points strictly inside the open unit ball.
+
+        Returns:
+            A tensor of the same shape as ``z`` with all norms at most
+            ``max_norm``.
+        """
         norm = torch.norm(z, dim=-1, keepdim=True).clamp(min=1e-8)
         return torch.where(norm > max_norm, z * max_norm / norm, z)
 
