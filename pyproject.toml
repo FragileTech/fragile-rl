@@ -55,7 +55,7 @@ dependencies = [
     "matplotlib",
     "pydantic",
     "scikit-learn",
-    "pip>=24.2",
+    "pip>=26.1",
     "hvplot>=0.11.0",
     "streamz>=0.6.4",
     "jupyter",
