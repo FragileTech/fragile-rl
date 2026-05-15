@@ -8,4 +8,4 @@ sphinx-tippy
 # Notebook dependencies
 numpy>=1.24.0
 matplotlib>=3.7.0
-pandas>=2.0.0
+pandas>=3.0.3
