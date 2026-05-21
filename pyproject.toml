@@ -61,7 +61,7 @@ dependencies = [
     "jupyter",
     "notebook",
     "e2cnn>=0.2.3",
-    "mlflow>=3.8.1",
+    "mlflow>=3.11.1",
     "plotly>=6.5.2",
     "torchvision>=0.21.0",
     "lerobot[smolvla]>=0.4.0",
